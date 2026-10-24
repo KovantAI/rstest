@@ -178,15 +178,7 @@ fn timeout_advice(
         .tests()
         .keys()
         .filter_map(|id| {
-            let calls: Vec<f64> = history
-                .series(id)
-                .iter()
-                .filter(|(_, e)| matches!(e.outcome.as_str(), "passed" | "flaky"))
-                .filter_map(|(_, e)| e.call.map(f64::from))
-                .collect();
-            if calls.len() < crate::scheduling::durations::HISTORY_MIN_RUNS {
-                return None;
-            }
+            let calls = crate::scheduling::durations::passing_calls(history, id)?;
             let slowest = calls.iter().copied().fold(0.0, f64::max);
             Some((id.clone(), slowest, calls.len(), timeout_for(slowest)))
         })
@@ -726,35 +718,34 @@ pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Resu
 mod timeout_tests {
     use super::testutil::record_test;
     use super::*;
-    use crate::reporting::history::{Entry, History, RunMeta};
+    use crate::reporting::history::{outcome_code, Entry, History, RunMeta};
 
     /// History giving each test `runs` passing runs at `secs`, plus one
     /// failed run whose time must not count.
     fn history(tests: &[(&str, f32, usize)]) -> History {
         let mut h = History::default();
         let n = tests.iter().map(|t| t.2).max().unwrap_or(0) + 1;
-        for seq in 0..n as u32 {
+        for seq in 0..n as u64 {
             h.runs.push(RunMeta {
                 seq,
                 id: format!("r{seq}"),
-                epoch: u64::from(seq),
+                epoch: seq,
                 commit: None,
                 env: String::new(),
-                workers: 1,
             });
         }
         for (id, secs, runs) in tests {
             let mut series: std::collections::VecDeque<Entry> = (0..*runs)
                 .map(|i| Entry {
-                    run: i as u32,
-                    outcome: "passed".into(),
+                    run: i as u64,
+                    outcome: outcome_code("passed").unwrap(),
                     call: Some(*secs),
                     setup: 0.0,
                 })
                 .collect();
             series.push_back(Entry {
-                run: *runs as u32,
-                outcome: "failed".into(),
+                run: *runs as u64,
+                outcome: outcome_code("failed").unwrap(),
                 call: Some(99.0),
                 setup: 0.0,
             });

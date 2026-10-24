@@ -21,7 +21,7 @@ between 0.x releases and are listed here.
 - **Tests that keep flipping are auto-quarantined (on by default).** rstest
   reads the per-test run history and quarantines every test that flipped
   between pass and fail at least 3 times: a failure right after a pass on the
-  same clean commit, or a pass only on rerun. A test that broke and stays broken flips once, so a real
+  same clean commit and environment, or a pass only on rerun. A test that broke and stays broken flips once, so a real
   regression still fails the run. The set is printed at the start of the run,
   unions with `--quarantine FILE`, and shrinks on its own as flips age out of
   the history. `--auto-quarantine=N` sets the threshold, `--auto-quarantine=0`

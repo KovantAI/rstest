@@ -99,7 +99,7 @@ fn gather(h: &History, auto: u32, top: usize) -> FlakyReport {
         .keys()
         .filter_map(|id| {
             let series = h.series(id);
-            let pos = flip_positions(series.iter().map(|(r, e)| (r.commit.as_deref(), *e)));
+            let pos = flip_positions(series.iter().copied());
             let last = *pos.last()?;
             let outcomes: Vec<String> = series
                 .iter()

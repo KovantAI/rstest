@@ -65,7 +65,8 @@ passes as `flaky`; every run records flakes in `.rstest_cache/flakes.json`;
 `--quarantine` ring-fences known offenders while they get fixed, and tests
 your history shows flipping between pass and fail are auto-quarantined (the
 run lists them on stderr; `--auto-quarantine=0` turns it off). Only a pass
-then a fail on the same commit with no uncommitted edits counts as a flip, so
+then a fail on the same commit with no uncommitted edits, in the same
+environment, counts as a flip, so
 a test you break and fix while editing is never auto-quarantined. The full lifecycle: [Flaky tests](flaky-tests.md).
 
 **`--doctor` on a fast suite.** Skip the "where does the time go" sections and

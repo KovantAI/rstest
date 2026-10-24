@@ -206,7 +206,10 @@ rstest: --auto-quarantine: 2 test(s) flipped pass/fail 3+ times in recent histor
 A **flip** is a failure right after a passing run on the same commit, or a
 run that passed only on a rerun. A failure after the code changed is the
 change, not flakiness, so it only counts when both runs were on one commit
-with no uncommitted edits (outside a git checkout, only reruns count). Skipped
+with no uncommitted edits (outside a git checkout, only reruns count). Both
+runs must also share an environment (Python version, installed packages), so
+a test that fails only on one leg of a tox or CI matrix is a real failure
+there, not a flip. Skipped
 runs are stepped over. A test with 3 or more flips in its stored history is
 auto-quarantined:
 

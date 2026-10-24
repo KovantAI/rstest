@@ -438,18 +438,22 @@ pub struct Regression {
     pub ceiling: Option<f64>,
 }
 
-/// A test's passing call times in the history as `(median, noise ceiling,
-/// runs)`, or `None` under [`HISTORY_MIN_RUNS`].
-fn history_baseline(h: &History, nodeid: &str) -> Option<(f64, f64, usize)> {
-    let mut calls: Vec<f64> = h
+/// A test's passing (incl. flaky) call times in the history, or `None` under
+/// [`HISTORY_MIN_RUNS`].
+pub fn passing_calls(h: &History, nodeid: &str) -> Option<Vec<f64>> {
+    let calls: Vec<f64> = h
         .series(nodeid)
         .iter()
         .filter(|(_, e)| matches!(e.outcome_name(), "passed" | "flaky"))
         .filter_map(|(_, e)| e.call.map(f64::from))
         .collect();
-    if calls.len() < HISTORY_MIN_RUNS {
-        return None;
-    }
+    (calls.len() >= HISTORY_MIN_RUNS).then_some(calls)
+}
+
+/// A test's passing call times in the history as `(median, noise ceiling,
+/// runs)`, or `None` under [`HISTORY_MIN_RUNS`].
+fn history_baseline(h: &History, nodeid: &str) -> Option<(f64, f64, usize)> {
+    let mut calls = passing_calls(h, nodeid)?;
     calls.sort_by(f64::total_cmp);
     let med = crate::explain::median(&calls)?;
     let mut dev: Vec<f64> = calls.iter().map(|x| (x - med).abs()).collect();

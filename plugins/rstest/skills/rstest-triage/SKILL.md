@@ -137,8 +137,8 @@ The four controls form a lifecycle, and mixing them up is the common mistake:
    the list still fail the run.
 4. `--auto-quarantine` is **on by default**: every run quarantines the tests
    whose run history (`.rstest_cache/history.msgpack`) flipped between pass
-   and fail 3+ times (a failure right after a pass on the same clean commit,
-   or a pass only on rerun), and prints that set on stderr. A test that broke and stays broken
+   and fail 3+ times (a failure right after a pass on the same clean commit
+   and environment, or a pass only on rerun), and prints that set on stderr. A test that broke and stays broken
    flips once and still fails. `--auto-quarantine-max` (default 5%) is a
    safety cap: when more auto-quarantined tests fail than that share of the
    run, none of them is quarantined, since the environment is the likelier
