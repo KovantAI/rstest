@@ -4,7 +4,17 @@ import json
 import os
 import xml.etree.ElementTree as ET
 
-from _harness import BASIC, DISCO, DOCTOR, DURATIONS_FIXTURE, SECTIONS, WARN, check, parse_ndjson
+from _harness import (
+    BASIC,
+    DISCO,
+    DOCTOR,
+    DURATIONS_FIXTURE,
+    SECTIONS,
+    SHORT_SUMMARY,
+    WARN,
+    check,
+    parse_ndjson,
+)
 
 
 def gate_output_styles(g, args, binary):
@@ -258,6 +268,37 @@ def gate_failure_output(g, args, binary):
         "captured stdout section",
         "Captured stdout call" in r.stdout and "the database said no" in r.stdout,
     )
+
+    # R23: setup/teardown errors are headed by phase, and the short test
+    # summary at -n 2 lists what pytest's own (-n 0) lists for the same -r.
+    g.write("shortsum/test_shortsum.py", SHORT_SUMMARY)
+    r = g.run("shortsum", "-n", "2", env_extra={"CI": "1"})
+    check(
+        "errors headed by phase",
+        "--- ERROR at teardown of [gw" in r.stdout and "--- ERROR at setup of [gw" in r.stdout,
+        r.stdout[-600:],
+    )
+
+    def short_summary(out):
+        lines = out.splitlines()
+        if "short test summary info" not in out:
+            return []
+        start = next(i for i, ln in enumerate(lines) if "short test summary info" in ln) + 1
+        body = []
+        for ln in lines[start:]:
+            if not ln.strip() or ln[0].isdigit() or ln.startswith("="):
+                break
+            body.append(ln)
+        return body
+
+    for chars in ("-rfE", "-rA"):
+        ref = short_summary(g.run("shortsum", "-n", "0", chars, env_extra={"CI": "1"}).stdout)
+        got = short_summary(g.run("shortsum", "-n", "2", chars, env_extra={"CI": "1"}).stdout)
+        check(
+            f"short test summary at -n 2 matches pytest ({chars})",
+            ref and got == ref,
+            f"{ref}\n{got}",
+        )
 
 
 def gate_html_report(g, args, binary):

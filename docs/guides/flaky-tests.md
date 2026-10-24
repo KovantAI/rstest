@@ -203,25 +203,32 @@ rstest: --auto-quarantine: 2 test(s) flipped pass/fail 3+ times in recent histor
   tests/test_poll.py::test_eventually
 ```
 
-A **flip** is a failure right after a passing run, or a run that passed only
-on a rerun. Skipped runs are stepped over. A test with 3 or more flips in its
-stored history is auto-quarantined:
+A **flip** is a failure right after a passing run on the same commit, or a
+run that passed only on a rerun. A failure after the code changed is the
+change, not flakiness, so it only counts when both runs were on one commit
+with no uncommitted edits (outside a git checkout, only reruns count). Skipped
+runs are stepped over. A test with 3 or more flips in its stored history is
+auto-quarantined:
 
 | History (oldest first) | Flips | Auto-quarantined at the default 3 |
 |---|---|---|
 | `✓✗✓✗✓✗` | 3 | yes |
 | `✓~✓~✓~` (`~` = passed on rerun) | 3 | yes |
 | `✓✓✓✗✗✗` (broke and stays broken) | 1 | no: a real regression still fails the run |
+| `✓✗✓✗✓✗`, a new commit or edit before each run | 0 | no: each failure follows a code change |
 | `✗✗✗✗` (never passed) | 0 | no |
+| `✓✗✓✗✓✗✗✗` (flapped, then broke) | 3 | no: its last 3 results all failed, so it is failing, not flapping |
 
 Everything else matches `--quarantine`: a failure of an auto-quarantined test
 is demoted to `quarantined` (same section, counts, JUnit property and exit
-code), a pass is a plain pass, `--reruns` still retries it first, and it never
-counts toward `-x` / `--maxfail`. Check one test's strip with
+code), a pass is a plain pass, `--reruns` still retries it first, and under
+the cap below it doesn't count toward `-x` / `--maxfail`. Check one test's strip with
 `rstest explain <nodeid>`.
 
-**Release is automatic.** The set is recomputed every run, so a fixed test
-drops out once enough of its flips leave the history window (the last
+**Release is automatic.** The set is recomputed every run. A test whose last
+3 pass/fail results all failed drops out right away (`rstest flaky` shows it
+as `failing`), so a real break of a flaky test is hidden for 3 runs at most and
+fails every run after that. A fixed test drops out once enough of its flips leave the history window (the last
 `RSTEST_HISTORY_RUNS` runs, default 50, and no older than
 `RSTEST_FLAKE_RETENTION_DAYS`). Nothing to edit or remove.
 
@@ -236,6 +243,9 @@ rstest: --auto-quarantine: 14 auto-quarantined test(s) failed, over the cap of 1
 Many flappers failing at once points to a broken environment (a database
 down, a network outage), and that run should be red. Tests from the
 `--quarantine` file are still quarantined and don't count toward the cap.
+Past the cap, auto-quarantined failures count toward `-x` / `--maxfail`
+again, so `-x` stops a broken-environment run instead of running it to the
+end.
 
 **Tuning.** `--auto-quarantine=5` raises the threshold, `--auto-quarantine=0`
 turns it off, and `--auto-quarantine-max=PCT` moves the cap. Attach values

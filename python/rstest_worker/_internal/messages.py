@@ -63,6 +63,9 @@ class ReportPayload(_ReportRequired, total=False):
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
     subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
+    crash: str  # failure: the short test summary's message (reprcrash.message)
+    xfail_reason: str  # xfail/xpass: report.wasxfail, when non-empty
+    skip_location: list[str | int | None]  # skip: [relpath, lineno|None] as pytest folds it
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------

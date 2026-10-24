@@ -9,18 +9,19 @@ between 0.x releases and are listed here.
 
 - **Per-test run history, shown by `rstest explain`.** rstest now keeps each
   test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
-  setup time, commit, environment fingerprint, worker count). `rstest explain`
+  setup time, commit). `rstest explain`
   shows the outcome strip (`✓✓✗✗`), call-time median and p95, the commit the
   test last passed at and the commit it started failing at; `explain --json`
   adds the same under `history`. Set the window with `RSTEST_HISTORY_RUNS`;
-  runs older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped. Every run now
-  reads the commit and environment fingerprint (about 20 ms), not only
-  `--since-green` runs.
+  runs older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped. A run on a tree
+  with uncommitted changes records its commit as `<sha>-dirty`. Every run now
+  reads the commit and checks for uncommitted changes (a few git calls), not
+  only `--since-green` runs.
 
 - **Tests that keep flipping are auto-quarantined (on by default).** rstest
   reads the per-test run history and quarantines every test that flipped
-  between pass and fail at least 3 times: a failure right after a pass, or a
-  pass only on rerun. A test that broke and stays broken flips once, so a real
+  between pass and fail at least 3 times: a failure right after a pass on the
+  same clean commit, or a pass only on rerun. A test that broke and stays broken flips once, so a real
   regression still fails the run. The set is printed at the start of the run,
   unions with `--quarantine FILE`, and shrinks on its own as flips age out of
   the history. `--auto-quarantine=N` sets the threshold, `--auto-quarantine=0`
@@ -60,6 +61,15 @@ between 0.x releases and are listed here.
   The first run after upgrading also deletes the folders older releases left
   behind (any `rstest-<pid>` folder more than an hour old). A user-provided
   `--basetemp` is never deleted.
+- **Parallel runs print pytest's short test summary and head errors by
+  phase.** With 2 or more workers there was no `short test summary info`
+  block, even with `-rA`, and a setup or teardown error was headed
+  `--- FAILED ... ---`. rstest now prints the block for the `-r` chars in
+  effect (`fE` by default; `-r` from `addopts` and `PYTEST_ADDOPTS` counts
+  too), with the same lines pytest prints: messages trimmed to the terminal,
+  or whole on CI and at `-vv`. Lines follow file and line order, so they
+  don't change between runs. Errors are headed `ERROR at setup of`,
+  `ERROR at teardown of` and `ERROR collecting`, as in pytest.
 
 ## 0.9.0 (2026-10-06)
 

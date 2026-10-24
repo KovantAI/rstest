@@ -180,14 +180,14 @@
           "format": "double"
         },
         "first_fail_commit": {
-          "description": "When the latest run failed: commit of the first run in that failing streak.",
+          "description": "When the latest non-skipped run failed: commit of the first run in that\nfailing streak (skips inside the streak are ignored). Suffixed `-dirty`\nlike `last_pass_commit`.",
           "type": [
             "string",
             "null"
           ]
         },
         "last_pass_commit": {
-          "description": "Commit of the most recent passing run.",
+          "description": "Commit of the most recent passing run; suffixed `-dirty` when that run\nhad uncommitted changes.",
           "type": [
             "string",
             "null"

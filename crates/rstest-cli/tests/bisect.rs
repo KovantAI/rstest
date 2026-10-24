@@ -90,7 +90,7 @@ fn finds_the_single_polluter() {
     assert!(out.contains("culprit: 1 predecessor"), "{out}");
     assert!(
         out.contains(
-            "rstest -n 0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
         ),
         "{out}"
     );
@@ -101,7 +101,7 @@ fn finds_the_single_polluter() {
     );
     assert_eq!(
         doc["reproduce_command"],
-        "rstest -n 0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
+        "rstest -n 0 --auto-quarantine=0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
     );
 }
 
@@ -128,7 +128,7 @@ fn finds_an_interacting_pair() {
     assert!(out.contains("culprits: 2 predecessor"), "{out}");
     assert!(
         out.contains(
-            "rstest -n 0 -p no:randomly test_pair.py::test_p test_pair.py::test_q test_pair.py::test_victim"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly test_pair.py::test_p test_pair.py::test_q test_pair.py::test_victim"
         ),
         "{out}"
     );
@@ -315,7 +315,7 @@ fn works_from_a_subdirectory_with_a_cwd_relative_nodeid() {
     // Runnable in place: ids are re-expressed relative to the cwd, no `cd`.
     assert_eq!(
         doc["reproduce_command"],
-        "rstest -n 0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
+        "rstest -n 0 --auto-quarantine=0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
     );
     assert!(doc["cwd"].as_str().unwrap().ends_with("tests"), "{doc}");
 }
@@ -362,7 +362,7 @@ fn a_polluter_outside_the_invocation_subdir_is_found() {
     );
     assert_eq!(
         doc["reproduce_command"],
-        "rstest -n 0 -p no:randomly ../int/test_pollute.py::test_poison test_victim.py::test_victim"
+        "rstest -n 0 --auto-quarantine=0 -p no:randomly ../int/test_pollute.py::test_poison test_victim.py::test_victim"
     );
 }
 
@@ -404,7 +404,7 @@ fn child_runs_use_the_python_given_with_the_flag() {
     let cmd = doc["reproduce_command"].as_str().unwrap();
     assert!(
         cmd.starts_with(&format!(
-            "rstest -n 0 --python {} -p no:randomly",
+            "rstest -n 0 --auto-quarantine=0 --python {} -p no:randomly",
             py.display()
         )),
         "{cmd}"
@@ -430,7 +430,7 @@ fn parametrized_ids_are_shell_quoted_in_the_reproduce_command() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.contains(
-            "rstest -n 0 -p no:randomly 'test_param.py::test_poison[1 x]' 'test_param.py::test_victim[v]'"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly 'test_param.py::test_poison[1 x]' 'test_param.py::test_victim[v]'"
         ),
         "{out}"
     );
@@ -478,7 +478,7 @@ fn pytest_args_after_double_dash_reach_collection_and_children() {
     assert_eq!(code, 0, "{out}");
     assert_eq!(
         doc["reproduce_command"],
-        "rstest -n 0 -p no:randomly -o bisect_flag=on test_args.py::test_poison test_args.py::test_victim"
+        "rstest -n 0 --auto-quarantine=0 -p no:randomly -o bisect_flag=on test_args.py::test_poison test_args.py::test_victim"
     );
     assert_eq!(plain_code, 1, "{plain_out}");
 }
@@ -663,7 +663,7 @@ fn a_reordering_plugin_named_randomly_is_disabled() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.contains(
-            "rstest -n 0 -p no:randomly test_pair.py::test_poison test_pair.py::test_victim"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly test_pair.py::test_poison test_pair.py::test_victim"
         ),
         "{out}"
     );
@@ -762,6 +762,108 @@ fn assert_repro_reproduces(tag: &str, layout: impl Fn(&Path)) {
     assert_eq!(code, 0, "{out}");
     assert_eq!(rc, 1, "the printed command must reproduce:\n{cmd}\n{rout}");
     assert!(rout.contains("1 failed, 1 passed"), "{cmd}\n{rout}");
+}
+
+/// A victim that flipped enough locally is auto-quarantined on a plain run
+/// (the default). The printed command must still fail: without
+/// `--auto-quarantine=0` it demoted the failure and exited 0.
+#[test]
+fn repro_reproduces_an_auto_quarantined_victim() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("reproautoq");
+    // While `flap` exists the victim fails on even attempts only, so each
+    // `--reruns 1` run records it `flaky`, a flip.
+    std::fs::write(
+        dir.join("test_q.py"),
+        "import os\n\
+         def test_poison():\n    os.environ['RSTEST_BISECT_AUTOQ'] = '1'\n\n\
+         def test_victim():\n    \
+             if os.path.exists('flap'):\n        \
+                 n = int(open('n').read()) if os.path.exists('n') else 0\n        \
+                 open('n', 'w').write(str(n + 1))\n        \
+                 assert n % 2\n        \
+                 return\n    \
+             assert 'RSTEST_BISECT_AUTOQ' not in os.environ\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("flap"), "").unwrap();
+    for _ in 0..3 {
+        let (code, out) = run(&venv, &dir, &["--reruns", "1", "test_q.py::test_victim"]);
+        assert_eq!(code, 0, "{out}");
+    }
+    std::fs::remove_file(dir.join("flap")).unwrap();
+    let jpath = dir.join("b.json");
+    let (code, out) = run(
+        &venv,
+        &dir,
+        &[
+            "bisect",
+            "test_q.py::test_victim",
+            "--bisect-json",
+            jpath.to_str().unwrap(),
+        ],
+    );
+    let doc = read_json(&jpath);
+    let cmd = doc["reproduce_command"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let (rc, rout) = run_repro(&venv, &dir, &cmd);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(rc, 1, "the printed command must reproduce:\n{cmd}\n{rout}");
+    assert!(rout.contains("1 failed, 1 passed"), "{cmd}\n{rout}");
+}
+
+/// Bisect's own child runs pass and fail the victim over and over on one clean
+/// commit. Recorded in the flip history, they auto-quarantined the victim, so
+/// the next plain run went green over the order bug bisect had just found.
+#[test]
+fn bisect_runs_leave_no_flips_behind() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("noflips");
+    let mut src = String::from("import os\n");
+    for i in 0..8 {
+        src.push_str(&format!("def test_ok{i}():\n    pass\n"));
+    }
+    src.push_str(
+        "def test_poison():\n    os.environ['RSTEST_BISECT_NOFLIPS'] = '1'\n\n\
+         def test_victim():\n    assert 'RSTEST_BISECT_NOFLIPS' not in os.environ\n",
+    );
+    std::fs::write(dir.join("test_n.py"), src).unwrap();
+    // A clean commit: only then does a pass-then-fail count as a flip.
+    std::fs::write(
+        dir.join(".gitignore"),
+        ".rstest_cache/\n.pytest_cache/\n__pycache__/\n",
+    )
+    .unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "."],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    ] {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    let (code, out) = run(&venv, &dir, &["bisect", "test_n.py::test_victim"]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = run(&venv, &dir, &["-n", "0", "-p", "no:randomly"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.contains("--auto-quarantine:"), "{out}");
+    assert_eq!(code, 1, "the order bug must still fail the run\n{out}");
 }
 
 #[test]

@@ -1624,7 +1624,7 @@ mod tests {
 
     /// A segment carrying one run's history: `t::a` with `outcome`.
     fn hist_seg(id: &str, at: u64, outcome: &str) -> Segment {
-        use crate::reporting::history::{Entry, RunMeta};
+        use crate::reporting::history::{outcome_code, Entry, RunMeta};
         Segment {
             history: Some(RunSlice {
                 run: RunMeta {
@@ -1632,14 +1632,12 @@ mod tests {
                     id: id.into(),
                     epoch: at,
                     commit: Some(format!("c-{id}")),
-                    env: "fp".into(),
-                    workers: 2,
                 },
                 tests: HashMap::from([(
                     "t::a".to_string(),
                     Entry {
                         run: 0,
-                        outcome: outcome.into(),
+                        outcome: outcome_code(outcome).unwrap(),
                         call: Some(0.5),
                         setup: 0.0,
                     },
@@ -1652,7 +1650,7 @@ mod tests {
     fn strip(h: &History) -> Vec<String> {
         h.series("t::a")
             .iter()
-            .map(|(_, e)| e.outcome.clone())
+            .map(|(_, e)| e.outcome_name().to_string())
             .collect()
     }
 

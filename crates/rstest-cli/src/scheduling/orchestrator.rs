@@ -4,6 +4,7 @@
 //! paths are identical modulo the item-id type, so they live here as pure,
 //! unit-testable helpers instead of two hand-kept copies.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::reporting::progress::Progress;
@@ -213,6 +214,9 @@ pub(crate) fn fabricate_crash_report(
         sections: Vec::new(),
         lineno: None,
         subtest: false,
+        crash: None,
+        xfail_reason: None,
+        skip_location: None,
     }
 }
 
@@ -235,6 +239,9 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         sections: Vec::new(),
         lineno: None,
         subtest: false,
+        crash: None,
+        xfail_reason: None,
+        skip_location: None,
     }
 }
 
@@ -284,18 +291,87 @@ pub(crate) struct FinishedAttempt {
     pub flaky_key: Option<String>,
 }
 
-/// Whether a recorded report counts toward `-x` / `--maxfail`: a failure of a
-/// test outside the `--quarantine` list. A quarantined failure is demoted
-/// after the run and never fails it, so it must not stop the run either.
-pub(crate) fn counts_toward_maxfail(
-    quarantine: Option<&regex::RegexSet>,
-    report: &proto::Report,
-) -> bool {
-    report.outcome == "failed" && !quarantine.is_some_and(|q| q.is_match(&report.nodeid))
+/// The run's quarantine: the `--quarantine` file plus every test the history
+/// shows flipping (`--auto-quarantine`), and the auto set's cap.
+pub(crate) struct Quarantine {
+    /// File patterns and auto ids together: what dispatch ordering treats as
+    /// quarantined.
+    pub all: regex::RegexSet,
+    pub file: regex::RegexSet,
+    pub auto: HashSet<String>,
+    /// `--auto-quarantine-max`: percent of the run's tests.
+    pub max_pct: u32,
+}
+
+/// The most auto-quarantined tests one run may fail and still have them
+/// quarantined: `max_pct` percent of the run's `total` tests, rounded up, at
+/// least one. Past it the environment is the likelier culprit.
+pub(crate) fn auto_quarantine_cap(total: usize, max_pct: u32) -> usize {
+    (total * max_pct as usize).div_ceil(100).max(1)
+}
+
+/// The run's `-x` / `--maxfail` count. A `--quarantine` file failure never
+/// counts: it is demoted after the run and never fails it, so it must not stop
+/// the run either. An auto-quarantined failure is held back until more auto
+/// tests have failed than the cap allows; then the post-run demotion
+/// quarantines none of them, so every held failure counts at once.
+#[derive(Default)]
+pub(crate) struct MaxfailCount<'a> {
+    quarantine: Option<&'a Quarantine>,
+    /// The run's test count, once known; auto failures are held until then.
+    total: Option<usize>,
+    auto_failed: HashSet<String>,
+    held: u64,
+    /// Failures counted so far.
+    pub n: u64,
+}
+
+impl<'a> MaxfailCount<'a> {
+    pub fn new(quarantine: Option<&'a Quarantine>) -> Self {
+        Self {
+            quarantine,
+            ..Self::default()
+        }
+    }
+
+    pub fn record(&mut self, report: &proto::Report) {
+        if report.outcome != "failed" {
+            return;
+        }
+        let Some(q) = self.quarantine else {
+            self.n += 1;
+            return;
+        };
+        if q.file.is_match(&report.nodeid) {
+            return;
+        }
+        if !q.auto.contains(&report.nodeid) {
+            self.n += 1;
+            return;
+        }
+        self.auto_failed.insert(report.nodeid.clone());
+        self.held += 1;
+        self.release();
+    }
+
+    /// The run's test count is now known (or changed, e.g. by `--shard`).
+    pub fn set_total(&mut self, total: usize) {
+        self.total = Some(total);
+        self.release();
+    }
+
+    fn release(&mut self) {
+        let (Some(q), Some(total)) = (self.quarantine, self.total) else {
+            return;
+        };
+        if self.auto_failed.len() > auto_quarantine_cap(total, q.max_pct) {
+            self.n += std::mem::take(&mut self.held);
+        }
+    }
 }
 
 /// Commit a finished item's buffered attempt reports as final: record each
-/// (counting failures toward `fail_count`, quarantined ones excepted) and, if
+/// (counting failures toward `fail_count`) and, if
 /// the item ultimately passed after >0 retries, mark it flaky under
 /// `flaky_key`. Called on the terminal (non-requeued) branch of the ItemDone
 /// rerun logic in both loops.
@@ -303,15 +379,12 @@ pub(crate) fn finalize_attempt(
     sink: &mut Sink,
     run: &mut Run,
     prog: &mut Progress,
-    fail_count: &mut u64,
-    quarantine: Option<&regex::RegexSet>,
+    fail_count: &mut MaxfailCount,
     worker_idx: usize,
     attempt: FinishedAttempt,
 ) {
     for r in attempt.reports {
-        if counts_toward_maxfail(quarantine, &r) {
-            *fail_count += 1;
-        }
+        fail_count.record(&r);
         prog.on_report(sink, Some(worker_idx), &r);
         sink.emit_report(Some(worker_idx), &r);
         run.record(Some(worker_idx), r);
@@ -417,6 +490,9 @@ mod tests {
             sections: Vec::new(),
             lineno: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
@@ -689,40 +765,90 @@ mod tests {
         assert_eq!(finalize_exit(&[2], true, true, false, true), 2);
     }
 
+    fn quarantine_of(file: &[&str], auto: &[&str], max_pct: u32) -> Quarantine {
+        Quarantine {
+            all: regex::RegexSet::empty(),
+            file: regex::RegexSet::new(file).unwrap(),
+            auto: auto.iter().map(|s| s.to_string()).collect(),
+            max_pct,
+        }
+    }
+
+    fn failed_at(nodeid: &str) -> proto::Report {
+        proto::Report {
+            nodeid: nodeid.into(),
+            ..rep("failed", Some("assert"))
+        }
+    }
+
     #[test]
     fn quarantined_failures_do_not_count_toward_maxfail() {
-        let q = regex::RegexSet::new([r"^t\.py::x$"]).unwrap();
-        let failed = rep("failed", Some("assert"));
-        assert!(!counts_toward_maxfail(Some(&q), &failed));
-        assert!(counts_toward_maxfail(None, &failed));
-        let other = proto::Report {
-            nodeid: "t.py::y".into(),
-            ..rep("failed", Some("assert"))
-        };
-        assert!(counts_toward_maxfail(Some(&q), &other));
-        assert!(!counts_toward_maxfail(None, &rep("passed", None)));
+        let q = quarantine_of(&[r"^t\.py::x$"], &[], 5);
+        let mut mf = MaxfailCount::new(Some(&q));
+        mf.record(&failed_at("t.py::x"));
+        mf.record(&rep("passed", None));
+        assert_eq!(mf.n, 0);
+        mf.record(&failed_at("t.py::y"));
+        assert_eq!(mf.n, 1);
+        let mut plain = MaxfailCount::new(None);
+        plain.record(&failed_at("t.py::x"));
+        assert_eq!(plain.n, 1);
 
         let mut run = Run::default();
         let mut prog = Progress::default();
-        let mut fail_count = 0u64;
+        let mut fail_count = MaxfailCount::new(Some(&q));
         let (mut sink, _cap) = Sink::captured();
         finalize_attempt(
             &mut sink,
             &mut run,
             &mut prog,
             &mut fail_count,
-            Some(&q),
             0,
             FinishedAttempt {
                 attempts_used: 1,
-                reports: vec![failed],
+                reports: vec![failed_at("t.py::x")],
                 failed: true,
                 flaky_key: None,
             },
         );
         // Recorded (the quarantine demotes it after the run), not counted.
-        assert_eq!(fail_count, 0);
+        assert_eq!(fail_count.n, 0);
         assert!(!run.all_passed());
+    }
+
+    #[test]
+    fn auto_quarantined_failures_count_once_over_the_cap() {
+        // 10% of 20 tests: a cap of 2 auto failures.
+        let q = quarantine_of(&[], &["a", "b", "c"], 10);
+        let mut mf = MaxfailCount::new(Some(&q));
+        mf.set_total(20);
+        mf.record(&failed_at("a"));
+        mf.record(&failed_at("a")); // a second failed phase of the same test
+        mf.record(&failed_at("b"));
+        assert_eq!(mf.n, 0, "at the cap: still quarantined, still held");
+        mf.record(&failed_at("c"));
+        assert_eq!(mf.n, 4, "over the cap: every held failure counts");
+        mf.record(&failed_at("a"));
+        assert_eq!(mf.n, 5);
+
+        // Total not known yet (lazy collection): hold, then settle on it.
+        let mut mf = MaxfailCount::new(Some(&q));
+        for id in ["a", "b", "c"] {
+            mf.record(&failed_at(id));
+        }
+        assert_eq!(mf.n, 0);
+        mf.set_total(100); // cap 10: still under
+        assert_eq!(mf.n, 0);
+        mf.set_total(20);
+        assert_eq!(mf.n, 3);
+    }
+
+    #[test]
+    fn auto_quarantine_cap_rounds_up_to_at_least_one() {
+        assert_eq!(auto_quarantine_cap(0, 5), 1);
+        assert_eq!(auto_quarantine_cap(2, 10), 1);
+        assert_eq!(auto_quarantine_cap(21, 10), 3);
+        assert_eq!(auto_quarantine_cap(100, 5), 5);
     }
 
     #[test]
@@ -756,7 +882,7 @@ mod tests {
     fn finalize_attempt_records_and_marks_flaky() {
         let mut run = Run::default();
         let mut prog = Progress::default();
-        let mut fail_count = 0u64;
+        let mut fail_count = MaxfailCount::new(None);
         let (mut sink, _cap) = Sink::captured();
         // Two failed attempts already counted elsewhere; the FINAL buffered
         // attempt passed after 2 retries -> recorded, no new failures, flaky.
@@ -765,7 +891,6 @@ mod tests {
             &mut run,
             &mut prog,
             &mut fail_count,
-            None,
             0,
             FinishedAttempt {
                 attempts_used: 2,
@@ -774,7 +899,7 @@ mod tests {
                 flaky_key: Some("t.py::x".into()),
             },
         );
-        assert_eq!(fail_count, 0);
+        assert_eq!(fail_count.n, 0);
         assert!(run.all_passed());
     }
 
@@ -782,14 +907,13 @@ mod tests {
     fn finalize_attempt_counts_failures() {
         let mut run = Run::default();
         let mut prog = Progress::default();
-        let mut fail_count = 0u64;
+        let mut fail_count = MaxfailCount::new(None);
         let (mut sink, _cap) = Sink::captured();
         finalize_attempt(
             &mut sink,
             &mut run,
             &mut prog,
             &mut fail_count,
-            None,
             0,
             FinishedAttempt {
                 attempts_used: 0,
@@ -798,7 +922,7 @@ mod tests {
                 flaky_key: None,
             },
         );
-        assert_eq!(fail_count, 1);
+        assert_eq!(fail_count.n, 1);
         assert!(!run.all_passed());
     }
 }
