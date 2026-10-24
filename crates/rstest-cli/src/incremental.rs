@@ -390,6 +390,25 @@ mod tests {
     }
 
     #[test]
+    fn green_baseline_advances_only_on_a_clean_tree() {
+        let repo = tmp("green-if-clean");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        // The run's own untracked report doesn't dirty the tree.
+        std::fs::write(repo.join("report.xml"), "<x/>").unwrap();
+        let outputs = [Path::new("report.xml")];
+        assert!(record_green_if_clean(&repo, &outputs, "sha1", FP));
+        assert_eq!(baseline(&repo, FP).as_deref(), Some("sha1"));
+        assert!(!record_green_if_clean(&repo, &[], "sha2", FP));
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\nx=1\n").unwrap();
+        assert!(!record_green_if_clean(&repo, &outputs, "sha3", FP));
+        assert_eq!(baseline(&repo, FP).as_deref(), Some("sha1"));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
     fn hex_encode_pads_and_orders() {
         assert_eq!(hex_encode(&[]), "");
         assert_eq!(hex_encode(&[0x00]), "00");

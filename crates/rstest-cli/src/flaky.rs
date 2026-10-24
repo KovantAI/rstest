@@ -308,6 +308,9 @@ mod tests {
         assert_eq!(t("pfpfpfpfpf"), "steady"); // steady flapper: 2 vs 3 flips
         assert_eq!(t("pppppppfpfpf"), "worse");
         assert_eq!(t("pfpfpfpppppp"), "better");
+        assert_eq!(t("ppppfpfp"), "worse"); // a flip at the midpoint is newer
+        assert_eq!(t("pfpppp"), "steady"); // one flip is noise, either half
+        assert_eq!(t("pppppfp"), "steady");
         assert_eq!(t("ppppffff"), "failing"); // broke, not flapping
         assert_eq!(t("pfpfpfsfsff"), "failing"); // skips stepped over
         assert_eq!(t("pfpfpff"), "steady"); // only 2 trailing fails
@@ -341,6 +344,15 @@ mod tests {
             lines[3]
         );
         assert!(out.contains("1 shown test(s) will be auto-quarantined"));
+        assert!(!out.contains("more (--top 0"), "nothing hidden: {out}");
+
+        // Off: no row marked, no quarantine footer.
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &gather(&h, 0, 0), 0);
+        let out = cap.out();
+        assert!(out.starts_with("1 flaky test(s) of 2 in the history (auto-quarantine off)"));
+        assert!(out.lines().nth(3).unwrap().ends_with("t.py::a"), "{out}");
+        assert!(!out.contains("will be auto-quarantined"), "{out}");
 
         let (mut sink, cap) = Sink::captured();
         render(&mut sink, &gather(&h, 3, 0).with_top_hidden(), 0);

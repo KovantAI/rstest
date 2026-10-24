@@ -277,6 +277,11 @@ pub fn load_from(path: &std::path::Path) -> History {
 
 /// Append this run to the stored history. Best-effort: IO errors are ignored.
 pub fn record(run: &Run, epoch: u64, commit: Option<&str>) {
+    record_in(&cache::dir(), run, epoch, commit, cap());
+}
+
+/// `record` against an explicit cache dir and per-test cap.
+fn record_in(dir: &std::path::Path, run: &Run, epoch: u64, commit: Option<&str>, cap: usize) {
     let entries: Vec<(String, Entry)> = run
         .tests()
         .iter()
@@ -292,11 +297,12 @@ pub fn record(run: &Run, epoch: u64, commit: Option<&str>) {
     };
     // Locked load→append→write: two concurrent sessions in one cwd would
     // otherwise drop one run's entries.
-    cache::with_lock(|| {
-        let mut h = load();
-        h.append(meta, entries, cap());
+    let path = dir.join(FILE);
+    cache::with_lock_in(dir, || {
+        let mut h = load_from(&path);
+        h.append(meta, entries, cap);
         if let Ok(bytes) = rmp_serde::to_vec(&h) {
-            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+            let _ = cache::write_atomic(&path, &bytes);
         }
     });
 }
@@ -403,11 +409,14 @@ mod tests {
             50,
         );
         h.append(meta(10), vec![("gone".into(), entry("passed"))], 50);
+        // Exactly max_age old is still in the window.
+        h.append(meta(500), vec![("edge".into(), entry("passed"))], 50);
         h.age(1000, 500);
         assert_eq!(h.series("old").len(), 1);
         assert_eq!(h.series("new").len(), 1);
+        assert_eq!(h.series("edge").len(), 1);
         assert!(!h.tests.contains_key("gone"));
-        assert_eq!(h.runs.len(), 1);
+        assert_eq!(h.runs.len(), 2);
         // 0 disables aging.
         let mut h2 = History::default();
         h2.append(meta(1), vec![("a".into(), entry("passed"))], 50);
@@ -570,6 +579,67 @@ mod tests {
         // Reruns rescuing a run is flakiness on any commit; pass->fail isn't.
         assert_eq!(h.flippers(1), ["rescued"]);
         assert_eq!(h.flippers(3), ["rescued"]);
+    }
+
+    fn run_of(tests: &[(&str, &str)]) -> Run {
+        let mut run = Run::default();
+        for (nodeid, outcome) in tests {
+            run.record(
+                None,
+                crate::scheduling::proto::Report {
+                    nodeid: (*nodeid).into(),
+                    when: "call".into(),
+                    outcome: (*outcome).into(),
+                    duration: 0.5,
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: None,
+                    thread_delta: None,
+                    fd_delta: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                    subtest: false,
+                    crash: None,
+                    xfail_reason: None,
+                    skip_location: None,
+                },
+            );
+        }
+        run
+    }
+
+    #[test]
+    fn record_appends_each_run_under_the_cap() {
+        let dir = std::env::temp_dir().join(format!("rstest-history-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = crate::time::now_epoch_secs();
+        // A run with no real results writes nothing.
+        record_in(&dir, &Run::default(), now, Some("c1"), 2);
+        assert!(!dir.join(FILE).exists());
+
+        record_in(&dir, &run_of(&[("a", "passed")]), now, Some("c1"), 2);
+        record_in(
+            &dir,
+            &run_of(&[("a", "failed"), ("b", "passed")]),
+            now + 1,
+            None,
+            2,
+        );
+        record_in(&dir, &run_of(&[("a", "passed")]), now + 2, Some("c3"), 2);
+        let h = load_from(&dir.join(FILE));
+        let a = h.series("a");
+        let got: Vec<_> = a
+            .iter()
+            .map(|(r, e)| (r.epoch, r.commit.as_deref(), e.outcome_name()))
+            .collect();
+        assert_eq!(
+            got,
+            [(now + 1, None, "failed"), (now + 2, Some("c3"), "passed")]
+        );
+        assert_eq!(a[1].1.call, Some(0.5));
+        assert_eq!(h.series("b").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

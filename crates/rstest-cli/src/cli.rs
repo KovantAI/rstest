@@ -1247,6 +1247,29 @@ mod tests {
     }
 
     #[test]
+    fn run_outputs_lists_every_report_path_given() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["rstest"]);
+        assert!(cli.run_outputs().is_empty());
+        let paths = [
+            "--report-json=a",
+            "--doctor-json=b",
+            "--doctor-md=c",
+            "--junitxml=d",
+            "--html=e",
+            "--cov-diff-json=f",
+            "--stream-json=g",
+        ];
+        let cli = Cli::parse_from(std::iter::once("rstest").chain(paths));
+        let got: Vec<_> = cli
+            .run_outputs()
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect();
+        assert_eq!(got, ["a", "b", "c", "d", "e", "f", "g"]);
+    }
+
+    #[test]
     fn replay_routes_run_id_and_journal_to_clap() {
         use clap::Parser;
         // `replay` builds no session from argv: the run-id positional and
