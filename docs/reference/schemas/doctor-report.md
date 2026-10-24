@@ -19,6 +19,7 @@ Source: `--doctor-json`
 | `startup_seconds` | number | yes | Wall from pool spawn to every worker's first event (imported core + started collecting), part of `wall_seconds`. A fixed per-run tax that `--fork-pool` (Unix) cuts at high `-n`; 0.0 on single-worker runs. Surfaced so a startup-bound suite is legible. |
 | `test_time_seconds` | number | yes | Sum of each test's whole protocol (setup + call + teardown), so time spent in function fixtures counts. |
 | `tests` | integer | yes | Tests with a recorded call duration (tests skipped before their call phase drop out): the population every time figure is computed over. |
+| `timeouts` | TimeoutAdvice or null | yes | Suggested `--timeout` and per-test `@pytest.mark.timeout` overrides, from each test's slowest recorded passing run (call phase). `null` until some test in this run has 5 passing runs in the run history. |
 | `wait_bound` | WaitBound or null | yes | Present only when waiting is a notable share (>= 20% and >= 1s); `--doctor-fail-on` gates `wait_*` on the measured values regardless. |
 | `wall_seconds` | number | yes | Wall-clock time of the whole run, in seconds. |
 | `workers` | integer | yes | Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run. |
@@ -89,6 +90,26 @@ Realized parallel speedup measured from an actual run. Unlike `ParallelFloor` (a
 | `gate_tests` | array of GateTest | yes | The tests that exceed the floor, longest first (at most 10). |
 | `ideal_share_seconds` | number | yes | A worker's even share of the test time (`test_time_seconds / workers`), in seconds. |
 | `longest_seconds` | number | yes | The longest single test (setup + call + teardown), in seconds. |
+
+### TimeoutAdvice
+
+Timeouts that catch a hang without killing a slow-but-healthy test. Each test's own limit is the larger of 3x its slowest recorded passing run and that run plus 1s, rounded up to whole seconds.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `override_count` | integer | yes | Judged tests whose own limit is above `suite_timeout`: they need a per-test `@pytest.mark.timeout`. |
+| `overrides` | array of TimeoutOverride | yes | The highest of those, worst first (top 20). |
+| `suite_timeout` | integer | yes | Suggested suite-wide `--timeout`, in seconds: the limit that covers 95% of the judged tests. |
+| `tests_judged` | integer | yes | Tests in this run with at least 5 passing runs in the history. |
+
+### TimeoutOverride
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `nodeid` | string | yes | The test. |
+| `runs` | integer | yes | Passing runs that slowest time comes from. |
+| `slowest_seconds` | number | yes | Its slowest recorded passing call-phase time, in seconds (the phase `--timeout` limits; fixture setup/teardown not included). |
+| `timeout` | integer | yes | Its suggested `@pytest.mark.timeout`, in seconds. |
 
 ### WaitBound
 

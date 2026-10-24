@@ -92,6 +92,17 @@
       "format": "uint",
       "minimum": 0
     },
+    "timeouts": {
+      "description": "Suggested `--timeout` and per-test `@pytest.mark.timeout` overrides,\nfrom each test's slowest recorded passing run (call phase). `null`\nuntil some test in this run has 5 passing runs in the run history.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TimeoutAdvice"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "wait_bound": {
       "description": "Present only when waiting is a notable share (>= 20% and >= 1s);\n`--doctor-fail-on` gates `wait_*` on the measured values regardless.",
       "anyOf": [
@@ -130,7 +141,8 @@
     "parallel_efficiency",
     "fixtures",
     "slowest_files",
-    "coverage_waste"
+    "coverage_waste",
+    "timeouts"
   ],
   "definitions": {
     "CoverageWaste": {
@@ -340,6 +352,75 @@
         "longest_seconds",
         "ideal_share_seconds",
         "gate_tests"
+      ]
+    },
+    "TimeoutAdvice": {
+      "description": "Timeouts that catch a hang without killing a slow-but-healthy test. Each\ntest's own limit is the larger of 3x its slowest recorded passing run and\nthat run plus 1s, rounded up to whole seconds.",
+      "type": "object",
+      "properties": {
+        "override_count": {
+          "description": "Judged tests whose own limit is above `suite_timeout`: they need a\nper-test `@pytest.mark.timeout`.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "overrides": {
+          "description": "The highest of those, worst first (top 20).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TimeoutOverride"
+          }
+        },
+        "suite_timeout": {
+          "description": "Suggested suite-wide `--timeout`, in seconds: the limit that covers 95%\nof the judged tests.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tests_judged": {
+          "description": "Tests in this run with at least 5 passing runs in the history.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "suite_timeout",
+        "tests_judged",
+        "override_count",
+        "overrides"
+      ]
+    },
+    "TimeoutOverride": {
+      "type": "object",
+      "properties": {
+        "nodeid": {
+          "description": "The test.",
+          "type": "string"
+        },
+        "runs": {
+          "description": "Passing runs that slowest time comes from.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "slowest_seconds": {
+          "description": "Its slowest recorded passing call-phase time, in seconds (the phase\n`--timeout` limits; fixture setup/teardown not included).",
+          "type": "number",
+          "format": "double"
+        },
+        "timeout": {
+          "description": "Its suggested `@pytest.mark.timeout`, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "nodeid",
+        "slowest_seconds",
+        "runs",
+        "timeout"
       ]
     },
     "WaitBound": {

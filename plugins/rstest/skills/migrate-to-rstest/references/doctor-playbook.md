@@ -60,6 +60,18 @@ those. If one file is a huge share and its tests are independent, the default
 (it pins the file to one worker); only use loadfile when the file is
 order-dependent.
 
+## TIMEOUTS: cap hangs without killing slow tests
+
+Appears once tests have 5 passing runs in the run history
+(`.rstest_cache/history.msgpack`). It suggests a suite `--timeout` covering
+95% of them and lists the slower tests with a `@pytest.mark.timeout(N)` each
+(a test's limit: 3x its slowest recorded call phase, at least +1s).
+
+**Action:** put the suggested `--timeout` in CI and paste the listed markers
+onto their tests. It can't see markers that already exist, so skip tests
+that already carry a fitting one. Not a speed fix: it makes a hang fail fast
+with a traceback instead of eating the job's timeout.
+
 ## Runner tuning (secondary)
 
 Only after the above:
