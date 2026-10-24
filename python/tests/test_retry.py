@@ -200,6 +200,30 @@ def test_auto_quarantined_failures_under_the_cap_do_not_trip_x(tmp_path, monkeyp
     assert calls == ["test_a_flap", "test_b_ok", "test_c_flap", "test_d_ok"]
 
 
+@pytest.mark.parametrize(
+    ("flaps", "max_pct", "last"),
+    [
+        # The cap is at least one test: test_a is held, the real test_c trips -x.
+        (["test_a_flap"], 0, "test_c_flap"),
+        # 30% of 4 rounds up to 2: both held, the session runs to the end.
+        (["test_a_flap", "test_c_flap"], 30, "test_d_ok"),
+    ],
+)
+def test_auto_quarantine_cap_rounds_up_and_floors_at_one(
+    tmp_path, monkeypatch, flaps, max_pct, last
+):
+    _, seen = _session(
+        tmp_path,
+        monkeypatch,
+        AUTO_SRC,
+        "-x",
+        plugins=lambda: [MaxfailExemptions(pool=False)],
+        auto=(flaps, max_pct),
+    )
+    calls = [n for n, w, _ in seen if w == "call"]
+    assert calls[-1] == last
+
+
 def test_auto_quarantined_failures_over_the_cap_trip_x(tmp_path, monkeypatch):
     # 10% of 4 tests: a cap of 1. The second auto failure is over it, so the
     # post-run demotion quarantines neither and -x stops right there.

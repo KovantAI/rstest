@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FlakyReport",
+  "description": "The ranked flake view. Tests are sorted by flips (most first), then by\nnewest flip.",
+  "type": "object",
+  "properties": {
+    "auto_quarantine": {
+      "description": "Flips at which `--auto-quarantine` catches a test (`0` = off), from\n`[tool.rstest] auto-quarantine` or the default.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "flaky_tests": {
+      "description": "Tests with at least one flip, before `--top` cut the list.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "meta": {
+      "description": "Envelope metadata.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Meta"
+        }
+      ]
+    },
+    "tests": {
+      "description": "The ranked tests, at most `--top` of them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FlakyTest"
+      }
+    },
+    "tests_in_history": {
+      "description": "Tests with any recorded run.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "meta",
+    "auto_quarantine",
+    "tests_in_history",
+    "flaky_tests",
+    "tests"
+  ],
+  "definitions": {
+    "FlakyTest": {
+      "description": "One test that flipped at least once in its recorded history.",
+      "type": "object",
+      "properties": {
+        "auto_quarantined": {
+          "description": "Whether `--auto-quarantine` quarantines it at the current threshold.",
+          "type": "boolean"
+        },
+        "failed": {
+          "description": "Runs that failed (`failed`, `errors`, `crashed` or `quarantined`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "flaky": {
+          "description": "Runs that passed only on rerun.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "flips": {
+          "description": "Flips in the recorded history: a `flaky` pass, or a failure right\nafter a pass.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "last_flip_epoch": {
+          "description": "Epoch seconds of the newest flip.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "nodeid": {
+          "description": "The test's nodeid.",
+          "type": "string"
+        },
+        "outcomes": {
+          "description": "Outcome per run, oldest first (same values as `explain`'s history).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "runs": {
+          "description": "Recorded runs of this test.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "trend": {
+          "description": "`failing` when the last 3 pass/fail results all failed; otherwise\n`worse` / `better` when the newer half of the history has at least 2\nmore / fewer flips than the older half, else `steady`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeid",
+        "flips",
+        "trend",
+        "flaky",
+        "failed",
+        "runs",
+        "outcomes",
+        "last_flip_epoch",
+        "auto_quarantined"
+      ]
+    },
+    "Meta": {
+      "description": "Envelope metadata for the flaky document.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Constant discriminator: always `\"flaky\"`.",
+          "type": "string"
+        },
+        "rstest_version": {
+          "description": "The rstest version that wrote the document.",
+          "type": "string"
+        },
+        "runner": {
+          "description": "Constant producer tag: always `\"rstest\"`.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Document schema version.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "runner",
+        "kind",
+        "schema",
+        "rstest_version"
+      ]
+    }
+  }
+}

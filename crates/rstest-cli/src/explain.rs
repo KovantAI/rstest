@@ -180,7 +180,7 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
 }
 
 /// One character per run for the human strip.
-fn glyph(outcome: &str) -> char {
+pub(crate) fn glyph(outcome: &str) -> char {
     if is_pass(outcome) {
         if outcome == "flaky" {
             '~'
@@ -286,7 +286,7 @@ fn suggestions(needle: &str, n: usize) -> Vec<String> {
 
 /// Render an epoch as a coarse "Nd ago" / "Nh ago" relative to `now`. A future
 /// or zeroed epoch (clock skew) reads as "just now" rather than a negative age.
-fn ago(epoch: u64, now: u64) -> String {
+pub(crate) fn ago(epoch: u64, now: u64) -> String {
     let secs = now.saturating_sub(epoch);
     if secs < 60 {
         "just now".to_string()

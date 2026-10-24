@@ -217,6 +217,7 @@ auto-quarantined:
 | `✓✓✓✗✗✗` (broke and stays broken) | 1 | no: a real regression still fails the run |
 | `✓✗✓✗✓✗`, a new commit or edit before each run | 0 | no: each failure follows a code change |
 | `✗✗✗✗` (never passed) | 0 | no |
+| `✓✗✓✗✓✗✗✗` (flapped, then broke) | 3 | no: its last 3 results all failed, so it is failing, not flapping |
 
 Everything else matches `--quarantine`: a failure of an auto-quarantined test
 is demoted to `quarantined` (same section, counts, JUnit property and exit
@@ -224,8 +225,10 @@ code), a pass is a plain pass, `--reruns` still retries it first, and under
 the cap below it doesn't count toward `-x` / `--maxfail`. Check one test's strip with
 `rstest explain <nodeid>`.
 
-**Release is automatic.** The set is recomputed every run, so a fixed test
-drops out once enough of its flips leave the history window (the last
+**Release is automatic.** The set is recomputed every run. A test whose last
+3 pass/fail results all failed drops out right away (`rstest flaky` shows it
+as `failing`), so a real break of a flaky test is hidden for 3 runs at most and
+fails every run after that. A fixed test drops out once enough of its flips leave the history window (the last
 `RSTEST_HISTORY_RUNS` runs, default 50, and no older than
 `RSTEST_FLAKE_RETENTION_DAYS`). Nothing to edit or remove.
 
@@ -258,6 +261,12 @@ auto-quarantine-max = 5
 **Composing with the file.** The run quarantines both sets. Use the file for
 tests the team has decided to tolerate (with an owner and a tracking issue),
 and the auto set as the safety net for flakes nobody has triaged yet.
+
+**See the whole suite.** `rstest flaky` ranks every test that flipped, with
+its recent outcome strip, whether it is getting worse, and which ones the
+next run will auto-quarantine
+([`rstest flaky`](../reference/cli-commands.md#flaky)). `--json` feeds a
+dashboard.
 
 **On CI**, persist `.rstest_cache` between runs (see
 [CI quickstart](ci-quickstart.md)). A runner that starts with no history has
@@ -323,5 +332,5 @@ The failure mode to avoid is a quarantine list that only ever grows.
 committed and hand-curated on purpose. Treat an addition like a TODO with an
 owner, and audit the list periodically. An entry whose test no longer
 appears in the flake history is either fixed (remove it) or abandoned (fix
-the test). The auto set is printed every run: a test that stays on it for
-weeks needs an owner too.
+the test). The auto set is printed every run, and `rstest flaky` lists it with
+trends: a test that stays on it for weeks needs an owner too.
