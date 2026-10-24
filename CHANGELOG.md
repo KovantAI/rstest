@@ -75,8 +75,8 @@ between 0.x releases and are listed here.
   `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
   least +1s). Appears once tests have 5 passing runs in the history.
 
-- **A red run says what changed since the last green one.** Every run that
-  exits 0 records its commit, interpreter version, installed packages and a
+- **A red run says what changed since the last green one.** Every whole-suite
+  run that exits 0 on a clean tree records its commit, interpreter version, installed packages and a
   few test-relevant environment variables (`.rstest_cache/green_env.json`).
   A run with failing tests then prints the commits since, and any
   interpreter, package or environment change, on stderr. `rstest

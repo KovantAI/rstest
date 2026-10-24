@@ -729,14 +729,16 @@ rstest: changed since the last green run (3f9c2a1b7e, 6h ago):
     httpx 0.27.2 -> 0.28.1
 ```
 
-Every run that exits 0 records the state compared against
-(`.rstest_cache/green_env.json`), and a run with failing tests prints the
+Every whole-suite run that exits 0 on a clean tree records the state
+compared against (`.rstest_cache/green_env.json`), and a run with failing tests prints the
 same block on stderr when anything differs. When nothing differs this
 command says so: the break is in the tests or what they call, not in the
-environment. Without a recorded green run it says that instead.
+environment. Uncommitted edits to tracked files are listed as a change, and so is a `HEAD`
+checked out behind the green commit. Without a recorded green run it says
+that instead.
 
 `--json` writes a schema-stamped object on stdout (`{meta, found,
-green_commit, green_epoch, commit, commits, python, packages, env}`); each
+green_commit, green_epoch, commit, dirty, commits, python, packages, env}`); each
 change is `{name, green, now}`, with `null` for the side where it is absent.
 `commits` is `null` when git can't resolve the range (not a checkout, or the
 green commit isn't fetched). Field reference:
