@@ -369,6 +369,12 @@ def gate_quarantine(g, args, binary):
         and "QUARANTINED test_q.py::test_real_bug" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-400:],
     )
+    r = g.run(".", "-n", "2", "--quarantine", "missing.txt", cwd=qdir)
+    check(
+        "quarantine: unreadable file is an error, not an empty list",
+        r.returncode != 0 and "--quarantine: cannot read missing.txt" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
     g.write("quar/quarantine.txt", "test_q.py::*\n")
     qx = g.tmp / "quar_junit.xml"
     r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", "--junitxml", str(qx), cwd=qdir)
@@ -590,6 +596,69 @@ def gate_quarantine(g, args, binary):
     check(
         "auto-quarantine: over the cap, -x stops on the auto failures",
         r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Same under --collect lazy, where the test count is only final once every
+    # file is collected. test_0.py sorts first, so one worker is stuck
+    # importing it (AQ_SLOW) and the other collects test_flap.py and runs its
+    # flappers meanwhile: their failures are held (the third waits as the
+    # worker's lookahead). 2 held of 11 tests at 5% (cap 1): the last collect
+    # settles the cap and must stop the run before test_0's tests start.
+    g.write(
+        "autoq_lazy/test_flap.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_c(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    g.write(
+        "autoq_lazy/test_0.py",
+        "import os, time\n"
+        "if os.environ.get('AQ_SLOW'): time.sleep(3)\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(8)),
+    )
+    ldir = g.tmp / "autoq_lazy"
+    git_init_commit(ldir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=ldir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "-x",
+        "--auto-quarantine-max",
+        "5",
+        cwd=ldir,
+        env_extra={"AQ_COUNT": str(cnt), "AQ_SLOW": "1"},
+    )
+    check(
+        "auto-quarantine: lazy, the last collect settles the cap and stops -x",
+        r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Lazy -x with reruns: a failure counts once its retries are spent, and
+    # that final attempt stops the run.
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "-x",
+        "--reruns",
+        "1",
+        "--auto-quarantine=0",
+        cwd=ldir,
+        env_extra={"AQ_COUNT": str(cnt)},
+    )
+    check(
+        "lazy: -x stops on a failure whose reruns are spent",
+        r.returncode == 1 and "stopping after 1 failures" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
 
