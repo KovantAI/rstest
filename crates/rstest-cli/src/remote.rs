@@ -11,7 +11,9 @@
 //!   good enough for scheduling.
 //! - **flakes**: base totals + summed per-run *events* (+1 each), deduped by
 //!   segment id via the base's `absorbed` set so a re-pull never double-counts.
-//! - (coverage index: union per line — added when that artifact lands here.)
+//! - **coverage index**: hash-aware union per line.
+//! - **run history**: each segment carries its run's [`RunSlice`]; runs are
+//!   unioned by run id and replayed oldest first, newest N per test kept.
 //!
 //! This module is pure data + merge logic; transport (Phase 2) and CLI wiring
 //! (Phase 3) live above it. Kept unit-testable with no IO.
@@ -24,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache;
 use crate::reporting::flakes::FlakeStats;
+use crate::reporting::history::{self, History, RunSlice};
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
@@ -49,6 +52,10 @@ pub struct Segment {
     /// Empty for non-coverage runs; pre-coverage segments deserialize to empty.
     #[serde(default)]
     pub cov_index: CoverageIndex,
+    /// This run's per-test history entries. `None` from segments written
+    /// before history was shared, or when no test produced a real result.
+    #[serde(default)]
+    pub history: Option<RunSlice>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +91,9 @@ pub struct Base {
     /// on a hash conflict. Remote-only; never written to the local cache.
     #[serde(default)]
     pub cov_ts: HashMap<String, u64>,
+    /// Run history folded into this base (newest N runs per test, aged).
+    #[serde(default)]
+    pub history: History,
     /// Segment ids already accumulated into this base.
     #[serde(default)]
     pub absorbed: HashSet<String>,
@@ -95,6 +105,7 @@ pub struct Merged {
     pub durations: HashMap<String, f64>,
     pub flakes: HashMap<String, FlakeStats>,
     pub cov_index: CoverageIndex,
+    pub history: History,
 }
 
 /// Merge a base (optional) and a set of segments into the local cache shape.
@@ -117,6 +128,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
     let mut flakes = base.flakes;
     let mut cov = base.cov_index;
     let mut cov_ts = base.cov_ts;
+    let mut runs = base.history.into_slices();
     // Any base file lacking a recorded timestamp defaults to 0 (pre-cov_ts base).
     for k in cov.files.keys() {
         cov_ts.entry(k.clone()).or_insert(0);
@@ -136,6 +148,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
     });
 
     for seg in fresh {
+        runs.extend(seg.history);
         for (nodeid, secs) in seg.durations {
             durations.insert(nodeid, secs); // oldest→newest order => newest wins
         }
@@ -162,6 +175,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
             durations,
             flakes,
             cov_index: cov,
+            history: History::merged(runs, history::cap()),
         },
         cov_ts,
     )
@@ -235,6 +249,7 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
             durations,
             flakes,
             cov_index,
+            history,
         },
         cov_ts,
     ) = merge_inner(base, segments);
@@ -246,6 +261,7 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
         flakes,
         cov_index,
         cov_ts,
+        history,
         absorbed,
     }
 }
@@ -261,6 +277,7 @@ pub fn segment_from_run(
     generated_at: u64,
     run: &Run,
     cov_index: CoverageIndex,
+    history: Option<RunSlice>,
 ) -> Segment {
     let durations = run
         .learned_durations()
@@ -287,6 +304,7 @@ pub fn segment_from_run(
         durations,
         flake_events,
         cov_index,
+        history,
     }
 }
 
@@ -304,7 +322,7 @@ pub fn load_local_cov_index() -> CoverageIndex {
 }
 
 /// Write a merged result into the local `.rstest_cache` (durations + flakes +
-/// coverage index), so the normal `durations::load` / `flakes::load` /
+/// coverage index + run history), so the normal `durations::load` / `flakes::load` /
 /// `load_coverage_index` paths pick it up. Durations and flakes are OVERLAID
 /// onto the existing local files (remote wins on shared keys) so a pull augments
 /// rather than discards local-only history that hasn't been pushed yet. Sparse
@@ -337,6 +355,9 @@ fn write_local_in(dir: &Path, merged: &Merged) {
                 let _ = cache::write_atomic(&path, &bytes);
             }
         }
+        // Runs already in the local history (this machine's own, pushed
+        // earlier) dedupe by run id.
+        history::overlay_in(&dir.join(history::FILE), merged.history.clone());
     });
     // The coverage index is regenerated each run and drives selection off the
     // merged view, so it is replaced (not overlaid) with the pulled union.
@@ -1148,7 +1169,12 @@ pub fn compact_remote_with(
         }
     }
     let folded = segments.len();
-    let new_base = compact(base, segments);
+    let mut new_base = compact(base, segments);
+    // Age the history like the local file, so a deleted test's runs don't
+    // ride in the base forever.
+    new_base
+        .history
+        .age(now, crate::reporting::flakes::retention_secs());
     t.write_base(&serde_json::to_vec(&new_base).context("serializing base.json")?)?;
     // Re-read the persisted base and prune only segments it absorbed, so a
     // concurrent compaction that overwrote our base with a different fold set
@@ -1193,6 +1219,7 @@ mod tests {
                 })
                 .collect(),
             cov_index: CoverageIndex::default(),
+            history: None,
         }
     }
 
@@ -1225,6 +1252,7 @@ mod tests {
             durations: HashMap::new(),
             flake_events: Vec::new(),
             cov_index: idx,
+            history: None,
         }
     }
 
@@ -1273,6 +1301,7 @@ mod tests {
                 ("remote".to_string(), stats(2, 0)),
             ]),
             cov_index: CoverageIndex::default(),
+            history: History::default(),
         };
         write_local_in(&dir, &merged);
 
@@ -1303,6 +1332,7 @@ mod tests {
             durations: HashMap::new(),
             flakes: HashMap::new(),
             cov_index: cov.clone(),
+            history: History::default(),
         };
         write_local_in(&dir, &merged);
         assert!(
@@ -1310,6 +1340,10 @@ mod tests {
             "empty durations not written"
         );
         assert!(!dir.join(flakes::FILE).exists(), "empty flakes not written");
+        assert!(
+            !dir.join(history::FILE).exists(),
+            "empty history not written"
+        );
         let got: CoverageIndex =
             serde_json::from_slice(&std::fs::read(dir.join(COVERAGE_INDEX_FILE)).unwrap()).unwrap();
         assert_eq!(got.files.len(), 1);
@@ -1586,6 +1620,101 @@ mod tests {
         let f = m.flakes.get("t::f").unwrap();
         assert_eq!((f.flaky, f.failed), (1, 1));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A segment carrying one run's history: `t::a` with `outcome`.
+    fn hist_seg(id: &str, at: u64, outcome: &str) -> Segment {
+        use crate::reporting::history::{outcome_code, Entry, RunMeta};
+        Segment {
+            history: Some(RunSlice {
+                run: RunMeta {
+                    seq: 0,
+                    id: id.into(),
+                    epoch: at,
+                    commit: Some(format!("c-{id}")),
+                },
+                tests: HashMap::from([(
+                    "t::a".to_string(),
+                    Entry {
+                        run: 0,
+                        outcome: outcome_code(outcome).unwrap(),
+                        call: Some(0.5),
+                        setup: 0.0,
+                    },
+                )]),
+            }),
+            ..seg(id, at, &[], &[])
+        }
+    }
+
+    fn strip(h: &History) -> Vec<String> {
+        h.series("t::a")
+            .iter()
+            .map(|(_, e)| e.outcome_name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn history_rides_segments_through_pull_compact_and_local_overlay() {
+        let now = crate::time::now_epoch_secs();
+        let root = tmp_dir("history");
+        let t = DirTransport::new(&root);
+        // Past the default 90-day retention: compaction ages it out.
+        push(&t, &hist_seg("ancient", now - 200 * 86_400, "failed")).unwrap();
+        push(&t, &hist_seg("r1", now - 20, "passed")).unwrap();
+        push(&t, &hist_seg("r2", now - 10, "failed")).unwrap();
+        // A segment from before history was shared: no `history` key at all.
+        t.write_segment(
+            "legacy",
+            br#"{"schema":1,"id":"legacy","generated_at":5,"durations":{"t::a":1.0}}"#,
+        )
+        .unwrap();
+
+        let (mut sink, cap) = Sink::captured();
+        let m = pull(&t, &mut sink).unwrap();
+        assert_eq!(cap.err(), "", "legacy segment parses");
+        assert_eq!(strip(&m.history), ["failed", "passed", "failed"]);
+        assert_eq!(
+            m.history.series("t::a")[2].0.commit.as_deref(),
+            Some("c-r2")
+        );
+
+        compact_remote_with(
+            &t,
+            &mut Sink::captured().0,
+            now,
+            &RetentionPolicy::default(),
+        )
+        .unwrap();
+        let base: Base = serde_json::from_slice(&t.read_base().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            strip(&base.history),
+            ["passed", "failed"],
+            "aged in the base"
+        );
+        // A lingering copy of a folded run never lands twice.
+        push(&t, &hist_seg("r2", now - 10, "failed")).unwrap();
+        let m = pull(&t, &mut Sink::captured().0).unwrap();
+        assert_eq!(strip(&m.history), ["passed", "failed"]);
+
+        // Pull into a cache that already holds r1 (this machine pushed it)
+        // plus a local-only run: r1 once, local run kept, epoch order.
+        let dir = tmp_dir("history-local");
+        std::fs::create_dir_all(&dir).unwrap();
+        let local = History::merged(
+            [
+                hist_seg("r1", now - 20, "passed").history.unwrap(),
+                hist_seg("local", now - 15, "passed").history.unwrap(),
+            ],
+            50,
+        );
+        std::fs::write(dir.join(history::FILE), rmp_serde::to_vec(&local).unwrap()).unwrap();
+        write_local_in(&dir, &m);
+        let got = history::load_from(&dir.join(history::FILE));
+        let ids: Vec<&str> = got.runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["r1", "local", "r2"]);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

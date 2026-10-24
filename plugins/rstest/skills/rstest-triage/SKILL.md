@@ -151,8 +151,9 @@ outcome strip that put it there. The auto set can't tell real nondeterminism
 from an order dependency, so check for a polluter (`bisect`) before treating
 an auto-quarantined test as plain flaky.
 
-Recommend persisting `.rstest_cache` across CI runs whenever flake history
-matters; without it, `explain`, `--reruns-only-known-flaky` and
+Recommend persisting `.rstest_cache` across CI runs (or `--cache-pull
+--cache-push`, which carries the run history between shards and runners)
+whenever flake history matters; without it, `explain`, `--reruns-only-known-flaky` and
 `--auto-quarantine` have nothing to read on CI.
 
 One trap to steer around when writing the policy:

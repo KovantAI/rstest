@@ -319,7 +319,7 @@ pub(crate) fn auto_quarantine_cap(total: usize, max_pct: u32) -> usize {
 pub(crate) struct MaxfailCount<'a> {
     quarantine: Option<&'a Quarantine>,
     /// The run's test count, once known; auto failures are held until then.
-    total: Option<usize>,
+    pub total: Option<usize>,
     auto_failed: HashSet<String>,
     held: u64,
     /// Failures counted so far.

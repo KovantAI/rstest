@@ -709,10 +709,15 @@ pub(super) fn run_post_gates(
         flakes::record(&outcome.run);
         // A parent rstest's probe runs (bisect, audit, migrate-check; the only
         // users of --instrument-workers) pass and fail one test on purpose
-        // over and over: recorded, those are flips that auto-quarantine the
-        // very test they found.
-        if !cli.instrument_workers {
-            history::record(&outcome.run, started_epoch, history_commit);
+        // over and over: recorded (or pushed), those are flips that
+        // auto-quarantine the very test they found.
+        let history_slice = if cli.instrument_workers {
+            None
+        } else {
+            history::slice(&outcome.run, started_epoch, history_commit)
+        };
+        if let Some(slice) = &history_slice {
+            history::record(slice.clone());
         }
         // --cache-push: publish THIS run's contribution as one immutable
         // segment (from the in-memory Run, not the merged local cache). A push
@@ -729,6 +734,7 @@ pub(super) fn run_post_gates(
                 started_epoch,
                 &outcome.run,
                 cov,
+                history_slice,
             );
             // Build the transport once and reuse it for an optional inline
             // auto-compaction after a successful push.
@@ -1106,7 +1112,7 @@ impl Quarantine {
                 e.any_phase_failed() && self.auto.contains(*id) && !self.file.is_match(id)
             })
             .count();
-        let total = run.tests().len();
+        let total = run.cap_total.unwrap_or_else(|| run.tests().len());
         let cap = crate::scheduling::orchestrator::auto_quarantine_cap(total, self.max_pct);
         if failed <= cap {
             return &self.all;
@@ -1466,6 +1472,7 @@ mod tests {
         for seq in 0..runs as u64 {
             h.runs.push(RunMeta {
                 seq,
+                id: format!("r{seq}"),
                 epoch: 0,
                 // One clean commit: pass->fail flips only count within one.
                 commit: Some("c".into()),
@@ -1588,6 +1595,52 @@ mod tests {
             .demotion_matcher(&run, &mut Sink::captured().0)
             .is_match("t.py::f2"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// `-x` cut the run short: the in-run count held the auto failures against
+    /// a cap from the collected total, so the post-run demotion must use that
+    /// same total, not the handful of tests that got to report.
+    #[test]
+    fn auto_quarantine_cap_uses_the_in_run_total_after_an_early_stop() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let rep = |nodeid: String, outcome: &str| Report {
+            nodeid,
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+            subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
+        };
+        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
+        let ids = ["t.py::f1", "t.py::f2", "t.py::f3", "t.py::f4"];
+        let h = history_of(&ids.map(|id| (id, flap)));
+        let q = quarantine_set(None, 3, 5, &h, &mut Sink::captured().0)
+            .unwrap()
+            .unwrap();
+        // 1000 collected, stopped after 41 reported: in-run cap 50, not 3.
+        let mut run = Run::default();
+        for id in ids {
+            run.record(None, rep(id.into(), "failed"));
+        }
+        for i in 0..37 {
+            run.record(None, rep(format!("t.py::ok{i}"), "passed"));
+        }
+        run.cap_total = Some(1000);
+        let (mut sink, cap) = Sink::captured();
+        let m = q.demotion_matcher(&run, &mut sink);
+        assert!(ids.iter().all(|id| m.is_match(id)));
+        assert_eq!(cap.err(), "");
     }
 
     #[test]
@@ -1835,6 +1888,7 @@ mod tests {
                 })
                 .collect(),
             cov_index: Default::default(),
+            history: None,
         }
     }
 

@@ -1469,6 +1469,7 @@ pub fn run_pool(
     for id in &cached_ids {
         run.record_cached(id.clone());
     }
+    run.cap_total = fail_count.total;
     let retried = reruns > 0 || !run.flaky.is_empty();
     let exitstatus = orchestrator::finalize_exit(
         &statuses,

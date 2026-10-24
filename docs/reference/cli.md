@@ -594,8 +594,9 @@ that returned nothing. Not evaluated where the gate doesn't run: `--co`,
 
 ### `--cache-remote <URL|DIR>` / `--cache-pull` / `--cache-push`
 
-Publish and warm the `.rstest_cache` (durations, flake history, and the
-`--changed` coverage index) to and from a **shared remote**, with no
+Publish and warm the `.rstest_cache` (durations, flake history, the per-test
+run history, and the `--changed` coverage index) to and from a **shared
+remote**, with no
 hand-rolled `actions/cache` glue or dedicated refresh job. Env:
 `RSTEST_CACHE_REMOTE` (the flag wins). `--cache-remote` accepts:
 

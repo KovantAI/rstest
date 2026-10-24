@@ -753,6 +753,7 @@ mod tests {
     fn run(seq: u64, commit: Option<&str>) -> RunMeta {
         RunMeta {
             seq,
+            id: format!("r{seq}"),
             epoch: 0,
             commit: commit.map(String::from),
         }

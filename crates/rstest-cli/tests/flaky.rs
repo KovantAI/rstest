@@ -18,9 +18,11 @@ fn project(tag: &str, pyproject: Option<&str>) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    // Positional encoding (see tests/explain.rs): runs = [seq, epoch, commit],
+    // Positional encoding (see tests/explain.rs): runs = [seq, id, epoch, commit],
     // entries = [run, outcome, call, setup], outcome 0 = passed, 1 = failed.
-    let runs: Vec<Value> = (0..4u64).map(|s| json!([s, now, "c0"])).collect();
+    let runs: Vec<Value> = (0..4u64)
+        .map(|s| json!([s, format!("r{s}"), now, "c0"]))
+        .collect();
     let strip = |o: [u8; 4]| -> Vec<Value> {
         (0..4u64)
             .map(|s| json!([s, o[s as usize], 0.1, 0.0]))

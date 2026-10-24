@@ -39,6 +39,14 @@ between 0.x releases and are listed here.
   auto-quarantines it. `--top N` sets how many to show (default 20, `0` for
   all), and `--json` writes the same ranking for dashboards.
 
+- **The run history rides the shared cache.** `--cache-push` segments now
+  carry the run's per-test history entries, `--cache-pull` merges them into
+  the local `history.msgpack` (each run once, by run id), and `cache-compact`
+  folds them into `base.json`, dropping runs past
+  `RSTEST_FLAKE_RETENTION_DAYS`. Sharded and ephemeral CI runners now build
+  one history, so `explain`, `rstest flaky` and auto-quarantine see every run.
+  Older segments without history still merge.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind
