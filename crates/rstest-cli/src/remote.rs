@@ -94,8 +94,7 @@ pub struct Base {
     /// Run history folded into this base (newest N runs per test, aged).
     /// Written as one string, base64 of gzipped msgpack: as plain JSON it
     /// grows to tens of MB on a large suite. Releases that predate the field
-    /// ignore it; a damaged value reads as an empty history, never a failed
-    /// pull.
+    /// ignore it; a damaged value is a corrupt base (see [`pull`]).
     #[serde(
         default,
         with = "packed_history",
@@ -274,40 +273,39 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
     }
 }
 
-/// `Base::history` as base64(gzip(msgpack)).
+/// `Base::history` as base64(gzip(msgpack)). Structs are msgpack maps keyed
+/// by field name, so like JSON a build that adds a field still reads (and an
+/// older one ignores) what the other wrote.
 mod packed_history {
     use std::io::{Read, Write};
 
     use base64::Engine;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{de, ser, Deserialize, Deserializer, Serializer};
 
     use super::History;
 
-    pub fn encode(h: &History) -> Option<String> {
-        let raw = rmp_serde::to_vec(h).ok()?;
+    pub fn encode(h: &History) -> anyhow::Result<String> {
+        let raw = rmp_serde::to_vec_named(h)?;
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        gz.write_all(&raw).ok()?;
-        Some(base64::engine::general_purpose::STANDARD.encode(gz.finish().ok()?))
+        gz.write_all(&raw)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(gz.finish()?))
     }
 
-    pub fn decode(s: &str) -> Option<History> {
-        let gz = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+    pub fn decode(s: &str) -> anyhow::Result<History> {
+        let gz = base64::engine::general_purpose::STANDARD.decode(s)?;
         let mut raw = Vec::new();
-        flate2::read::GzDecoder::new(gz.as_slice())
-            .read_to_end(&mut raw)
-            .ok()?;
-        rmp_serde::from_slice(&raw).ok()
+        flate2::read::GzDecoder::new(gz.as_slice()).read_to_end(&mut raw)?;
+        Ok(rmp_serde::from_slice(&raw)?)
     }
 
     pub fn serialize<S: Serializer>(h: &History, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&encode(h).unwrap_or_default())
+        s.serialize_str(&encode(h).map_err(ser::Error::custom)?)
     }
 
-    /// Lenient: anything but a decodable string is an empty history, so a
-    /// damaged field never fails the whole pull.
+    /// Strict: a damaged value fails the base read like any other corrupt
+    /// field, so compaction never rewrites the base with the history dropped.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<History, D::Error> {
-        let v = serde_json::Value::deserialize(d)?;
-        Ok(v.as_str().and_then(decode).unwrap_or_default())
+        decode(&String::deserialize(d)?).map_err(|e| de::Error::custom(format!("history: {e:#}")))
     }
 }
 
@@ -1701,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn base_history_is_packed_small_and_read_leniently() {
+    fn base_history_is_packed_small_keyed_and_strict() {
         // 200 tests x 50 runs, the shape a real base holds.
         let slices = (0..50u64).map(|r| RunSlice {
             run: crate::reporting::history::RunMeta {
@@ -1750,19 +1748,56 @@ mod tests {
         );
         let back: Base = serde_json::from_str(&json).unwrap();
         assert_eq!(back.history, history);
+        // Keyed by field name, not position: a build that adds a field still
+        // reads what an older one wrote, and the other way round.
+        let gz = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v["history"].as_str().unwrap(),
+        )
+        .unwrap();
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz.as_slice()), &mut raw)
+            .unwrap();
+        let tree: serde_json::Value = rmp_serde::from_slice(&raw).unwrap();
+        assert!(
+            tree["runs"][0]["commit"].is_string(),
+            "{:.200}",
+            tree.to_string()
+        );
 
         // No history: the field is left out.
         let empty = serde_json::to_value(Base::default()).unwrap();
         assert!(empty.get("history").is_none(), "{empty}");
 
-        // A damaged or foreign value reads as an empty history; the rest of
-        // the base still loads, so the pull never fails over it.
-        for bad in [r#""not base64!""#, r#""aGVsbG8=""#, r#"{"runs": []}"#, "42"] {
+        // A damaged or foreign value is a corrupt base: reading it fails
+        // rather than yielding an empty history compaction would write back.
+        for bad in [
+            r#""not base64!""#,
+            r#""aGVsbG8=""#,
+            r#""""#,
+            r#"{"runs": []}"#,
+            "42",
+        ] {
             let doc = format!(r#"{{"schema":1,"durations":{{"t::a":1.5}},"history":{bad}}}"#);
-            let b: Base = serde_json::from_str(&doc).unwrap();
-            assert!(b.history.is_empty(), "{bad}");
-            assert_eq!(b.durations["t::a"], 1.5);
+            assert!(serde_json::from_str::<Base>(&doc).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn compaction_never_rewrites_a_base_with_unreadable_history() {
+        let root = tmp_dir("compact-bad-history");
+        let t = DirTransport::new(&root);
+        let doc = br#"{"schema":1,"durations":{"t::a":1.5},"history":"not base64!"}"#;
+        t.write_base(doc).unwrap();
+        push(&t, &seg("s1", 10, &[("t::a", 2.0)], &[])).unwrap();
+        let policy = RetentionPolicy {
+            keep_last: Some(0),
+            max_age: None,
+        };
+        assert!(compact_remote_with(&t, &mut Sink::captured().0, 100, &policy).is_err());
+        assert_eq!(t.read_base().unwrap().unwrap(), doc.to_vec());
+        assert_eq!(t.list_segment_ids().unwrap(), vec!["s1".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

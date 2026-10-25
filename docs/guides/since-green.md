@@ -238,10 +238,14 @@ how tests behave (`PYTEST_ADDOPTS`, `PYTHONPATH`, `PYTHONHASHSEED`,
 `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`). This happens with or
 without `--since-green`. A run that passes only part of the suite records
 nothing: `--co`, `-k`/`-m`, node ids, a sub-path, `--lf`/`--sw`,
-`--deselect`/`--ignore`, a shard, `--changed`/`--since-green` narrowing,
-`--incremental` cache hits and `--watch`. A path argument is fine when it
-covers the suite (the rootdir, or one that contains every `testpaths` entry,
-like CI's `rstest tests/`). Neither does a green run over uncommitted edits,
+`--deselect`/`--ignore`, `--setup-plan`/`--setup-only`/`--fixtures`,
+`--markers`, `--pyargs`, a shard, `--changed`/`--since-green` narrowing,
+`--incremental` cache hits and `--watch`, as does a run from a subdirectory
+with no path argument. Path arguments are fine when they cover the suite: the
+rootdir, or paths that together contain every `testpaths` entry. CI's
+`rstest tests/` counts only when `testpaths` names `tests`; without
+`testpaths`, run from the rootdir with no path. An `@argsfile` is judged by
+the arguments it lists. Neither does a green run over uncommitted edits,
 for the same reason as the `--since-green` baseline above.
 
 When a later run has failing tests, rstest prints what differs on stderr:
