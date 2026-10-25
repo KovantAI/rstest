@@ -777,7 +777,9 @@ pub fn run_lazy_pool(
         collect_aborted,
         run.stopped_after.is_some(),
     );
-    run.cap_total = fail_count.total;
+    // -x can stop the run before every file is collected, leaving the count
+    // unsettled: the collected files still bound it better than what reported.
+    run.cap_total = Some(fail_count.total.unwrap_or(total_items));
     // pytest.exit(): its returncode is the run's exit code, as under pytest.
     let exitstatus = run
         .session_exit
