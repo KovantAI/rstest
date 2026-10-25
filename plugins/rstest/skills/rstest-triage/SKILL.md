@@ -7,7 +7,8 @@ description: >-
   hung, or the team needs a policy for known-flaky tests. Drives rstest's
   diagnostic commands (`rstest replay` to re-run a CI schedule locally from its
   journal, `rstest bisect` to find the polluting test, `rstest audit` to sweep
-  for parallel-only failures, `rstest explain` for one test's history) and the
+  for parallel-only failures, `rstest explain` for one test's history,
+  `rstest flaky` for the suite's ranked flaky tests) and the
   flaky-test controls (`--reruns`, `--reruns-only-known-flaky`, `--quarantine`,
   `--auto-quarantine`, `--shuffle`). Use it whenever the user has an rstest
   failure to explain or fix, mentions a replay journal, `latest.json`, a
@@ -57,7 +58,8 @@ after spending runs to find out.
 | One victim test that fails after others | `rstest bisect <nodeid>` | Delta-debugs the predecessor set at `-n 0` down to the minimal polluter(s), prints a repro command |
 | "Which of our tests aren't parallel-safe?" | `rstest audit` (add `--audit-repeat 5` for races) | Sweeps the suite in parallel (at least two workers) against a serial oracle, classifies each parallel-only failure, emits a paste-ready `serial` block |
 | A suspicion of order dependence, no victim yet | `rstest --shuffle` | A seeded random order flushes it out; the printed seed reproduces it |
-| "Is this test flaky, and how often?" | `rstest explain <nodeid>` | Reads the caches (duration, flake/fail counts, last outcome, coverage) without running anything |
+| "Is this test flaky, and how often?" | `rstest explain <nodeid>` | Reads the caches (duration, flake/fail counts, recent outcome strip, the commit it broke at, coverage) without running anything |
+| "Which of our tests are flaky? Is it getting worse?" | `rstest flaky` | Ranks every test that flipped between pass and fail from the run history, with trend and which ones the next run auto-quarantines |
 | A hang (run never finishes, or a worker stalls) | `--timeout SECS` on the command line, plus `--stream-json` | Fails the stuck test in-process with a traceback at the stuck line and arms a backstop; the stream names the test even if the job is killed. See "Hangs" in `references/commands.md` |
 | A crashed worker | the run's own report | rstest names the test that was running, the worker's exit code or signal, and its last stderr lines |
 

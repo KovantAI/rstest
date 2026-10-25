@@ -2,7 +2,8 @@
 
 These commands don't run your suite as a normal test run. Each is given as
 the first argument (`rstest try`); a path literally named after one is
-disambiguated with `rstest ./try` or `rstest -- try`. rstest's own options
+disambiguated with `rstest ./try` or `rstest -- try` (when such a path exists,
+a bare `rstest try` still runs the subcommand and warns). rstest's own options
 and value-less pytest switches may also come before it (`rstest -q try`,
 `rstest --python 3.12 migrate-check`). A subcommand name after a test path
 or a pytest option's value (`rstest -k foo try`) is a usage error that says
@@ -28,7 +29,7 @@ what each one accepts.
 
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
-- **Inspection and integrity:** [`explain`](#explain), [`verify-vendor`](#verify-vendor)
+- **Inspection and integrity:** [`explain`](#explain), [`flaky`](#flaky), [`verify-vendor`](#verify-vendor)
 - **Agent skills:** [`install-skills`](#install-skills)
 
 ## Adoption and parallel safety
@@ -392,7 +393,10 @@ failure, the culprit's own included, can't stop a run before the victim.
 refuses them (exit `2`) and says how to drop them for the bisect. rstest's own
 `[tool.rstest] reruns` config is off in the child runs too: a passing rerun
 would hide the failure, and a rerun run goes through the pool, which orders
-tests by duration. A `--confcutdir` of your own is kept as pytest applied it.
+tests by duration. The printed command also passes `--auto-quarantine=0`: an
+order-dependent victim is exactly what auto-quarantine demotes, which would
+turn the reproduced failure into a green run. A `--confcutdir` of your own is
+kept as pytest applied it.
 
 Bounded to ~80 child runs; if it hits that ceiling it stops and reports the
 smallest reproducing set found (may not be fully minimal). Large suites are
@@ -635,6 +639,55 @@ with `"found": false` so tooling can probe nodeids cheaply.
 The range between "last passed at" and "failing since" often names the commit
 that broke the test; `git log <last>..<first>` (without any `-dirty`
 suffix) lists the candidates.
+
+### `flaky`
+
+Rank the suite's flaky tests from the per-test run history, without running
+anything. `explain` answers "what about this test?"; `flaky` answers "which
+tests keep doing this, and is it getting worse?".
+
+```console
+$ rstest flaky
+3 flaky test(s) of 412 in the history (auto-quarantine at 3+ flips)
+
+  flips  trend    recent runs           flaky  failed  last flip  test
+      5  steady   ✓✗✓✗✓✗✓✗✓✗                0       5  2h ago     tests/test_ws.py::test_reconnect  [auto-quarantined]
+      2  worse    ✓✓✓✓✓✓✓✗✓✗                0       2  3h ago     tests/test_poll.py::test_eventually
+      1  failing  ✓✓✓✓✗✗✗✗✗✗                0       6  1d ago     tests/test_api.py::test_login
+
+1 shown test(s) will be auto-quarantined on the next run; `rstest explain <nodeid>` shows one test's history
+```
+
+A test is listed when it has at least one **flip** in its recorded history: a
+run that passed only on rerun, or a failure right after a passing run (the
+same rule as [`--auto-quarantine`](cli.md#-auto-quarantinen)). Tests are
+ranked by flips, then by the newest flip. The columns:
+
+- `flips`: flips across the recorded runs.
+- `trend`: `failing` when the last 3 pass/fail results all failed (it broke
+  and isn't flapping now); otherwise `worse` or `better` when the newer half
+  of the history has at least 2 more or fewer flips than the older half,
+  else `steady`.
+- `recent runs`: the last 20 outcomes, oldest first, with `explain`'s glyphs
+  (`✓` passed, `~` passed on rerun, `✗` failed or errored, `-` skipped).
+- `flaky` / `failed`: runs that passed only on rerun / failed, across the
+  recorded history.
+- `last flip`: how long ago the newest flip ran.
+- `[auto-quarantined]`: the next run quarantines this test at the
+  `[tool.rstest] auto-quarantine` threshold (default 3).
+
+`--top N` shows the N most-flipping tests (default 20; `0` shows all).
+`--json` writes the same ranking as a schema-stamped object on stdout
+(`{meta, auto_quarantine, tests_in_history, flaky_tests, tests}`, each test
+carrying its full outcome series and `last_flip_epoch`) for dashboards; it
+honors `--top`, so pass `--top 0` for every test. Field reference:
+[Flaky JSON](output-schemas.md#flaky).
+
+It reads only `.rstest_cache/history.msgpack` (the last `RSTEST_HISTORY_RUNS`
+runs of each test, aged by `RSTEST_FLAKE_RETENTION_DAYS`), needs no
+interpreter, runs no tests, and exits `0`. A history that only CI runs build
+(sharded or ephemeral runners) is not merged through `--cache-push` yet, so
+run it where the history accumulates, or restore `.rstest_cache` first.
 
 ### `verify-vendor`
 

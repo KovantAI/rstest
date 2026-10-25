@@ -482,13 +482,15 @@ a git checkout only reruns count. The history is the per-test run store in
 history quarantines nothing.
 
 A test that broke and stays broken flips once, so a real regression still
-fails the run. Matching failures get the same `quarantined` outcome as
+fails the run. A test whose last 3 pass/fail results all failed is left out
+of the set whatever its past flips, so a flaky test that then breaks for real
+fails the run again. Matching failures get the same `quarantined` outcome as
 [`--quarantine`](#-quarantine-file), and the two compose: the run quarantines
 the union of the file and the auto set. rstest prints the auto set to stderr
 at the start of the run (the run log is the audit trail, there is no committed
 list). A test leaves the set once enough of its flips fall out of the history
-window. Attach `N` with `=`: `--auto-quarantine 5` is a bare
-`--auto-quarantine` plus a test path `5` (see
+window. Attach `N` with `=`: `--auto-quarantine 5` is a usage error (exit
+`2`) unless a path named `5` exists (see
 [Optional-value flags](#argument-splitting)). Monorepo runs forward it to
 every project, each reading its own history.
 

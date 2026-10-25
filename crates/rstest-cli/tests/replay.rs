@@ -386,6 +386,41 @@ fn replay_ignores_config_reruns() {
     assert!(out.contains("1 failed, 1 passed"), "{out}");
 }
 
+/// Replay must not auto-quarantine from the local flip history: a test that
+/// flipped often enough locally was demoted to "quarantined" and the replay
+/// exited 0, so a reproduced failure looked like it didn't reproduce.
+#[test]
+fn replay_ignores_auto_quarantine() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("autoq");
+    // Fails on even attempts, passes on odd: `--reruns 1` makes every plain
+    // run `flaky`, a flip each.
+    std::fs::write(
+        dir.join("test_f.py"),
+        "import os\n\ndef test_f():\n    n = int(open('n').read()) if os.path.exists('n') else 0\n    open('n', 'w').write(str(n + 1))\n    assert n % 2\n\ndef test_ok():\n    pass\n",
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let (code, out) = run(&venv, &dir, &["-n", "2", "--reruns", "1"]);
+        assert_eq!(code, 0, "{out}");
+    }
+    // A plain run now auto-quarantines it (the precondition for the bug).
+    let (code, out) = run(&venv, &dir, &["-n", "2"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("--auto-quarantine: 1 test(s)"), "{out}");
+    write_journal(
+        &dir,
+        "journal.json",
+        &[&["test_f.py::test_f"], &["test_f.py::test_ok"]],
+        2,
+    );
+    std::fs::remove_file(dir.join("n")).unwrap(); // replay's attempt fails
+    let (code, out) = run(&venv, &dir, &["replay", "--journal", "journal.json"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "the failure must surface\n{out}");
+    assert!(out.contains("1 failed, 1 passed"), "{out}");
+}
+
 /// `@pytest.mark.serial` tests ran alone in the recording (serial phase), so
 /// replay must not start one until every other worker has finished, even when
 /// the journal lists it first on its worker.

@@ -31,6 +31,14 @@ between 0.x releases and are listed here.
   is the likelier cause. `[tool.rstest]` takes `quarantine`, `auto-quarantine` and
   `auto-quarantine-max`.
 
+- **`rstest flaky` ranks the suite's flaky tests.** A run-less command that
+  reads the per-test run history and lists every test that flipped between
+  pass and fail, ranked by flips, with its recent outcome strip, trend
+  (`worse`, `better`, `steady`, or `failing` when it broke and stays broken),
+  flaky and failed counts, the age of its last flip, and whether the next run
+  auto-quarantines it. `--top N` sets how many to show (default 20, `0` for
+  all), and `--json` writes the same ranking for dashboards.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind

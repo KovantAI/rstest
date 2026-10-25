@@ -103,7 +103,9 @@ impl History {
     /// a pass on the same clean commit (non-pass/non-fail outcomes like
     /// `skipped` are stepped over). A test that broke and stays broken flips
     /// once, so a real regression is never auto-quarantined at the default
-    /// `min`; one broken and fixed across edits doesn't flip at all.
+    /// `min`; one broken and fixed across edits doesn't flip at all. A test
+    /// [`failing_now`] is left out whatever its past flips: a flapper that
+    /// then broke for real must fail the run again.
     pub fn flippers(&self, min: u32) -> Vec<String> {
         let commits: HashMap<u64, Option<&str>> = self
             .runs
@@ -114,10 +116,11 @@ impl History {
             .tests
             .iter()
             .filter(|(_, s)| {
-                flips(
-                    s.iter()
-                        .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
-                ) >= min
+                !failing_now(s.iter().map(Entry::outcome_name))
+                    && flips(
+                        s.iter()
+                            .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
+                    ) >= min
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -169,29 +172,55 @@ impl History {
     }
 }
 
-/// Flips in one test's `(commit, entry)` series, oldest first. A pass then a
-/// fail counts only when both runs share a commit with no uncommitted edits:
-/// across a code change, the fail is the change, not flakiness.
-fn flips<'a>(series: impl Iterator<Item = (Option<&'a str>, &'a Entry)>) -> u32 {
-    let mut n = 0;
+/// A failing outcome, as flips and [`failing_now`] read it.
+pub fn is_fail(outcome: &str) -> bool {
+    matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
+}
+
+/// The latest 3 pass/fail results (oldest-first `outcomes`) all failed: it
+/// broke and isn't flapping now.
+pub fn failing_now<'a>(outcomes: impl DoubleEndedIterator<Item = &'a str>) -> bool {
+    let tail: Vec<&str> = outcomes
+        .rev()
+        .filter(|o| is_fail(o) || matches!(*o, "passed" | "flaky"))
+        .take(3)
+        .collect();
+    tail.len() == 3 && tail.iter().all(|o| is_fail(o))
+}
+
+fn flips<'a>(series: impl IntoIterator<Item = (Option<&'a str>, &'a Entry)>) -> u32 {
+    flip_positions(series).len() as u32
+}
+
+/// Indices (oldest first) of the flips in one test's `(commit, entry)`
+/// series: a `flaky` pass, or a fail right after a pass. The pass-then-fail
+/// counts only when both runs share a commit with no uncommitted edits:
+/// across a code change, the fail is the change, not flakiness. Skips,
+/// xfails etc. are stepped over.
+pub fn flip_positions<'a>(
+    series: impl IntoIterator<Item = (Option<&'a str>, &'a Entry)>,
+) -> Vec<usize> {
+    let mut out = Vec::new();
     // The commit of the latest run, when that run passed.
     let mut last_pass: Option<Option<&str>> = None;
-    for (commit, e) in series {
+    for (i, (commit, e)) in series.into_iter().enumerate() {
         match e.outcome_name() {
             "flaky" => {
-                n += 1;
+                out.push(i);
                 last_pass = Some(commit);
             }
             "passed" => last_pass = Some(commit),
             "failed" | "errors" | "crashed" | "quarantined" => {
                 let clean = commit.is_some_and(|c| !c.ends_with("-dirty"));
-                n += u32::from(clean && last_pass == Some(commit));
+                if clean && last_pass == Some(commit) {
+                    out.push(i);
+                }
                 last_pass = None;
             }
             _ => {}
         }
     }
-    n
+    out
 }
 
 /// Entries kept per test. `RSTEST_HISTORY_RUNS`, default 50, minimum 1.
@@ -248,6 +277,11 @@ pub fn load_from(path: &std::path::Path) -> History {
 
 /// Append this run to the stored history. Best-effort: IO errors are ignored.
 pub fn record(run: &Run, epoch: u64, commit: Option<&str>) {
+    record_in(&cache::dir(), run, epoch, commit, cap());
+}
+
+/// `record` against an explicit cache dir and per-test cap.
+fn record_in(dir: &std::path::Path, run: &Run, epoch: u64, commit: Option<&str>, cap: usize) {
     let entries: Vec<(String, Entry)> = run
         .tests()
         .iter()
@@ -263,11 +297,12 @@ pub fn record(run: &Run, epoch: u64, commit: Option<&str>) {
     };
     // Locked load→append→write: two concurrent sessions in one cwd would
     // otherwise drop one run's entries.
-    cache::with_lock(|| {
-        let mut h = load();
-        h.append(meta, entries, cap());
+    let path = dir.join(FILE);
+    cache::with_lock_in(dir, || {
+        let mut h = load_from(&path);
+        h.append(meta, entries, cap);
         if let Ok(bytes) = rmp_serde::to_vec(&h) {
-            let _ = cache::write_atomic(&cache::file(FILE), &bytes);
+            let _ = cache::write_atomic(&path, &bytes);
         }
     });
 }
@@ -374,11 +409,14 @@ mod tests {
             50,
         );
         h.append(meta(10), vec![("gone".into(), entry("passed"))], 50);
+        // Exactly max_age old is still in the window.
+        h.append(meta(500), vec![("edge".into(), entry("passed"))], 50);
         h.age(1000, 500);
         assert_eq!(h.series("old").len(), 1);
         assert_eq!(h.series("new").len(), 1);
+        assert_eq!(h.series("edge").len(), 1);
         assert!(!h.tests.contains_key("gone"));
-        assert_eq!(h.runs.len(), 1);
+        assert_eq!(h.runs.len(), 2);
         // 0 disables aging.
         let mut h2 = History::default();
         h2.append(meta(1), vec![("a".into(), entry("passed"))], 50);
@@ -481,7 +519,36 @@ mod tests {
         }
         assert_eq!(h.flippers(3), ["flap", "quar", "rescued"]);
         assert_eq!(h.flippers(2), ["flap", "quar", "rescued", "skips"]);
-        assert_eq!(h.flippers(1).len(), 5);
+        // `broke` flipped once but is failing now: released even at 1.
+        assert_eq!(h.flippers(1), ["flap", "quar", "rescued", "skips"]);
+    }
+
+    #[test]
+    fn flipper_that_broke_for_real_is_released() {
+        let mut h = History::default();
+        // Flapped 3 times, then 3 straight fails (skips stepped over).
+        for (i, o) in "pfpfpffsff".chars().enumerate() {
+            let o = if o == 'p' {
+                "passed"
+            } else if o == 's' {
+                "skipped"
+            } else {
+                "failed"
+            };
+            let m = RunMeta {
+                commit: Some("c".into()),
+                ..meta(i as u64)
+            };
+            h.append(m, vec![("t".into(), entry(o))], 50);
+        }
+        assert!(h.flippers(3).is_empty());
+        // Passing again: flapping, caught again.
+        let m = RunMeta {
+            commit: Some("c".into()),
+            ..meta(10)
+        };
+        h.append(m, vec![("t".into(), entry("passed"))], 50);
+        assert_eq!(h.flippers(3), ["t"]);
     }
 
     #[test]
@@ -512,6 +579,67 @@ mod tests {
         // Reruns rescuing a run is flakiness on any commit; pass->fail isn't.
         assert_eq!(h.flippers(1), ["rescued"]);
         assert_eq!(h.flippers(3), ["rescued"]);
+    }
+
+    fn run_of(tests: &[(&str, &str)]) -> Run {
+        let mut run = Run::default();
+        for (nodeid, outcome) in tests {
+            run.record(
+                None,
+                crate::scheduling::proto::Report {
+                    nodeid: (*nodeid).into(),
+                    when: "call".into(),
+                    outcome: (*outcome).into(),
+                    duration: 0.5,
+                    longrepr: None,
+                    wasxfail: false,
+                    skip_reason: None,
+                    cpu: None,
+                    thread_delta: None,
+                    fd_delta: None,
+                    sections: Vec::new(),
+                    lineno: None,
+                    subtest: false,
+                    crash: None,
+                    xfail_reason: None,
+                    skip_location: None,
+                },
+            );
+        }
+        run
+    }
+
+    #[test]
+    fn record_appends_each_run_under_the_cap() {
+        let dir = std::env::temp_dir().join(format!("rstest-history-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = crate::time::now_epoch_secs();
+        // A run with no real results writes nothing.
+        record_in(&dir, &Run::default(), now, Some("c1"), 2);
+        assert!(!dir.join(FILE).exists());
+
+        record_in(&dir, &run_of(&[("a", "passed")]), now, Some("c1"), 2);
+        record_in(
+            &dir,
+            &run_of(&[("a", "failed"), ("b", "passed")]),
+            now + 1,
+            None,
+            2,
+        );
+        record_in(&dir, &run_of(&[("a", "passed")]), now + 2, Some("c3"), 2);
+        let h = load_from(&dir.join(FILE));
+        let a = h.series("a");
+        let got: Vec<_> = a
+            .iter()
+            .map(|(r, e)| (r.epoch, r.commit.as_deref(), e.outcome_name()))
+            .collect();
+        assert_eq!(
+            got,
+            [(now + 1, None, "failed"), (now + 2, Some("c3"), "passed")]
+        );
+        assert_eq!(a[1].1.call, Some(0.5));
+        assert_eq!(h.series("b").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

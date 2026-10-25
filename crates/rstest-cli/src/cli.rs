@@ -123,6 +123,21 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Rank the suite's flaky tests from the per-test run history
+    /// (`.rstest_cache/history.msgpack`) without running anything: flips
+    /// (a pass only on rerun, or a failure right after a pass), the recent
+    /// outcome strip, whether it is getting worse, and which tests
+    /// `--auto-quarantine` catches on the next run. Needs no interpreter.
+    Flaky {
+        /// Show the N most-flipping tests; 0 shows all.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        top: usize,
+        /// Emit the ranking as JSON (schema-stamped) to stdout for
+        /// dashboards, instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Install the rstest agent skills (`migrate-to-rstest`, `rstest-triage`)
     /// bundled with this binary, so they match its flags and subcommands.
     /// Writes `.claude/skills/` in the current directory by default (commit it
@@ -220,7 +235,8 @@ pub struct Cli {
     /// Internal: turn on the workers' cpu/fixture instrumentation without the
     /// doctor report. Passed only by a parent rstest (migrate-check's
     /// classifier runs); a flag rather than an env var so a user's shell or CI
-    /// environment can never switch it on.
+    /// environment can never switch it on. Also marks the run as a probe that
+    /// records no flip history.
     #[arg(long = "instrument-workers", hide = true)]
     pub(crate) instrument_workers: bool,
 
@@ -312,8 +328,9 @@ pub struct Cli {
     /// pass on the same clean commit, or a pass only on rerun. On by default
     /// (N=3); =0 turns it off.
     /// A test that broke and stays broken flips once and still fails the
-    /// run. Unions with --quarantine; a test is released once its flips age
-    /// out.
+    /// run; one whose last 3 results all failed is released whatever its past
+    /// flips. Unions with --quarantine; a test is also released once its
+    /// flips age out. Attach N with `=`.
     #[arg(long, num_args = 0..=1, default_missing_value = "3", value_name = "N")]
     pub(crate) auto_quarantine: Option<u32>,
 
@@ -780,9 +797,12 @@ pub(crate) fn is_collect_only(session_args: &[String]) -> bool {
 pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Fail fast, before any worker spawns, like clap's own usage errors.
-    if let Some(msg) = misplaced_subcommand(&argv) {
+    if let Some(msg) = misplaced_subcommand(&argv).or_else(|| detached_auto_quarantine(&argv)) {
         eprintln!("{msg}");
         std::process::exit(2);
+    }
+    if let Some(msg) = shadowed_path(Path::new("."), &argv) {
+        eprintln!("{msg}");
     }
     split_args(argv)
 }
@@ -818,8 +838,9 @@ const BOOL_FLAGS: &[&str] = &[
 /// [`subcommand_index`]); everything else is split by the flag tables as
 /// usual, so `rstest try -k foo tests/` still forwards `-k foo tests/` to the
 /// session. Kept in kebab-case to match clap's derived subcommand names. A
-/// pytest path literally named after a subcommand is shadowed when leading
-/// (`rstest ./try` / `rstest -- try` disambiguates).
+/// pytest path literally named after a subcommand is shadowed when leading,
+/// with a warning ([`shadowed_path`]; `rstest ./try` / `rstest -- try`
+/// disambiguates).
 const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
@@ -831,6 +852,7 @@ const SUBCOMMANDS: &[&str] = &[
     "shard-verify",
     "replay",
     "explain",
+    "flaky",
     "install-skills",
 ];
 
@@ -1060,6 +1082,38 @@ pub(crate) fn misplaced_subcommand(argv: &[String]) -> Option<String> {
     })
 }
 
+/// A leading subcommand name that is also an existing path (`rstest flaky`
+/// with a `flaky/` test dir): the subcommand wins, so the tests never run and
+/// a CI job goes green on nothing. Returns the warning naming the escape.
+/// `cwd` is where the path would resolve (`.` outside tests).
+pub(crate) fn shadowed_path(cwd: &Path, argv: &[String]) -> Option<String> {
+    let tok = argv.first()?;
+    (subcommand_index(argv) == Some(0) && cwd.join(tok).exists()).then(|| {
+        format!(
+            "rstest: warning: `{tok}` runs the `{tok}` subcommand, not the path `{tok}` here. \
+             To run that path's tests, write `./{tok}`."
+        )
+    })
+}
+
+/// `--auto-quarantine N` with a space: an optional-value flag never takes the
+/// next token, so `N` would run as a test path (pytest: "file or directory
+/// not found: 0") while the flag stays at its default. A bare number that is
+/// not a path is the usage error; `./0` still runs a path named `0`.
+fn detached_auto_quarantine(argv: &[String]) -> Option<String> {
+    let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    argv[..end].windows(2).find_map(|w| {
+        let n = w[1].as_str();
+        (w[0] == "--auto-quarantine"
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+            && !std::path::Path::new(n).exists())
+        .then(|| {
+            format!("rstest: write `--auto-quarantine={n}`: the value must be attached with `=`")
+        })
+    })
+}
+
 /// Route argv tokens to `own` (rstest flags, fed to clap) or `session`
 /// (pytest args, forwarded verbatim).
 fn route(argv: impl IntoIterator<Item = String>, own: &mut Vec<String>, session: &mut Vec<String>) {
@@ -1114,7 +1168,7 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     // its real session args from the journal, not argv.
     let consumes_all = matches!(
         sub.as_str(),
-        "shard-verify" | "replay" | "bisect" | "explain" | "install-skills"
+        "shard-verify" | "replay" | "bisect" | "explain" | "flaky" | "install-skills"
     );
     own.push(sub);
     if consumes_all {
@@ -1193,6 +1247,29 @@ mod tests {
     }
 
     #[test]
+    fn run_outputs_lists_every_report_path_given() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["rstest"]);
+        assert!(cli.run_outputs().is_empty());
+        let paths = [
+            "--report-json=a",
+            "--doctor-json=b",
+            "--doctor-md=c",
+            "--junitxml=d",
+            "--html=e",
+            "--cov-diff-json=f",
+            "--stream-json=g",
+        ];
+        let cli = Cli::parse_from(std::iter::once("rstest").chain(paths));
+        let got: Vec<_> = cli
+            .run_outputs()
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect();
+        assert_eq!(got, ["a", "b", "c", "d", "e", "f", "g"]);
+    }
+
+    #[test]
     fn replay_routes_run_id_and_journal_to_clap() {
         use clap::Parser;
         // `replay` builds no session from argv: the run-id positional and
@@ -1232,6 +1309,29 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Explain { ref nodeid, json: true }) if nodeid == "t/x.py::test_a"
+        ));
+    }
+
+    #[test]
+    fn flaky_routes_its_flags_to_clap() {
+        use clap::Parser;
+        // `--top` is in no flag table: without `flaky` consuming its tail it
+        // would leak to a pytest session.
+        let (own, session) = split_args(v(&["flaky", "--top", "5", "--json"]));
+        assert_eq!(own, v(&["rstest", "flaky", "--top", "5", "--json"]));
+        assert!(session.is_empty(), "session={session:?}");
+        let cli = Cli::parse_from(&own);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Flaky { top: 5, json: true })
+        ));
+        let cli = Cli::parse_from(v(&["rstest", "flaky"]));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Flaky {
+                top: 20,
+                json: false
+            })
         ));
     }
 
@@ -1738,6 +1838,35 @@ mod tests {
         let msg = misplaced_subcommand(&v(&["-k", "foo", "try"])).unwrap();
         assert!(msg.contains("subcommands must come first"), "{msg}");
         assert!(misplaced_subcommand(&v(&["tests/", "audit"])).is_some());
+    }
+
+    #[test]
+    fn detached_auto_quarantine_value_is_a_usage_error() {
+        let msg = detached_auto_quarantine(&v(&["--auto-quarantine", "0", "tests/"])).unwrap();
+        assert!(msg.contains("`--auto-quarantine=0`"), "{msg}");
+        for ok in [
+            &["--auto-quarantine=0", "tests/"][..],
+            &["--auto-quarantine", "tests/"],
+            &["--", "--auto-quarantine", "0"],
+            &["-k", "0"],
+        ] {
+            assert_eq!(detached_auto_quarantine(&v(ok)), None, "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn leading_subcommand_shadowing_a_path_warns() {
+        let dir = std::env::temp_dir().join(format!("rstest-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(shadowed_path(&dir, &v(&["flaky"])), None);
+        std::fs::create_dir(dir.join("flaky")).unwrap();
+        let msg = shadowed_path(&dir, &v(&["flaky"])).unwrap();
+        assert!(msg.contains("write `./flaky`"), "{msg}");
+        // Not leading, or escaped: no subcommand selected, nothing shadowed.
+        assert_eq!(shadowed_path(&dir, &v(&["-q", "flaky"])), None);
+        assert_eq!(shadowed_path(&dir, &v(&["./flaky"])), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
