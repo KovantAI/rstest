@@ -106,15 +106,27 @@ pub struct Report {
     /// for the parent's own call outcome.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subtest: bool,
+    /// A failure's one-line cause for the short test summary (pytest's
+    /// `reprcrash.message`, or the text of a plain-string longrepr).
+    #[serde(default)]
+    pub crash: Option<String>,
+    /// An xfail/xpass report's reason (pytest's `report.wasxfail`), when set.
+    #[serde(default)]
+    pub xfail_reason: Option<String>,
+    /// A skip's `(path, line)` in the short test summary, as pytest folds
+    /// skips (`SKIPPED [N] path:line: reason`); the line is absent for a
+    /// skip marker pytest folds per file.
+    #[serde(default)]
+    pub skip_location: Option<(String, Option<u64>)>,
     /// A failed report's exception and the project frame it went through,
     /// for grouping failures by cause. Absent when the worker couldn't tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crash: Option<Crash>,
+    pub cause: Option<Cause>,
 }
 
-/// What a failure raised and where (see [`Report::crash`]).
+/// What a failure raised and where (see [`Report::cause`]).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Crash {
+pub struct Cause {
     /// Exception type name, e.g. `ConnectionRefusedError`.
     pub exc: String,
     /// First line of the exception message.
@@ -537,6 +549,9 @@ mod property {
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
                 subtest: false,
                 crash: None,
+                cause: None,
+                xfail_reason: None,
+                skip_location: None,
             }
         }
     }

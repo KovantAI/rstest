@@ -1288,8 +1288,8 @@ def _load(path, name):
     return mod
 
 
-def test_crash_of_names_the_project_frame_not_site_packages(tmp_path):
-    from rstest_worker._internal.stream import crash_of
+def test_cause_of_names_the_project_frame_not_site_packages(tmp_path):
+    from rstest_worker._internal.stream import cause_of
 
     # A library in the venv raises; the project's own db.py made the call.
     lib = tmp_path / ".venv" / "lib" / "site-packages" / "netlib.py"
@@ -1302,20 +1302,20 @@ def test_crash_of_names_the_project_frame_not_site_packages(tmp_path):
     app_db = _load(db, "app_db_fake")
     with pytest.raises(ConnectionRefusedError) as excinfo:
         app_db.connect(netlib.dial)
-    crash = crash_of(excinfo, tmp_path)
-    assert crash == {
+    cause = cause_of(excinfo, tmp_path)
+    assert cause == {
         "exc": "ConnectionRefusedError",
         "message": "[Errno 111] refused 5432",
         "at": "app/db.py:2",
     }
 
 
-def test_crash_of_without_a_project_frame_and_on_surprises(tmp_path):
-    from rstest_worker._internal.stream import crash_of
+def test_cause_of_without_a_project_frame_and_on_surprises(tmp_path):
+    from rstest_worker._internal.stream import cause_of
 
     with pytest.raises(ValueError) as excinfo:
         raise ValueError("bad\nsecond line")
     # Raised from this test file, which is outside tmp_path: no project frame.
-    assert crash_of(excinfo, tmp_path) == {"exc": "ValueError", "message": "bad", "at": None}
-    # Anything unexpected is no crash info, never an exception in the worker.
-    assert crash_of(object(), tmp_path) is None
+    assert cause_of(excinfo, tmp_path) == {"exc": "ValueError", "message": "bad", "at": None}
+    # Anything unexpected is no cause, never an exception in the worker.
+    assert cause_of(object(), tmp_path) is None

@@ -21,6 +21,10 @@
         "$ref": "#/definitions/SuspectCommit"
       }
     },
+    "dirty": {
+      "description": "The checkout has uncommitted changes now.",
+      "type": "boolean"
+    },
     "env": {
       "description": "Watched environment variables set, unset or changed.",
       "type": "array",
@@ -29,7 +33,7 @@
       }
     },
     "found": {
-      "description": "Whether a green run was ever recorded here; every other field is\nempty or null when it wasn't.",
+      "description": "Whether a green run was ever recorded here. When it wasn't, only\n`meta`, `commit` and `dirty` are filled; the rest are empty or null.",
       "type": "boolean"
     },
     "green_commit": {
@@ -81,6 +85,7 @@
     "green_commit",
     "green_epoch",
     "commit",
+    "dirty",
     "commits",
     "python",
     "packages",

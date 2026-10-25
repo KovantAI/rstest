@@ -9,10 +9,12 @@ import io
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 from _pytest.fixtures import is_visibility_more_specific
+from _pytest.terminal import _folded_skips
 
 from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
@@ -206,7 +208,7 @@ def _crashline(report: Any) -> str:
             return ""
 
 
-def crash_of(excinfo: Any, rootpath: Any) -> m.CrashInfo | None:
+def cause_of(excinfo: Any, rootpath: Any) -> m.CauseInfo | None:
     """What a failure raised and where, for grouping failures by cause: the
     exception type, the first line of its message, and the deepest traceback
     frame inside the rootdir and outside site-packages (`path:line`, 1-based,
@@ -740,10 +742,10 @@ class StreamPlugin:
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_makereport(self, item, call):
         # The exception is only reachable here; the report logged next carries
-        # its crash info to pytest_runtest_logreport.
+        # its cause to pytest_runtest_logreport.
         report = yield
         if call.excinfo is not None and report.failed:
-            report._rstest_crash = crash_of(call.excinfo, item.config.rootpath)
+            report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
         return report
 
     @pytest.hookimpl(wrapper=True)
@@ -918,9 +920,25 @@ class StreamPlugin:
             payload["sections"] = [[name, content[-20000:]] for name, content in report.sections]
         if report.skipped and isinstance(report.longrepr, tuple):
             payload["skip_reason"] = str(report.longrepr[2])[:200]
-        crash = getattr(report, "_rstest_crash", None)
-        if crash is not None and not is_subtest_report(report):
-            payload["crash"] = crash
+        # What the orchestrator's short test summary needs, taken the way
+        # pytest's terminal reporter takes it.
+        if report.failed:
+            if isinstance(report.longrepr, str):
+                payload["crash"] = report.longrepr[:1000]
+            else:
+                message = getattr(getattr(report.longrepr, "reprcrash", None), "message", None)
+                if message is not None:
+                    payload["crash"] = str(message)[:1000]
+        reason = getattr(report, "wasxfail", None)
+        if reason:
+            payload["xfail_reason"] = str(reason)[:200]
+        if report.skipped and isinstance(report.longrepr, tuple) and len(report.longrepr) == 3:
+            start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
+            for _, fspath, lineno, _ in _folded_skips(start, [report]):
+                payload["skip_location"] = [fspath, lineno]
+        cause = getattr(report, "_rstest_cause", None)
+        if cause is not None and not is_subtest_report(report):
+            payload["cause"] = cause
         self._conn.send("report", payload)
         if self._cpu_mark is not None:
             self._cpu_mark = _cpu_now()

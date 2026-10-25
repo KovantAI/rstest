@@ -438,18 +438,22 @@ pub struct Regression {
     pub ceiling: Option<f64>,
 }
 
+/// A test's passing (incl. flaky) call times in the history, or `None` under
+/// [`HISTORY_MIN_RUNS`].
+pub fn passing_calls(h: &History, nodeid: &str) -> Option<Vec<f64>> {
+    let calls: Vec<f64> = h
+        .series(nodeid)
+        .iter()
+        .filter(|(_, e)| matches!(e.outcome_name(), "passed" | "flaky"))
+        .filter_map(|(_, e)| e.call.map(f64::from))
+        .collect();
+    (calls.len() >= HISTORY_MIN_RUNS).then_some(calls)
+}
+
 /// A test's passing call times in the history as `(median, noise ceiling,
 /// runs)`, or `None` under [`HISTORY_MIN_RUNS`].
 fn history_baseline(h: &History, nodeid: &str) -> Option<(f64, f64, usize)> {
-    let mut calls: Vec<f64> = h
-        .series(nodeid)
-        .iter()
-        .filter(|(_, e)| matches!(e.outcome.as_str(), "passed" | "flaky"))
-        .filter_map(|(_, e)| e.call.map(f64::from))
-        .collect();
-    if calls.len() < HISTORY_MIN_RUNS {
-        return None;
-    }
+    let mut calls = passing_calls(h, nodeid)?;
     calls.sort_by(f64::total_cmp);
     let med = crate::explain::median(&calls)?;
     let mut dev: Vec<f64> = calls.iter().map(|x| (x - med).abs()).collect();
@@ -628,6 +632,9 @@ mod tests {
                     lineno: None,
                     subtest: false,
                     crash: None,
+                    cause: None,
+                    xfail_reason: None,
+                    skip_location: None,
                 },
             );
         }
@@ -658,6 +665,9 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
         }
     }
 
@@ -666,17 +676,16 @@ mod tests {
 
     /// History where each test has the given runs.
     fn history_of(tests: &[(&str, &[Run1])]) -> History {
-        use crate::reporting::history::{Entry, RunMeta};
+        use crate::reporting::history::{outcome_code, Entry, RunMeta};
         let mut h = History::default();
         let n = tests.iter().map(|(_, r)| r.len()).max().unwrap_or(0);
-        for seq in 0..n as u32 {
+        for seq in 0..n as u64 {
             h.runs.push(RunMeta {
                 seq,
                 id: format!("r{seq}"),
-                epoch: u64::from(seq),
+                epoch: seq,
                 commit: None,
                 env: String::new(),
-                workers: 1,
             });
         }
         for (id, runs) in tests {
@@ -684,8 +693,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, (o, call))| Entry {
-                    run: i as u32,
-                    outcome: o.to_string(),
+                    run: i as u64,
+                    outcome: outcome_code(o).unwrap(),
                     call: *call,
                     setup: 0.0,
                 })

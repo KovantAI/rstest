@@ -2,7 +2,7 @@
 //! rstest-owned flags from pytest session args (clap can't mirror pytest's
 //! plugin-extensible flag surface), and the session-arg parsers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -150,8 +150,9 @@ pub(crate) enum Command {
 
     /// What changed since the last green run, without running tests: commits,
     /// interpreter version, installed packages and a few test-relevant
-    /// environment variables. Every full run that exits 0 records the state it
-    /// compares against (`.rstest_cache/green_env.json`).
+    /// environment variables. Every whole-suite run that exits 0 on a clean
+    /// tree records the state it compares against
+    /// (`.rstest_cache/green_env.json`).
     SinceGreen {
         /// Emit the diff as JSON (schema-stamped) to stdout.
         #[arg(long)]
@@ -255,7 +256,8 @@ pub struct Cli {
     /// Internal: turn on the workers' cpu/fixture instrumentation without the
     /// doctor report. Passed only by a parent rstest (migrate-check's
     /// classifier runs); a flag rather than an env var so a user's shell or CI
-    /// environment can never switch it on.
+    /// environment can never switch it on. Also marks the run as a probe that
+    /// records no flip history.
     #[arg(long = "instrument-workers", hide = true)]
     pub(crate) instrument_workers: bool,
 
@@ -344,10 +346,12 @@ pub struct Cli {
 
     /// Quarantine tests whose recent history (`.rstest_cache/
     /// history.msgpack`) flipped at least N times: a failure right after a
-    /// pass, or a pass only on rerun. On by default (N=3); =0 turns it off.
+    /// pass on the same clean commit, or a pass only on rerun. On by default
+    /// (N=3); =0 turns it off.
     /// A test that broke and stays broken flips once and still fails the
-    /// run. Unions with --quarantine; a test is released once its flips age
-    /// out.
+    /// run; one whose last 3 results all failed is released whatever its past
+    /// flips. Unions with --quarantine; a test is also released once its
+    /// flips age out. Attach N with `=`.
     #[arg(long, num_args = 0..=1, default_missing_value = "3", value_name = "N")]
     pub(crate) auto_quarantine: Option<u32>,
 
@@ -530,6 +534,25 @@ pub struct Cli {
     /// (fifo). Works in every run mode; human output is unaffected.
     #[arg(long = "stream-json", value_name = "FILE")]
     pub(crate) stream_json: Option<PathBuf>,
+}
+
+impl Cli {
+    /// The files a run writes itself. The clean-tree checks skip them, or a
+    /// report left untracked in the checkout would mark every later run dirty.
+    pub(crate) fn run_outputs(&self) -> Vec<&Path> {
+        [
+            &self.report_json,
+            &self.doctor_json,
+            &self.doctor_md,
+            &self.junitxml,
+            &self.html,
+            &self.cov_diff_json,
+            &self.stream_json,
+        ]
+        .into_iter()
+        .filter_map(|p| p.as_deref())
+        .collect()
+    }
 }
 
 /// pytest short options that take a value. In a cluster (`-rA`, `-ksmoke`,
@@ -795,9 +818,12 @@ pub(crate) fn is_collect_only(session_args: &[String]) -> bool {
 pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // Fail fast, before any worker spawns, like clap's own usage errors.
-    if let Some(msg) = misplaced_subcommand(&argv) {
+    if let Some(msg) = misplaced_subcommand(&argv).or_else(|| detached_auto_quarantine(&argv)) {
         eprintln!("{msg}");
         std::process::exit(2);
+    }
+    if let Some(msg) = shadowed_path(Path::new("."), &argv) {
+        eprintln!("{msg}");
     }
     split_args(argv)
 }
@@ -833,8 +859,9 @@ const BOOL_FLAGS: &[&str] = &[
 /// [`subcommand_index`]); everything else is split by the flag tables as
 /// usual, so `rstest try -k foo tests/` still forwards `-k foo tests/` to the
 /// session. Kept in kebab-case to match clap's derived subcommand names. A
-/// pytest path literally named after a subcommand is shadowed when leading
-/// (`rstest ./try` / `rstest -- try` disambiguates).
+/// pytest path literally named after a subcommand is shadowed when leading,
+/// with a warning ([`shadowed_path`]; `rstest ./try` / `rstest -- try`
+/// disambiguates).
 const SUBCOMMANDS: &[&str] = &[
     "verify-vendor",
     "try",
@@ -1078,6 +1105,38 @@ pub(crate) fn misplaced_subcommand(argv: &[String]) -> Option<String> {
     })
 }
 
+/// A leading subcommand name that is also an existing path (`rstest flaky`
+/// with a `flaky/` test dir): the subcommand wins, so the tests never run and
+/// a CI job goes green on nothing. Returns the warning naming the escape.
+/// `cwd` is where the path would resolve (`.` outside tests).
+pub(crate) fn shadowed_path(cwd: &Path, argv: &[String]) -> Option<String> {
+    let tok = argv.first()?;
+    (subcommand_index(argv) == Some(0) && cwd.join(tok).exists()).then(|| {
+        format!(
+            "rstest: warning: `{tok}` runs the `{tok}` subcommand, not the path `{tok}` here. \
+             To run that path's tests, write `./{tok}`."
+        )
+    })
+}
+
+/// `--auto-quarantine N` with a space: an optional-value flag never takes the
+/// next token, so `N` would run as a test path (pytest: "file or directory
+/// not found: 0") while the flag stays at its default. A bare number that is
+/// not a path is the usage error; `./0` still runs a path named `0`.
+fn detached_auto_quarantine(argv: &[String]) -> Option<String> {
+    let end = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    argv[..end].windows(2).find_map(|w| {
+        let n = w[1].as_str();
+        (w[0] == "--auto-quarantine"
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+            && !std::path::Path::new(n).exists())
+        .then(|| {
+            format!("rstest: write `--auto-quarantine={n}`: the value must be attached with `=`")
+        })
+    })
+}
+
 /// Route argv tokens to `own` (rstest flags, fed to clap) or `session`
 /// (pytest args, forwarded verbatim).
 fn route(argv: impl IntoIterator<Item = String>, own: &mut Vec<String>, session: &mut Vec<String>) {
@@ -1215,6 +1274,29 @@ mod tests {
         let (own, session) = split_args(v(&["shard-verify", "a.json", "b.json"]));
         assert_eq!(own, v(&["rstest", "shard-verify", "a.json", "b.json"]));
         assert!(session.is_empty(), "session={session:?}");
+    }
+
+    #[test]
+    fn run_outputs_lists_every_report_path_given() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["rstest"]);
+        assert!(cli.run_outputs().is_empty());
+        let paths = [
+            "--report-json=a",
+            "--doctor-json=b",
+            "--doctor-md=c",
+            "--junitxml=d",
+            "--html=e",
+            "--cov-diff-json=f",
+            "--stream-json=g",
+        ];
+        let cli = Cli::parse_from(std::iter::once("rstest").chain(paths));
+        let got: Vec<_> = cli
+            .run_outputs()
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect();
+        assert_eq!(got, ["a", "b", "c", "d", "e", "f", "g"]);
     }
 
     #[test]
@@ -1800,6 +1882,35 @@ mod tests {
         let msg = misplaced_subcommand(&v(&["-k", "foo", "try"])).unwrap();
         assert!(msg.contains("subcommands must come first"), "{msg}");
         assert!(misplaced_subcommand(&v(&["tests/", "audit"])).is_some());
+    }
+
+    #[test]
+    fn detached_auto_quarantine_value_is_a_usage_error() {
+        let msg = detached_auto_quarantine(&v(&["--auto-quarantine", "0", "tests/"])).unwrap();
+        assert!(msg.contains("`--auto-quarantine=0`"), "{msg}");
+        for ok in [
+            &["--auto-quarantine=0", "tests/"][..],
+            &["--auto-quarantine", "tests/"],
+            &["--", "--auto-quarantine", "0"],
+            &["-k", "0"],
+        ] {
+            assert_eq!(detached_auto_quarantine(&v(ok)), None, "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn leading_subcommand_shadowing_a_path_warns() {
+        let dir = std::env::temp_dir().join(format!("rstest-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(shadowed_path(&dir, &v(&["flaky"])), None);
+        std::fs::create_dir(dir.join("flaky")).unwrap();
+        let msg = shadowed_path(&dir, &v(&["flaky"])).unwrap();
+        assert!(msg.contains("write `./flaky`"), "{msg}");
+        // Not leading, or escaped: no subcommand selected, nothing shadowed.
+        assert_eq!(shadowed_path(&dir, &v(&["-q", "flaky"])), None);
+        assert_eq!(shadowed_path(&dir, &v(&["./flaky"])), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
