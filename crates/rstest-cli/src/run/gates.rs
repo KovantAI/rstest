@@ -456,6 +456,7 @@ pub(super) fn run_post_gates(
         since_green,
         head,
         env_fp,
+        history_commit,
         incremental_active,
         config,
         prev_index,
@@ -719,14 +720,15 @@ pub(super) fn run_post_gates(
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
-        let history_slice = history::slice(
-            &outcome.run,
-            run_uid,
-            started_epoch,
-            head.as_deref(),
-            env_fp,
-            n,
-        );
+        // A parent rstest's probe runs (bisect, audit, migrate-check; the only
+        // users of --instrument-workers) pass and fail one test on purpose
+        // over and over: recorded (or pushed), those are flips that
+        // auto-quarantine the very test they found.
+        let history_slice = if cli.instrument_workers {
+            None
+        } else {
+            history::slice(&outcome.run, started_epoch, history_commit, env_fp)
+        };
         if let Some(slice) = &history_slice {
             history::record(slice.clone());
         }
@@ -797,7 +799,12 @@ pub(super) fn run_post_gates(
     // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 {
         if let Some(h) = head {
-            if !incremental::record_green_if_clean(&std::env::current_dir()?, h, env_fp) {
+            if !incremental::record_green_if_clean(
+                &std::env::current_dir()?,
+                &cli.run_outputs(),
+                h,
+                env_fp,
+            ) {
                 sink.warn(incremental::DIRTY_TREE_NOTICE);
             }
         }
@@ -877,20 +884,20 @@ pub(super) fn run_post_gates(
     // What changed since green: a green run records its environment, a red
     // one says what differs from the last green. On the final exit code, so
     // a gate that turned the run red counts. Not on `replay`: a diagnostic
-    // re-run of an old schedule is no baseline.
+    // re-run of an old schedule is no baseline. Only a whole-suite run may
+    // record one: a passing `-k`/shard/cached/--changed subset proves nothing.
     if !replay {
-        // Only a run over the whole suite is a green baseline: rstest's own
-        // selection (--changed, --since-green, --shard, --incremental's
-        // carried-forward passes) or pytest's (-k, a sub-path, --lf, ...)
-        // proves nothing about the rest.
         let project = crate::config::discover(scope, &mut std::io::sink());
-        let full = changed_base.is_none()
-            && !since_green
+        let full_suite = !passthrough
             && shard.is_none()
-            && !incremental_active
-            && !crate::since_green::narrows_selection(args, &project);
-        let now = crate::since_green::capture(scope, python, head.as_deref(), started_epoch);
-        crate::since_green::after_run(sink, exitstatus, full, &now);
+            && !since_green
+            && changed_base.is_none()
+            && !cli.watch
+            && outcome.run.cached_nodeids().is_empty()
+            && !crate::since_green::run_narrows_suite(args, &project);
+        let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
+        let now = crate::since_green::capture(scope, python, head.as_deref(), dirty, started_epoch);
+        crate::since_green::after_run(sink, exitstatus, full_suite, &now);
     }
     Ok(exitstatus)
 }
@@ -965,6 +972,14 @@ pub(super) fn finalize_output(
         if let Some((dn, dmin)) = durations {
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
+        // pytest prints messages whole on CI and at -vv, else trimmed to the
+        // terminal (compat.running_on_ci: CI or BUILD_NUMBER non-empty).
+        let on_ci = ["CI", "BUILD_NUMBER"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+        let msg_width = (!very_verbose && !on_ci).then(crate::reporting::status::terminal_width);
+        let chars = sink.report_chars().to_string();
+        outcome.run.print_short_summary(sink, &chars, msg_width);
         let warn_total: u64 = outcome.warnings.iter().map(|w| w.count).sum();
         let elapsed = start.elapsed().as_secs_f64();
         // Bar mode closes with pytest-sugar's segmented results bar above
@@ -1113,16 +1128,7 @@ fn print_warnings_summary(
     );
 }
 
-/// The run's quarantine policy: the `--quarantine` file plus every test the
-/// history shows flipping at least `auto` times (`0` = off).
-pub(super) struct Quarantine {
-    /// File patterns and auto ids together: what dispatch ordering and the
-    /// workers' `-x` / `--maxfail` count treat as quarantined.
-    pub all: regex::RegexSet,
-    file: regex::RegexSet,
-    auto: std::collections::HashSet<String>,
-    max_pct: u32,
-}
+pub(super) use crate::scheduling::orchestrator::Quarantine;
 
 impl Quarantine {
     /// Matcher for the post-run demotion, and whether it includes the auto
@@ -1142,8 +1148,8 @@ impl Quarantine {
                 e.any_phase_failed() && self.auto.contains(*id) && !self.file.is_match(id)
             })
             .count();
-        let total = run.tests().len();
-        let cap = (total * self.max_pct as usize).div_ceil(100).max(1);
+        let total = run.cap_total.unwrap_or_else(|| run.tests().len());
+        let cap = crate::scheduling::orchestrator::auto_quarantine_cap(total, self.max_pct);
         if failed <= cap {
             return (&self.all, true);
         }
@@ -1292,6 +1298,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1324,6 +1333,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1495,17 +1507,17 @@ mod tests {
 
     /// History where `id` has outcomes `outcomes`, one run each.
     fn history_of(tests: &[(&str, &[&str])]) -> crate::reporting::history::History {
-        use crate::reporting::history::{Entry, History, RunMeta};
+        use crate::reporting::history::{outcome_code, Entry, History, RunMeta};
         let mut h = History::default();
         let runs = tests.iter().map(|(_, o)| o.len()).max().unwrap_or(0);
-        for seq in 0..runs as u32 {
+        for seq in 0..runs as u64 {
             h.runs.push(RunMeta {
                 seq,
                 id: format!("r{seq}"),
                 epoch: 0,
-                commit: None,
+                // One clean commit: pass->fail flips only count within one.
+                commit: Some("c".into()),
                 env: String::new(),
-                workers: 1,
             });
         }
         for (id, outcomes) in tests {
@@ -1515,8 +1527,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(i, o)| Entry {
-                        run: i as u32,
-                        outcome: o.to_string(),
+                        run: i as u64,
+                        outcome: outcome_code(o).unwrap(),
                         call: None,
                         setup: 0.0,
                     })
@@ -1576,6 +1588,9 @@ mod tests {
             thread_delta: None,
             fd_delta: None,
             subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
@@ -1623,6 +1638,52 @@ mod tests {
             .0
             .is_match("t.py::f2"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// `-x` cut the run short: the in-run count held the auto failures against
+    /// a cap from the collected total, so the post-run demotion must use that
+    /// same total, not the handful of tests that got to report.
+    #[test]
+    fn auto_quarantine_cap_uses_the_in_run_total_after_an_early_stop() {
+        use crate::reporting::report::Run;
+        use crate::scheduling::proto::Report;
+        let rep = |nodeid: String, outcome: &str| Report {
+            nodeid,
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: 0.1,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            sections: Vec::new(),
+            lineno: None,
+            thread_delta: None,
+            fd_delta: None,
+            subtest: false,
+            crash: None,
+            xfail_reason: None,
+            skip_location: None,
+        };
+        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
+        let ids = ["t.py::f1", "t.py::f2", "t.py::f3", "t.py::f4"];
+        let h = history_of(&ids.map(|id| (id, flap)));
+        let q = quarantine_set(None, 3, 5, &h, &mut Sink::captured().0)
+            .unwrap()
+            .unwrap();
+        // 1000 collected, stopped after 41 reported: in-run cap 50, not 3.
+        let mut run = Run::default();
+        for id in ids {
+            run.record(None, rep(id.into(), "failed"));
+        }
+        for i in 0..37 {
+            run.record(None, rep(format!("t.py::ok{i}"), "passed"));
+        }
+        run.cap_total = Some(1000);
+        let (mut sink, cap) = Sink::captured();
+        let (m, _) = q.demotion_matcher(&run, &mut sink);
+        assert!(ids.iter().all(|id| m.is_match(id)));
+        assert_eq!(cap.err(), "");
     }
 
     #[test]
