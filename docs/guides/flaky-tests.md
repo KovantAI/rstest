@@ -269,7 +269,9 @@ next run will auto-quarantine
 dashboard.
 
 **On CI**, persist `.rstest_cache` between runs (see
-[CI quickstart](ci-quickstart.md)). A runner that starts with no history has
+[CI quickstart](ci-quickstart.md)), or share it with
+[`--cache-pull` / `--cache-push`](ci-shared-cache.md), which carries the run
+history between shards and runners. A runner that starts with no history has
 an empty auto set, so auto-quarantine does nothing there.
 
 ## What CI consumers see

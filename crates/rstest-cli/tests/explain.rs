@@ -46,12 +46,12 @@ fn write_history(dir: &Path, doc: &Value) {
 
 /// Three runs of `ID`: pass at c0, fail at c1 and c2. A neighbour's entries
 /// must not leak into `ID`'s strip. Layouts: `History` = [schema, runs, tests],
-/// `RunMeta` = [seq, epoch, commit], `Entry` = [run, outcome, call, setup] with
+/// `RunMeta` = [seq, id, epoch, commit], `Entry` = [run, outcome, call, setup] with
 /// outcome 0 = passed, 1 = failed.
 fn history_doc(epoch: u64) -> Value {
     const PASSED: u8 = 0;
     const FAILED: u8 = 1;
-    let run = |seq: u64, c: &str| json!([seq, epoch, c]);
+    let run = |seq: u64, c: &str| json!([seq, format!("r{seq}"), epoch, c]);
     let e = |seq: u64, outcome: u8, call: f64| json!([seq, outcome, call, 0.0]);
     json!([
         1,

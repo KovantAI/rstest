@@ -476,7 +476,7 @@ fn resolve_run_config(
 /// lowercase hex digits with the uuid4 version and variant bits set, so
 /// `uuid.UUID(testrun_uid)` parses. The 122 random bits come from std's
 /// OS-seeded `RandomState` keys, mixed with the clock and pid (no crate).
-fn new_run_uid() -> String {
+pub(crate) fn new_run_uid() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     let nanos = crate::time::now_epoch_nanos();
@@ -1039,9 +1039,10 @@ fn pull_shared_cache(cli: &Cli, cache_remote: &Option<String>, sink: &mut Sink) 
     let merged = remote::pull(t.as_ref(), sink)
         .with_context(|| format!("pulling shared cache from {remote}"))?;
     sink.warn(&format!(
-        "rstest: cache: pulled {} duration(s), {} flake record(s) from {remote}",
+        "rstest: cache: pulled {} duration(s), {} flake record(s), {} history run(s) from {remote}",
         merged.durations.len(),
-        merged.flakes.len()
+        merged.flakes.len(),
+        merged.history.runs.len()
     ));
     remote::write_local(&merged);
     Ok(())
@@ -2700,6 +2701,7 @@ fn fold_run_event(
             // The single session reports its collected count so the dots and
             // -v renderers print pytest's `[ NN%]` column.
             prog.set_total(count as usize);
+            run.cap_total = Some(count as usize);
             run.deselected = deselected;
             None
         }
@@ -3476,6 +3478,7 @@ mod tests {
             durations: [(format!("{id}::t"), 0.1)].into_iter().collect(),
             flake_events: Vec::new(),
             cov_index: Default::default(),
+            history: None,
         }
     }
 

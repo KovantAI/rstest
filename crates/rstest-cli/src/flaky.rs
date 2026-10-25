@@ -243,6 +243,7 @@ mod tests {
         for seq in 0..runs as u64 {
             h.runs.push(RunMeta {
                 seq,
+                id: format!("r{seq}"),
                 epoch: seq,
                 commit: Some("abc".into()),
             });
