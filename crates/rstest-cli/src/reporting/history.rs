@@ -3,8 +3,8 @@
 //! series (the last `RSTEST_HISTORY_RUNS` runs, default 50) so `explain` can
 //! show an outcome strip, duration spread and the commit a test broke at.
 //!
-//! Run-level context (epoch, commit) is stored once per run; each test entry
-//! points at its run by `seq`. Aged by the same
+//! Run-level context (epoch, commit, env fingerprint) is stored once per run;
+//! each test entry points at its run by `seq`. Aged by the same
 //! `RSTEST_FLAKE_RETENTION_DAYS` window as `flakes.json`.
 //!
 //! `--cache-push` publishes each run as a [`RunSlice`]; pull and compaction
@@ -47,6 +47,10 @@ pub struct RunMeta {
     /// `git rev-parse HEAD` at run start, suffixed `-dirty` when the working
     /// tree had uncommitted changes then; `None` outside a git checkout.
     pub commit: Option<String>,
+    /// [`crate::incremental::env_fingerprint`] at run start. Last and
+    /// defaulted, so a file or segment written before it existed still loads.
+    #[serde(default)]
+    pub env: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,7 +318,13 @@ fn entry_for(e: &TestEntry) -> Option<Entry> {
     Some(Entry {
         run: 0,
         outcome: outcome_code(outcome)?,
-        call: e.duration.map(|d| d as f32),
+        // A run --durations-regress flagged keeps its time out of the
+        // history, as out of durations.json: the gate's baseline must not
+        // drift toward the regression and silence it.
+        call: e
+            .duration
+            .filter(|_| !e.duration_regressed)
+            .map(|d| d as f32),
         setup: e.setup_seconds as f32,
     })
 }
@@ -342,7 +352,7 @@ pub fn load_from(path: &std::path::Path) -> History {
 /// fresh per process, never `RSTEST_RUN_UID`: CI shards, monorepo projects and
 /// an exported uid all share that one, and [`History::merged`] would keep only
 /// the first of them.
-pub fn slice(run: &Run, epoch: u64, commit: Option<&str>) -> Option<RunSlice> {
+pub fn slice(run: &Run, epoch: u64, commit: Option<&str>, env: &str) -> Option<RunSlice> {
     let tests: HashMap<String, Entry> = run
         .tests()
         .iter()
@@ -357,6 +367,7 @@ pub fn slice(run: &Run, epoch: u64, commit: Option<&str>) -> Option<RunSlice> {
             id: crate::run::new_run_uid(),
             epoch,
             commit: commit.map(str::to_string),
+            env: env.to_string(),
         },
         tests,
     })
@@ -409,6 +420,7 @@ mod tests {
             id: format!("r{epoch}"),
             epoch,
             commit: Some(format!("c{epoch}")),
+            env: "fp".into(),
         }
     }
 
@@ -545,6 +557,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(f.outcome_name(), "flaky");
+        // A --durations-regress flagged run keeps its time out.
+        let r = entry_for(&TestEntry {
+            duration_regressed: true,
+            ..base()
+        })
+        .unwrap();
+        assert_eq!((r.outcome_name(), r.call), ("passed", None));
         let c = entry_for(&TestEntry {
             crashed: true,
             call: Some("failed".into()),
@@ -708,10 +727,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let now = crate::time::now_epoch_secs();
         // A run with no real results writes nothing.
-        assert!(super::slice(&Run::default(), now, Some("c1")).is_none());
+        assert!(super::slice(&Run::default(), now, Some("c1"), "fp").is_none());
 
         let rec = |run: &Run, at: u64, commit: Option<&str>| {
-            record_in(&dir, super::slice(run, at, commit).unwrap(), 2);
+            record_in(&dir, super::slice(run, at, commit, "fp").unwrap(), 2);
         };
         rec(&run_of(&[("a", "passed")]), now, Some("c1"));
         rec(&run_of(&[("a", "failed"), ("b", "passed")]), now + 1, None);
@@ -737,8 +756,8 @@ mod tests {
     #[test]
     fn slices_of_runs_sharing_a_run_uid_all_survive_merge() {
         let now = crate::time::now_epoch_secs();
-        let shard1 = super::slice(&run_of(&[("a", "passed")]), now, Some("c1")).unwrap();
-        let shard2 = super::slice(&run_of(&[("b", "failed")]), now, Some("c1")).unwrap();
+        let shard1 = super::slice(&run_of(&[("a", "passed")]), now, Some("c1"), "fp").unwrap();
+        let shard2 = super::slice(&run_of(&[("b", "failed")]), now, Some("c1"), "fp").unwrap();
         assert_ne!(shard1.run.id, shard2.run.id);
         let h = History::merged([shard1, shard2], 50);
         assert_eq!(h.runs.len(), 2);

@@ -31,6 +31,10 @@ Everything pytest does (via a vendored pytest core), plus:
 | Broadcast mode | `--dist each` | every worker runs the full suite (xdist `--dist=each`) on the same interpreter, for repeat-run validation; outcomes keyed [`[gwN]`](../concepts/glossary.md#worker-id) |
 | Crash recovery | automatic | crashed test reported failed; worker respawns; run completes |
 | Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. Works at any `-n`: at `-n 0/1`, `--reruns` runs a one-worker pool instead of single-worker mode |
+| Quarantine | `--quarantine FILE`, `--auto-quarantine[=N]` (on by default) | listed tests, and tests the run history shows flipping pass/fail 3+ times, fail without reddening the run; capped by `--auto-quarantine-max` so a broken environment stays red ([Flaky tests](../guides/flaky-tests.md)) |
+| Flaky report | `rstest flaky` | ranks tests that flip between pass and fail, with trend and the auto-quarantine set; `--json` for dashboards |
+| Test dossier | `rstest explain NODEID` | one test's timing, flakes, outcome strip, the commits between its last pass and first failure, and whether the environment changed |
+| Duration regression gate | `--durations-regress RATIO` | fails the run when a test got slower than its history median (or last time) beyond its usual noise ([Catching slowdowns](../guides/slowdowns.md)) |
 | Live status footer | automatic on a terminal | per-worker current test + elapsed, progress + ETA |
 | Output styles | `--output dots/verbose/bar/github/json` (+ `gitlab/buildkite/teamcity/azure/tap`; see [CLI](../reference/cli.md)) | `bar` (the TTY default) = pytest-sugar-style per-test lines, inline failures, progress bar; works under the parallel pool. `github` emits CI annotations; `json` is a live NDJSON event stream. With no `--output` set, single-worker mode prints pytest's own terminal output instead |
 | Smart selection | `--changed[=REV]` | run only tests affected by changed files |

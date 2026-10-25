@@ -222,8 +222,15 @@ auto-quarantined:
 Everything else matches `--quarantine`: a failure of an auto-quarantined test
 is demoted to `quarantined` (same section, counts, JUnit property and exit
 code), a pass is a plain pass, `--reruns` still retries it first, and under
-the cap below it doesn't count toward `-x` / `--maxfail`. Check one test's strip with
-`rstest explain <nodeid>`.
+the cap below it doesn't count toward `-x` / `--maxfail`. `rstest explain
+<nodeid>` shows a test's strip, its flip count, and whether the next run
+auto-quarantines it:
+
+```text
+  history    ✓✗✓✗✓✗ (6 runs, oldest first)
+             ...
+             flipped 3x: auto-quarantined on the next run (at 3+ flips)
+```
 
 **Release is automatic.** The set is recomputed every run. A test whose last
 3 pass/fail results all failed drops out right away (`rstest flaky` shows it
@@ -280,6 +287,8 @@ an empty auto set, so auto-quarantine does nothing there.
   run summary is green when nothing outside the quarantine set failed.
   The auto set and any cap warning go to stderr, so the CI log records
   what was quarantined and why.
+- **HTML** (`--html`): auto-quarantined tests carry an `auto` badge, every
+  test shows its earlier runs as a strip, and the header counts the auto set.
 - **JUnit** (`--junitxml`): the testcase carries a
   `quarantined="true"` property and **no `<failure>` element**, so
   JUnit-gating CI (and dashboards that count failures) stays green

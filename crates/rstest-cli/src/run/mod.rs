@@ -645,13 +645,9 @@ pub(crate) fn execute_inner(
             h.clone()
         }
     });
-    // The env hash only when --since-green is active, so the default run path
-    // skips the site-packages walk.
-    let env_fp = if since_green {
-        incremental::env_fingerprint(&scope, &python)
-    } else {
-        String::new()
-    };
+    // Computed on every run: the per-test history stamps each run with its
+    // environment (`explain`'s env_changed).
+    let env_fp = incremental::env_fingerprint(&scope, &python);
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
     // Resolved once: selection and the post-run diff-coverage gate share it, so
@@ -1423,8 +1419,19 @@ fn apply_quarantine(
     let Some(q) = quarantine else {
         return Ok(());
     };
-    let matcher = q.demotion_matcher(&outcome.run, sink);
+    let (matcher, auto_applied) = q.demotion_matcher(&outcome.run, sink);
     let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
+    if auto_applied {
+        // The run's auto-quarantined tests (passing ones included), for the
+        // HTML report.
+        let ran: std::collections::BTreeSet<String> = q
+            .auto()
+            .iter()
+            .filter(|id| outcome.run.tests().contains_key(*id))
+            .cloned()
+            .collect();
+        outcome.run.auto_quarantined = ran;
+    }
     outcome.exitstatus = quarantined_exit(
         outcome.exitstatus,
         !demoted.is_empty(),

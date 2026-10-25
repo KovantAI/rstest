@@ -1632,6 +1632,7 @@ mod tests {
                     id: id.into(),
                     epoch: at,
                     commit: Some(format!("c-{id}")),
+                    env: String::new(),
                 },
                 tests: HashMap::from([(
                     "t::a".to_string(),

@@ -51,7 +51,7 @@ fn write_run_reports(
         junit::write(path, run, suite_seconds)?;
     }
     if let Some(path) = html {
-        html::write(path, run, meta)?;
+        html::write(path, run, meta, &history::load())?;
     }
     Ok(())
 }
@@ -675,7 +675,7 @@ pub(super) fn run_post_gates(
                  (.rstest_cache/durations.json); comparison skipped",
             );
         } else {
-            let rows = durations::regressions(&outcome.run, &baseline, ratio);
+            let rows = durations::regressions(&outcome.run, &baseline, &history::load(), ratio);
             if rows.is_empty() {
                 sink.warn(&format!(
                     "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
@@ -687,9 +687,21 @@ pub(super) fn run_post_gates(
                         "=========== duration regressions (>= {ratio}x baseline) ==========="
                     ))
                 ));
-                for (nodeid, old, new) in &rows {
-                    sink.out_line(&format!("  {old:7.2}s -> {new:7.2}s  {nodeid}"));
-                    outcome.run.mark_duration_regressed(nodeid);
+                for r in &rows {
+                    let basis = match (r.median_runs, r.ceiling) {
+                        (Some(n), Some(c)) => {
+                            palette.dim(&format!("  (median of {n} runs, normal up to {c:.2}s)"))
+                        }
+                        (None, Some(c)) => {
+                            palette.dim(&format!("  (last recorded, normal up to {c:.2}s)"))
+                        }
+                        _ => String::new(),
+                    };
+                    sink.out_line(&format!(
+                        "  {:7.2}s -> {:7.2}s  {}{basis}",
+                        r.baseline, r.new, r.nodeid
+                    ));
+                    outcome.run.mark_duration_regressed(&r.nodeid);
                 }
                 duration_regressions = rows.len();
             }
@@ -714,7 +726,7 @@ pub(super) fn run_post_gates(
         let history_slice = if cli.instrument_workers {
             None
         } else {
-            history::slice(&outcome.run, started_epoch, history_commit)
+            history::slice(&outcome.run, started_epoch, history_commit, env_fp)
         };
         if let Some(slice) = &history_slice {
             history::record(slice.clone());
@@ -1100,11 +1112,16 @@ fn print_warnings_summary(
 pub(super) use crate::scheduling::orchestrator::Quarantine;
 
 impl Quarantine {
-    /// Matcher for the post-run demotion. When more auto-set tests failed
+    /// Matcher for the post-run demotion, and whether it includes the auto
+    /// set. When more auto-set tests failed
     /// this run than `max_pct` percent of the run's tests (at least one),
     /// the environment is the likelier culprit: warn and demote only the
     /// file's tests, so those failures count as usual.
-    pub(super) fn demotion_matcher(&self, run: &report::Run, sink: &mut Sink) -> &regex::RegexSet {
+    pub(super) fn demotion_matcher(
+        &self,
+        run: &report::Run,
+        sink: &mut Sink,
+    ) -> (&regex::RegexSet, bool) {
         let failed = run
             .tests()
             .iter()
@@ -1115,7 +1132,7 @@ impl Quarantine {
         let total = run.cap_total.unwrap_or_else(|| run.tests().len());
         let cap = crate::scheduling::orchestrator::auto_quarantine_cap(total, self.max_pct);
         if failed <= cap {
-            return &self.all;
+            return (&self.all, true);
         }
         sink.warn(&format!(
             "rstest: --auto-quarantine: {failed} auto-quarantined test(s) failed, over the cap \
@@ -1123,7 +1140,12 @@ impl Quarantine {
              environment looks broken (raise the cap with --auto-quarantine-max=PCT)",
             self.max_pct
         ));
-        &self.file
+        (&self.file, false)
+    }
+
+    /// The auto-quarantined nodeids (from the history; empty when off).
+    pub(super) fn auto(&self) -> &std::collections::HashSet<String> {
+        &self.auto
     }
 }
 
@@ -1476,6 +1498,7 @@ mod tests {
                 epoch: 0,
                 // One clean commit: pass->fail flips only count within one.
                 commit: Some("c".into()),
+                env: String::new(),
             });
         }
         for (id, outcomes) in tests {
@@ -1571,16 +1594,16 @@ mod tests {
         // f1 is in the file and never counts toward the cap.
         let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 37);
         let (mut sink, cap) = Sink::captured();
-        let m = q.demotion_matcher(&run, &mut sink);
-        assert!(m.is_match("t.py::f2") && m.is_match("t.py::f3"));
+        let (m, auto) = q.demotion_matcher(&run, &mut sink);
+        assert!(auto && m.is_match("t.py::f2") && m.is_match("t.py::f3"));
         assert_eq!(cap.err(), "");
 
         // Same failures in a 20-test run: cap = 1, over it -> none of the auto
         // set is demoted, the file's test still is.
         let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 17);
         let (mut sink, cap) = Sink::captured();
-        let m = q.demotion_matcher(&run, &mut sink);
-        assert!(m.is_match("t.py::f1"));
+        let (m, auto) = q.demotion_matcher(&run, &mut sink);
+        assert!(!auto && m.is_match("t.py::f1"));
         assert!(!m.is_match("t.py::f2") && !m.is_match("t.py::f3"));
         let err = cap.err();
         assert!(
@@ -1593,6 +1616,7 @@ mod tests {
         let run = run_of(&["t.py::f2"], 1);
         assert!(q
             .demotion_matcher(&run, &mut Sink::captured().0)
+            .0
             .is_match("t.py::f2"));
         std::fs::remove_file(&path).ok();
     }
@@ -1638,7 +1662,7 @@ mod tests {
         }
         run.cap_total = Some(1000);
         let (mut sink, cap) = Sink::captured();
-        let m = q.demotion_matcher(&run, &mut sink);
+        let (m, _) = q.demotion_matcher(&run, &mut sink);
         assert!(ids.iter().all(|id| m.is_match(id)));
         assert_eq!(cap.err(), "");
     }
