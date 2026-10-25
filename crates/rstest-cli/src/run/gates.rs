@@ -582,7 +582,8 @@ pub(super) fn run_post_gates(
             outcome.fork_prewarmed,
             n,
             coverage_index.as_ref().zip(project.as_ref()),
-        );
+        )
+        .with_history(&outcome.run, &history::load());
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {

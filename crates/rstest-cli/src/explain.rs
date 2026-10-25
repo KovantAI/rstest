@@ -216,10 +216,7 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         first_fail_commit,
         env_changed,
         suspect_commits: None,
-        flips: crate::reporting::history::flip_positions(
-            series.iter().map(|(r, e)| (r.commit.as_deref(), *e)),
-        )
-        .len(),
+        flips: crate::reporting::history::flip_positions(series.iter().copied()).len(),
         auto_quarantine_at: 0,
         auto_quarantined_next_run: false,
     })

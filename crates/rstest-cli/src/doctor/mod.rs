@@ -89,6 +89,10 @@ pub struct DoctorReport {
     /// delete/merge candidates. `None` unless a per-test coverage index was
     /// warm (`--cov --cov-context=test`) and at least one test qualified.
     coverage_waste: Option<CoverageWaste>,
+    /// Suggested `--timeout` and per-test `@pytest.mark.timeout` overrides,
+    /// from each test's slowest recorded passing run (call phase). `null`
+    /// until some test in this run has 5 passing runs in the run history.
+    timeouts: Option<TimeoutAdvice>,
     /// Tests that leaked threads / fds (created by the test, still open after
     /// its teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -122,6 +126,97 @@ struct WasteTest {
     covered_lines: u64,
     /// Distinct OTHER tests that between them also cover those lines.
     also_covered_by: u64,
+}
+
+/// Timeouts that catch a hang without killing a slow-but-healthy test. Each
+/// test's own limit is the larger of 3x its slowest recorded passing run and
+/// that run plus 1s, rounded up to whole seconds.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct TimeoutAdvice {
+    /// Suggested suite-wide `--timeout`, in seconds: the limit that covers 95%
+    /// of the judged tests.
+    suite_timeout: u64,
+    /// Tests in this run with at least 5 passing runs in the history.
+    tests_judged: usize,
+    /// Judged tests whose own limit is above `suite_timeout`: they need a
+    /// per-test `@pytest.mark.timeout`.
+    override_count: usize,
+    /// The highest of those, worst first (top 20).
+    overrides: Vec<TimeoutOverride>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct TimeoutOverride {
+    /// The test.
+    nodeid: String,
+    /// Its slowest recorded passing call-phase time, in seconds (the phase
+    /// `--timeout` limits; fixture setup/teardown not included).
+    slowest_seconds: f64,
+    /// Passing runs that slowest time comes from.
+    runs: usize,
+    /// Its suggested `@pytest.mark.timeout`, in seconds.
+    timeout: u64,
+}
+
+/// Overrides listed in a report (`override_count` has the total).
+const TIMEOUT_OVERRIDES_SHOWN: usize = 20;
+
+/// A test's own limit from its slowest passing run: 3x, at least +1s.
+fn timeout_for(slowest: f64) -> u64 {
+    ((slowest * 3.0).max(slowest + 1.0).ceil() as u64).max(1)
+}
+
+/// The timeout advice for the tests in `run`, from their passing call times
+/// in `history`; `None` when no test has enough runs.
+fn timeout_advice(
+    run: &Run,
+    history: &crate::reporting::history::History,
+) -> Option<TimeoutAdvice> {
+    let mut judged: Vec<(String, f64, usize, u64)> = run
+        .tests()
+        .keys()
+        .filter_map(|id| {
+            let calls = crate::scheduling::durations::passing_calls(history, id)?;
+            let slowest = calls.iter().copied().fold(0.0, f64::max);
+            Some((id.clone(), slowest, calls.len(), timeout_for(slowest)))
+        })
+        .collect();
+    if judged.is_empty() {
+        return None;
+    }
+    let mut limits: Vec<u64> = judged.iter().map(|t| t.3).collect();
+    limits.sort_unstable();
+    // Nearest-rank 95th percentile.
+    let suite_timeout = limits[(limits.len() * 95).div_ceil(100) - 1];
+    let tests_judged = judged.len();
+    judged.retain(|t| t.3 > suite_timeout);
+    judged.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    let override_count = judged.len();
+    judged.truncate(TIMEOUT_OVERRIDES_SHOWN);
+    Some(TimeoutAdvice {
+        suite_timeout,
+        tests_judged,
+        override_count,
+        overrides: judged
+            .into_iter()
+            .map(|(nodeid, slowest, runs, timeout)| TimeoutOverride {
+                nodeid,
+                slowest_seconds: (slowest * 1e4).round() / 1e4,
+                runs,
+                timeout,
+            })
+            .collect(),
+    })
+}
+
+impl DoctorReport {
+    /// Add the history-based sections ([`TimeoutAdvice`]).
+    pub fn with_history(mut self, run: &Run, history: &crate::reporting::history::History) -> Self {
+        self.timeouts = timeout_advice(run, history);
+        self
+    }
 }
 
 /// A test that ended with more threads / open fds than it started: a resource
@@ -465,6 +560,7 @@ pub fn analyze(
         fixtures: fx,
         slowest_files: files,
         coverage_waste,
+        timeouts: None,
         leaks,
     }
 }
@@ -618,6 +714,98 @@ pub fn write_json(path: &std::path::Path, report: &DoctorReport) -> anyhow::Resu
     Ok(())
 }
 
+#[cfg(test)]
+mod timeout_tests {
+    use super::testutil::record_test;
+    use super::*;
+    use crate::reporting::history::{outcome_code, Entry, History, RunMeta};
+
+    /// History giving each test `runs` passing runs at `secs`, plus one
+    /// failed run whose time must not count.
+    fn history(tests: &[(&str, f32, usize)]) -> History {
+        let mut h = History::default();
+        let n = tests.iter().map(|t| t.2).max().unwrap_or(0) + 1;
+        for seq in 0..n as u64 {
+            h.runs.push(RunMeta {
+                seq,
+                id: format!("r{seq}"),
+                epoch: seq,
+                commit: None,
+                env: String::new(),
+            });
+        }
+        for (id, secs, runs) in tests {
+            let mut series: std::collections::VecDeque<Entry> = (0..*runs)
+                .map(|i| Entry {
+                    run: i as u64,
+                    outcome: outcome_code("passed").unwrap(),
+                    call: Some(*secs),
+                    setup: 0.0,
+                })
+                .collect();
+            series.push_back(Entry {
+                run: *runs as u64,
+                outcome: outcome_code("failed").unwrap(),
+                call: Some(99.0),
+                setup: 0.0,
+            });
+            h.tests.insert(id.to_string(), series);
+        }
+        h
+    }
+
+    #[test]
+    fn timeout_for_is_3x_with_a_one_second_floor() {
+        assert_eq!(timeout_for(0.1), 2); // 0.1 + 1 = 1.1 -> 2
+        assert_eq!(timeout_for(0.5), 2); // 1.5 -> 2
+        assert_eq!(timeout_for(5.0), 15);
+        assert_eq!(timeout_for(8.4), 26); // 25.2 -> 26
+        assert_eq!(timeout_for(0.0), 1);
+    }
+
+    #[test]
+    fn suite_timeout_covers_95_pct_and_slow_tests_get_overrides() {
+        let mut tests: Vec<(String, f32, usize)> = (0..38)
+            .map(|i| (format!("t.py::fast{i}"), 0.1, 5))
+            .collect();
+        tests.push(("t.py::slow".into(), 5.0, 6));
+        tests.push(("t.py::slowest".into(), 8.4, 12));
+        tests.push(("t.py::young".into(), 30.0, 4)); // under 5 runs: not judged
+        tests.push(("t.py::not_run".into(), 50.0, 9)); // not in this run
+        let refs: Vec<(&str, f32, usize)> = tests
+            .iter()
+            .map(|(id, s, n)| (id.as_str(), *s, *n))
+            .collect();
+        let h = history(&refs);
+        let mut run = Run::default();
+        for (id, ..) in &tests[..41] {
+            record_test(&mut run, id, 0, 0.1);
+        }
+        let t = timeout_advice(&run, &h).unwrap();
+        assert_eq!(t.tests_judged, 40);
+        assert_eq!(t.suite_timeout, 2);
+        assert_eq!(t.override_count, 2);
+        let o: Vec<(&str, u64, usize)> = t
+            .overrides
+            .iter()
+            .map(|o| (o.nodeid.as_str(), o.timeout, o.runs))
+            .collect();
+        assert_eq!(o, [("t.py::slowest", 26, 12), ("t.py::slow", 15, 6)]);
+        // The failed 99s run never counts as "slowest".
+        assert!((t.overrides[0].slowest_seconds - 8.4).abs() < 1e-3);
+
+        // No history: no section.
+        assert!(timeout_advice(&run, &History::default()).is_none());
+        // A small suite: the 95th percentile is its slowest, so no overrides.
+        let h = history(&[("a", 0.1, 5), ("b", 5.0, 5)]);
+        let mut run = Run::default();
+        record_test(&mut run, "a", 0, 0.1);
+        record_test(&mut run, "b", 0, 0.1);
+        let t = timeout_advice(&run, &h).unwrap();
+        assert_eq!((t.suite_timeout, t.override_count), (15, 0));
+    }
+}
+
 /// Report builders shared by the `analyze`/`gate`/`render` test modules. A
 /// descendant of the types' module, so it can populate their private fields.
 #[cfg(test)]
@@ -705,6 +893,17 @@ pub(crate) mod testutil {
                     duration: 12.0,
                     covered_lines: 40,
                     also_covered_by: 3,
+                }],
+            }),
+            timeouts: Some(TimeoutAdvice {
+                suite_timeout: 3,
+                tests_judged: 40,
+                override_count: 1,
+                overrides: vec![TimeoutOverride {
+                    nodeid: "tests/test_a.py::test_long".into(),
+                    slowest_seconds: 8.4,
+                    runs: 12,
+                    timeout: 26,
                 }],
             }),
             leaks: Vec::new(),

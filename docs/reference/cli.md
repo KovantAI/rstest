@@ -519,6 +519,10 @@ pool. `@pytest.mark.timeout(N)` overrides the value per test:
 def test_slow_path(): ...
 ```
 
+Not sure what value to pick? [`--doctor`](#-doctor) suggests one from each
+test's recorded runs, plus the tests that need their own marker
+([TIMEOUTS](../guides/doctor.md#timeouts)).
+
 A test blocked inside a C extension never returns to the interpreter, so the
 signal can't fire; a per-test hang watchdog (3 × the test's timeout + 10 s)
 kills its worker instead. See
@@ -668,8 +672,9 @@ process, one after another.
 
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time), the
 parallel floor (tests that cap any `-n`), parallel efficiency (`-n ≥ 2` only),
-fixture hotspots with scope advice, slowest files, and **resource leaks**
-(threads or fds a test left open). Adds a few cheap measurements; outcomes are
+fixture hotspots with scope advice, slowest files, **resource leaks**
+(threads or fds a test left open), and, once the run history has 5 runs of a
+test, a suggested **`--timeout`** with per-test overrides. Adds a few cheap measurements; outcomes are
 unaffected. Reading each section: [Suite diagnostics](../guides/doctor.md).
 
 ### `--doctor-json <path>`

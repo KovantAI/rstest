@@ -119,27 +119,20 @@ impl History {
 
     /// Tests whose recorded series flipped at least `min` times, sorted. A
     /// flip is a run rescued by `--reruns` (`flaky`) or a failure right after
-    /// a pass on the same clean commit (non-pass/non-fail outcomes like
+    /// a pass on the same clean commit and env (non-pass/non-fail outcomes like
     /// `skipped` are stepped over). A test that broke and stays broken flips
     /// once, so a real regression is never auto-quarantined at the default
     /// `min`; one broken and fixed across edits doesn't flip at all. A test
     /// [`failing_now`] is left out whatever its past flips: a flapper that
     /// then broke for real must fail the run again.
     pub fn flippers(&self, min: u32) -> Vec<String> {
-        let commits: HashMap<u64, Option<&str>> = self
-            .runs
-            .iter()
-            .map(|r| (r.seq, r.commit.as_deref()))
-            .collect();
+        let runs: HashMap<u64, &RunMeta> = self.runs.iter().map(|r| (r.seq, r)).collect();
         let mut out: Vec<String> = self
             .tests
             .iter()
             .filter(|(_, s)| {
                 !failing_now(s.iter().map(Entry::outcome_name))
-                    && flips(
-                        s.iter()
-                            .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
-                    ) >= min
+                    && flips(s.iter().filter_map(|e| runs.get(&e.run).map(|r| (*r, e)))) >= min
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -255,31 +248,33 @@ pub fn failing_now<'a>(outcomes: impl DoubleEndedIterator<Item = &'a str>) -> bo
     tail.len() == 3 && tail.iter().all(|o| is_fail(o))
 }
 
-fn flips<'a>(series: impl IntoIterator<Item = (Option<&'a str>, &'a Entry)>) -> u32 {
+fn flips<'a>(series: impl IntoIterator<Item = (&'a RunMeta, &'a Entry)>) -> u32 {
     flip_positions(series).len() as u32
 }
 
-/// Indices (oldest first) of the flips in one test's `(commit, entry)`
-/// series: a `flaky` pass, or a fail right after a pass. The pass-then-fail
-/// counts only when both runs share a commit with no uncommitted edits:
-/// across a code change, the fail is the change, not flakiness. Skips,
+/// Indices (oldest first) of the flips in one test's `(run, entry)` series:
+/// a `flaky` pass, or a fail right after a pass. The pass-then-fail counts
+/// only when both runs share a commit with no uncommitted edits and the same
+/// env fingerprint: across a code change the fail is the change, and across
+/// envs (a tox/CI matrix on one commit) it is that env, not flakiness. Skips,
 /// xfails etc. are stepped over.
 pub fn flip_positions<'a>(
-    series: impl IntoIterator<Item = (Option<&'a str>, &'a Entry)>,
+    series: impl IntoIterator<Item = (&'a RunMeta, &'a Entry)>,
 ) -> Vec<usize> {
     let mut out = Vec::new();
-    // The commit of the latest run, when that run passed.
-    let mut last_pass: Option<Option<&str>> = None;
-    for (i, (commit, e)) in series.into_iter().enumerate() {
+    // The (commit, env) of the latest run, when that run passed.
+    let mut last_pass: Option<(Option<&str>, &str)> = None;
+    for (i, (r, e)) in series.into_iter().enumerate() {
+        let at = (r.commit.as_deref(), r.env.as_str());
         match e.outcome_name() {
             "flaky" => {
                 out.push(i);
-                last_pass = Some(commit);
+                last_pass = Some(at);
             }
-            "passed" => last_pass = Some(commit),
+            "passed" => last_pass = Some(at),
             "failed" | "errors" | "crashed" | "quarantined" => {
-                let clean = commit.is_some_and(|c| !c.ends_with("-dirty"));
-                if clean && last_pass == Some(commit) {
+                let clean = at.0.is_some_and(|c| !c.ends_with("-dirty"));
+                if clean && last_pass == Some(at) {
                     out.push(i);
                 }
                 last_pass = None;
@@ -661,6 +656,26 @@ mod tests {
         };
         h.append(m, vec![("t".into(), entry("passed"))], 50);
         assert_eq!(h.flippers(3), ["t"]);
+    }
+
+    #[test]
+    fn flips_need_the_same_env() {
+        let mut h = History::default();
+        // tox/CI matrix on one commit: passes on py311, always fails on py312.
+        for i in 0..8u64 {
+            let (env, o) = if i % 2 == 0 {
+                ("py311", "passed")
+            } else {
+                ("py312", "failed")
+            };
+            let m = RunMeta {
+                commit: Some("c".into()),
+                env: env.into(),
+                ..meta(i)
+            };
+            h.append(m, vec![("t".into(), entry(o))], 50);
+        }
+        assert!(h.flippers(1).is_empty());
     }
 
     #[test]
