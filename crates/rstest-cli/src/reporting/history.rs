@@ -98,6 +98,33 @@ impl History {
             .collect()
     }
 
+    /// Tests whose recorded series flipped at least `min` times, sorted. A
+    /// flip is a run rescued by `--reruns` (`flaky`) or a failure right after
+    /// a pass on the same clean commit (non-pass/non-fail outcomes like
+    /// `skipped` are stepped over). A test that broke and stays broken flips
+    /// once, so a real regression is never auto-quarantined at the default
+    /// `min`; one broken and fixed across edits doesn't flip at all.
+    pub fn flippers(&self, min: u32) -> Vec<String> {
+        let commits: HashMap<u64, Option<&str>> = self
+            .runs
+            .iter()
+            .map(|r| (r.seq, r.commit.as_deref()))
+            .collect();
+        let mut out: Vec<String> = self
+            .tests
+            .iter()
+            .filter(|(_, s)| {
+                flips(
+                    s.iter()
+                        .filter_map(|e| commits.get(&e.run).map(|c| (*c, e))),
+                ) >= min
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Add one run. Each test's series is trimmed to the newest `cap` entries
     /// and runs no entry points at any more are dropped.
     fn append(&mut self, mut meta: RunMeta, entries: Vec<(String, Entry)>, cap: usize) {
@@ -140,6 +167,31 @@ impl History {
         let live: HashSet<u64> = self.tests.values().flatten().map(|e| e.run).collect();
         self.runs.retain(|r| live.contains(&r.seq));
     }
+}
+
+/// Flips in one test's `(commit, entry)` series, oldest first. A pass then a
+/// fail counts only when both runs share a commit with no uncommitted edits:
+/// across a code change, the fail is the change, not flakiness.
+fn flips<'a>(series: impl Iterator<Item = (Option<&'a str>, &'a Entry)>) -> u32 {
+    let mut n = 0;
+    // The commit of the latest run, when that run passed.
+    let mut last_pass: Option<Option<&str>> = None;
+    for (commit, e) in series {
+        match e.outcome_name() {
+            "flaky" => {
+                n += 1;
+                last_pass = Some(commit);
+            }
+            "passed" => last_pass = Some(commit),
+            "failed" | "errors" | "crashed" | "quarantined" => {
+                let clean = commit.is_some_and(|c| !c.ends_with("-dirty"));
+                n += u32::from(clean && last_pass == Some(commit));
+                last_pass = None;
+            }
+            _ => {}
+        }
+    }
+    n
 }
 
 /// Entries kept per test. `RSTEST_HISTORY_RUNS`, default 50, minimum 1.
@@ -391,6 +443,75 @@ mod tests {
         std::fs::write(&path, rmp_serde::to_vec(&h).unwrap()).unwrap();
         assert_eq!(load_from(&path), History::default());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flippers_catch_intermittent_not_steadily_broken() {
+        let mut h = History::default();
+        let series = |s: &str| {
+            s.chars()
+                .map(|c| match c {
+                    'p' => "passed",
+                    'f' => "failed",
+                    '~' => "flaky",
+                    'q' => "quarantined",
+                    _ => "skipped",
+                })
+                .collect::<Vec<_>>()
+        };
+        let tests = [
+            ("broke", "ppppffff"),    // 1 flip: a real regression
+            ("flap", "pfpfpf"),       // 3 flips
+            ("rescued", "p~p~p~"),    // 3 reruns rescued it
+            ("skips", "pfsfpsf"),     // skip between fails is stepped over: 2
+            ("quar", "pqpqpq"),       // quarantined failures still count
+            ("born_red", "ffffffff"), // never passed: 0
+        ];
+        for i in 0..8 {
+            let es = tests
+                .iter()
+                .filter_map(|(id, s)| series(s).get(i).map(|o| (id.to_string(), entry(o))))
+                .collect();
+            // One commit throughout: every run tests the same code.
+            let m = RunMeta {
+                commit: Some("c".into()),
+                ..meta(i as u64)
+            };
+            h.append(m, es, 50);
+        }
+        assert_eq!(h.flippers(3), ["flap", "quar", "rescued"]);
+        assert_eq!(h.flippers(2), ["flap", "quar", "rescued", "skips"]);
+        assert_eq!(h.flippers(1).len(), 5);
+    }
+
+    #[test]
+    fn flips_need_the_same_clean_commit() {
+        let mut h = History::default();
+        // (commit, flap outcome, rescued outcome) per run.
+        let runs = [
+            (Some("a"), "passed", "flaky"),
+            (Some("b"), "failed", "flaky"), // fail on a new commit: an edit
+            (Some("b"), "passed", "flaky"),
+            (Some("b-dirty"), "failed", "passed"), // uncommitted edits
+            (Some("b-dirty"), "passed", "passed"),
+            (Some("b-dirty"), "failed", "passed"), // dirty on both sides
+            (None, "passed", "passed"),
+            (None, "failed", "passed"), // no git: no commit to compare
+        ];
+        for (i, (commit, flap, rescued)) in runs.into_iter().enumerate() {
+            let m = RunMeta {
+                commit: commit.map(str::to_string),
+                ..meta(i as u64)
+            };
+            let es = vec![
+                ("flap".to_string(), entry(flap)),
+                ("rescued".to_string(), entry(rescued)),
+            ];
+            h.append(m, es, 50);
+        }
+        // Reruns rescuing a run is flakiness on any commit; pass->fail isn't.
+        assert_eq!(h.flippers(1), ["rescued"]);
+        assert_eq!(h.flippers(3), ["rescued"]);
     }
 
     #[test]

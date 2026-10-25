@@ -3,7 +3,7 @@
 import json
 import time
 
-from _harness import CRASHFLAKY, FLAKY, MARKS, check
+from _harness import CRASHFLAKY, FLAKY, MARKS, check, git, git_commit, git_init_commit
 
 
 def gate_flaky_reruns(g, args, binary):
@@ -74,7 +74,16 @@ def gate_flaky_reruns(g, args, binary):
     )
     # No --reruns at -n 1 stays byte-exact single session: the flake fails.
     swm.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "1", cwd=fdir, env_extra={"FLAKY_MARKER": str(swm)})
+    # --auto-quarantine=0 here and below: earlier sections rescued this test
+    # by rerun often enough that its history would auto-quarantine it.
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "1",
+        "--auto-quarantine=0",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(swm)},
+    )
     check(
         "no-reruns at -n 1 stays byte-exact (flake fails)",
         r.returncode == 1
@@ -100,7 +109,14 @@ def gate_flaky_reruns(g, args, binary):
         f"rc={r.returncode} " + r.stderr[-200:],
     )
     marker.unlink(missing_ok=True)
-    r = g.run("test_flaky.py", "-n", "2", cwd=fdir, env_extra={"FLAKY_MARKER": str(marker)})
+    r = g.run(
+        "test_flaky.py",
+        "-n",
+        "2",
+        "--auto-quarantine=0",
+        cwd=fdir,
+        env_extra={"FLAKY_MARKER": str(marker)},
+    )
     check(
         "flaky fails without reruns", r.returncode == 1 and "1 failed" in r.stdout, r.stdout[-200:]
     )
@@ -133,6 +149,8 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
             "--reruns",
             "2",
             "--reruns-only-known-flaky",
+            # Rerun history from earlier sections would auto-quarantine it.
+            "--auto-quarantine=0",
             *extra,
             cwd=fdir,
             env_extra={"FLAKY_MARKER": str(m)},
@@ -237,6 +255,7 @@ def gate_flaky_aware_reruns_reruns_only_known_fla(g, args, binary):
             "--reruns",
             "2",
             "--reruns-only-known-flaky",
+            "--auto-quarantine=0",
             cwd=fdir,
             env_extra={"FLAKY_MARKER": str(m)},
         )
@@ -350,6 +369,12 @@ def gate_quarantine(g, args, binary):
         and "QUARANTINED test_q.py::test_real_bug" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-400:],
     )
+    r = g.run(".", "-n", "2", "--quarantine", "missing.txt", cwd=qdir)
+    check(
+        "quarantine: unreadable file is an error, not an empty list",
+        r.returncode != 0 and "--quarantine: cannot read missing.txt" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
     g.write("quar/quarantine.txt", "test_q.py::*\n")
     qx = g.tmp / "quar_junit.xml"
     r = g.run(".", "-n", "2", "--quarantine", "quarantine.txt", "--junitxml", str(qx), cwd=qdir)
@@ -403,6 +428,210 @@ def gate_quarantine(g, args, binary):
         "--quarantine has no effect in passthrough mode" in r.stderr
         and "quarantined" not in r.stdout,
         f"rc={r.returncode} " + (r.stderr[-300:] or r.stdout[-300:]),
+    )
+
+    # --auto-quarantine: `test_flap` alternates pass/fail run to run (a counter
+    # file), `test_broke` passes once then fails for good. After 6 runs flap has
+    # flipped 3x and gets quarantined; broke flipped once and still fails.
+    # Committed: a pass->fail flip only counts on one clean commit.
+    g.write(
+        "autoq/test_a.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_flap(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_broke(): assert int(N.read_text()) == 0\n",
+    )
+    adir = g.tmp / "autoq"
+    git_init_commit(adir, "init")
+    cnt = g.tmp / "autoq_count"
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    # On by default: no flag needed.
+    r = g.run(".", "-n", "2", cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine (default on): flapping test demoted, steady regression still fails",
+        r.returncode == 1
+        and "1 failed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_a.py::test_flap" in r.stdout
+        and "--auto-quarantine: 1 test(s)" in r.stderr
+        and "test_a.py::test_broke" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    for flag, why in (
+        ("--auto-quarantine=9", "threshold above the flips"),
+        ("--auto-quarantine=0", "=0 turns it off"),
+    ):
+        r = g.run(".", "-n", "2", flag, cwd=adir, env_extra={"AQ_COUNT": str(cnt)})
+        check(
+            f"auto-quarantine: {why} quarantines nothing",
+            r.returncode == 1 and "2 failed" in r.stdout and "quarantined" not in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-300:],
+        )
+    # The same flapping, but each run on a new commit: every fail follows a
+    # code change, so nothing flips and nothing is quarantined.
+    g.write(
+        "autoq_edit/test_e.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_flap(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    edir = g.tmp / "autoq_edit"
+    git_init_commit(edir, "init")
+    for i in range(1, 8):  # fail, pass, ... fail: 3 pass->fail steps
+        cnt.write_text(str(i))
+        (edir / "rev.txt").write_text(str(i))
+        git(edir, "add", "rev.txt")
+        git_commit(edir, f"edit {i}")
+        r = g.run(".", "-n", "2", cwd=edir, env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine: pass/fail across commits is not a flip",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "quarantined" not in r.stdout
+        and "--auto-quarantine:" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    cnt.write_text("1")
+    # [tool.rstest]: the file path resolves against the pyproject's dir (run
+    # from a subdir), and auto-quarantine = 0 turns the auto set off.
+    g.write(
+        "autoq/pyproject.toml",
+        '[tool.rstest]\nquarantine = "q.txt"\nauto-quarantine = 0\n',
+    )
+    g.write("autoq/q.txt", "test_a.py::test_broke\n")
+    g.write("autoq/sub/.keep", "")
+    r = g.run("..", "-n", "2", cwd=adir / "sub", env_extra={"AQ_COUNT": str(cnt)})
+    check(
+        "auto-quarantine: [tool.rstest] quarantine + auto-quarantine = 0",
+        r.returncode == 1
+        and "1 failed, 1 quarantined" in r.stdout
+        and "QUARANTINED test_a.py::test_broke" in r.stdout
+        and "--auto-quarantine:" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Cap: a fresh project where both tests flap. A 10% cap of 2 tests rounds
+    # up to 1, so 2 flippers are over it and nothing is quarantined.
+    g.write(
+        "autoq_cap/test_c.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    cdir = g.tmp / "autoq_cap"
+    git_init_commit(cdir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "2", "--auto-quarantine=0", cwd=cdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".", "-n", "2", "--auto-quarantine-max", "10", cwd=cdir, env_extra={"AQ_COUNT": str(cnt)}
+    )
+    check(
+        "auto-quarantine: over the cap quarantines nothing and warns",
+        r.returncode == 1
+        and "2 failed" in r.stdout
+        and "quarantined" not in r.stdout
+        and "over the cap of 1 (10% of 2 tests in this run)" in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Over the cap under -x: the post-run demotion quarantines none of the
+    # auto set, so the session's -x must count them too and stop, not run the
+    # rest of the suite into a red result anyway. 2 flappers of 10 tests at
+    # 10% (cap 1): the second auto failure stops the run.
+    g.write(
+        "autoq_x/test_x.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(8)),
+    )
+    xdir = g.tmp / "autoq_x"
+    git_init_commit(xdir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=xdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "0",
+        "-x",
+        "--auto-quarantine-max",
+        "10",
+        cwd=xdir,
+        env_extra={"AQ_COUNT": str(cnt)},
+    )
+    check(
+        "auto-quarantine: over the cap, -x stops on the auto failures",
+        r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Same under --collect lazy, where the test count is only final once every
+    # file is collected. test_0.py sorts first, so one worker is stuck
+    # importing it (AQ_SLOW) and the other collects test_flap.py and runs its
+    # flappers meanwhile: their failures are held (the third waits as the
+    # worker's lookahead). 2 held of 11 tests at 5% (cap 1): the last collect
+    # settles the cap and must stop the run before test_0's tests start.
+    g.write(
+        "autoq_lazy/test_flap.py",
+        "import os, pathlib\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_c(): assert int(N.read_text()) % 2 == 0\n",
+    )
+    g.write(
+        "autoq_lazy/test_0.py",
+        "import os, time\n"
+        "if os.environ.get('AQ_SLOW'): time.sleep(3)\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(8)),
+    )
+    ldir = g.tmp / "autoq_lazy"
+    git_init_commit(ldir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=ldir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "-x",
+        "--auto-quarantine-max",
+        "5",
+        cwd=ldir,
+        env_extra={"AQ_COUNT": str(cnt), "AQ_SLOW": "1"},
+    )
+    check(
+        "auto-quarantine: lazy, the last collect settles the cap and stops -x",
+        r.returncode == 1 and "2 failed" in r.stdout and "passed" not in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Lazy -x with reruns: a failure counts once its retries are spent, and
+    # that final attempt stops the run.
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "-x",
+        "--reruns",
+        "1",
+        "--auto-quarantine=0",
+        cwd=ldir,
+        env_extra={"AQ_COUNT": str(cnt)},
+    )
+    check(
+        "lazy: -x stops on a failure whose reruns are spent",
+        r.returncode == 1 and "stopping after 1 failures" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
 
 

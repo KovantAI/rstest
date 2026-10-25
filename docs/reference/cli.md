@@ -62,7 +62,9 @@ means none.
 | [`--reruns N`](#-reruns-n) | rerun failed tests | `0` | `reruns` | |
 | [`--only-rerun REGEX`](#-only-rerun-regex) | rerun only matching failures | every failure | | |
 | [`--reruns-only-known-flaky`](#-reruns-only-known-flaky) | rerun only tests with flaky history | off | `reruns-only-known-flaky` | |
-| [`--quarantine FILE`](#-quarantine-file) | make listed tests' failures non-fatal | none | | |
+| [`--quarantine FILE`](#-quarantine-file) | make listed tests' failures non-fatal | none | `quarantine` | |
+| [`--auto-quarantine[=N]`](#-auto-quarantinen) | quarantine tests that flip pass/fail in history | 3 (`0` turns it off) | `auto-quarantine` | |
+| [`--auto-quarantine-max PCT`](#-auto-quarantine-max-pct) | ceiling on auto-quarantined failures per run | 5 | `auto-quarantine-max` | |
 | [`--timeout SECS`](#-timeout-secs) | per-test call-phase deadline | none | | |
 | [`--worker-timeout SECS`](#-worker-timeout-secs) | fixed per-test hang backstop | none (per-test watchdog when a test has a timeout) | `worker-timeout` | |
 | [`--durations-regress RATIO`](#-durations-regress-ratio) | fail on per-test duration regressions | off | | |
@@ -467,6 +469,38 @@ seen); the flaky and quarantined sections annotate each test with it
 (`flaked 3x before, failed 1x`). Reruns paper over a flake within one run;
 quarantine is cross-run policy for tests a team has decided to tolerate while
 fixing. Workflow and CI surfaces: [Flaky tests](../guides/flaky-tests.md).
+
+### `--auto-quarantine[=N]`
+
+On by default. Quarantine, for this run, every test whose recent history
+flipped at least `N` times (default 3; `--auto-quarantine=0` turns it off). A
+flip is a run where the test failed right after a passing run on the same
+commit with no uncommitted edits, or passed only on a rerun (`flaky`). Outside
+a git checkout only reruns count. The history is the per-test run store in
+`.rstest_cache/history.msgpack` (the last `RSTEST_HISTORY_RUNS` runs, aged by
+`RSTEST_FLAKE_RETENTION_DAYS`), so a fresh checkout or CI runner with no cached
+history quarantines nothing.
+
+A test that broke and stays broken flips once, so a real regression still
+fails the run. Matching failures get the same `quarantined` outcome as
+[`--quarantine`](#-quarantine-file), and the two compose: the run quarantines
+the union of the file and the auto set. rstest prints the auto set to stderr
+at the start of the run (the run log is the audit trail, there is no committed
+list). A test leaves the set once enough of its flips fall out of the history
+window. Attach `N` with `=`: `--auto-quarantine 5` is a bare
+`--auto-quarantine` plus a test path `5` (see
+[Optional-value flags](#argument-splitting)). Monorepo runs forward it to
+every project, each reading its own history.
+
+### `--auto-quarantine-max <PCT>`
+
+Ceiling on [`--auto-quarantine`](#-auto-quarantinen), checked after the run.
+When more auto-quarantined tests failed than `PCT` percent of the tests in
+this run (default 5, rounded up, at least one test), rstest warns and
+quarantines none of them, so their failures count as usual. That many
+flappers failing at once points at a broken environment, and that run should
+be red, not quarantined into green. Tests from the `--quarantine` file are
+still quarantined and don't count toward the cap. Accepts 0 to 100.
 
 ## Timeouts and crashes
 
@@ -961,11 +995,16 @@ collect = "full"        # or "lazy"
 order = "throughput"    # or "fail-fast"
 output = "bar"          # dots|verbose|bar|github|gitlab|buildkite|teamcity|azure|tap|json (default: bar on a TTY, dots off-TTY; unset at -n 0/1 = pytest's own output)
 projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-discovery
+quarantine = "ci/quarantine.txt"        # relative to this pyproject.toml
+auto-quarantine = 3     # 0 turns it off
+auto-quarantine-max = 5 # percent of the run's tests
 ```
 
 These are the only keys read (kebab-case); every other rstest flag
 (`--timeout`, `--html`, `--junitxml`, `--fail-on-leak`, `--doctor-fail-on`,
 ...) is command-line only. `worker-timeout` takes whole seconds, like the flag.
+`quarantine` is resolved against the directory of the `pyproject.toml` that
+sets it, so it works from any subdirectory.
 
 Precedence: command line > `[tool.rstest]` > built-in defaults. rstest reads
 the **nearest** `pyproject.toml`, walking up from the working directory, and
@@ -984,9 +1023,10 @@ rstest: /repo/pyproject.toml: ignoring [tool.rstest] reruns = "2" (expected a no
 ```
 
 `did you mean` appears only when the kebab-case spelling is a real key.
-Expected types: a non-negative integer (`reruns`, `worker-timeout`), a
+Expected types: a non-negative integer (`reruns`, `worker-timeout`,
+`auto-quarantine`), an integer from 0 to 100 (`auto-quarantine-max`), a
 non-negative integer or `"auto"` (`numprocesses`), `true` or `false`
-(`reruns-only-known-flaky`), a string (`dist`, `collect`, `order`, `output`),
+(`reruns-only-known-flaky`), a string (`dist`, `collect`, `order`, `output`, `quarantine`),
 and a list of glob strings (`projects`). `numprocesses` is checked in full: a
 string other than `"auto"` or a plain digit string (`"four"`, `"4 "`) gets
 the same warning and is ignored, where the same value as `-n` is a parse
@@ -997,7 +1037,8 @@ value passed as a flag.
 **Monorepo roots read only `projects`.** At a
 [monorepo](../concepts/monorepo.md) root, `[tool.rstest]` supplies only the
 project list: the worker budget comes from the command-line `-n` (else
-`auto`), and `dist`, `order`, `output`, `reruns` and `worker-timeout` reach
+`auto`), and `dist`, `order`, `output`, `reruns`, `worker-timeout` and the
+quarantine keys reach
 the projects only from the root command line. Each project reads its own
 nearest `pyproject.toml`, so a project without one (configured by
 `pytest.toml`, `pytest.ini`, `tox.ini` or `setup.cfg`) picks up the root's

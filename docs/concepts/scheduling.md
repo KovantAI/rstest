@@ -53,8 +53,8 @@ fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
 3. Everything else, in throughput order.
 
 The first two groups are read from `.rstest_cache/flakes.json`, each test
-dispatched on its own. At most 128 tests lead, and quarantined tests are
-never pulled forward.
+dispatched on its own. At most 128 tests lead, and quarantined tests (from
+the `--quarantine` file or the auto-quarantine set) are never pulled forward.
 
 With neither the flag nor `[tool.rstest] order` set, rstest picks
 `fail-fast` under `--watch` and `throughput` otherwise.
