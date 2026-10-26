@@ -285,10 +285,11 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
 
     if !order.is_empty() {
         sink.out_line(&format!(
-            "\n  {} test(s) are ORDER DEPENDENT: they pass at -n 0 and under --dist loadfile \
+            "\n  {} test(s) have an {}: they pass at -n 0 and under --dist loadfile \
              but fail when their file is split across workers. Serial won't fix these (it \
              runs them apart from the tests they depend on):",
-            order.len()
+            order.len(),
+            Verdict::OrderDependency.title()
         ));
         for nodeid in order.iter().take(8) {
             sink.out_line(&format!("    {nodeid}"));
@@ -691,7 +692,7 @@ mod tests {
             Verdict::WallClock.title(),
             Verdict::WallClock.advice().1
         )));
-        assert!(!out.contains("ORDER DEPENDENT"), "{out}");
+        assert!(!out.contains("ORDER DEPENDENCY"), "{out}");
         assert!(!out.contains("INCONCLUSIVE"), "{out}");
     }
 
@@ -707,7 +708,7 @@ mod tests {
         };
         let (code, out) = render(30, &b);
         assert_eq!(code, 1);
-        assert!(out.contains("9 test(s) are ORDER DEPENDENT"), "{out}");
+        assert!(out.contains("9 test(s) have an ORDER DEPENDENCY:"), "{out}");
         assert!(out.contains("    o_7.py::t\n"), "{out}");
         assert!(!out.contains("o_8.py::t"), "{out}");
         assert!(out.contains("    … and 1 more"), "{out}");

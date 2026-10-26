@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::reporting::color::Palette;
 use crate::reporting::flakes::FlakeStats;
-use crate::reporting::history::{Entry, RunMeta};
+use crate::reporting::history::{failing_now, Entry, RunMeta};
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
@@ -82,9 +82,12 @@ struct HistorySummary {
     call_p95: Option<f64>,
     /// Median setup-phase seconds over passing runs.
     setup_median: Option<f64>,
-    /// Commit of the most recent passing run.
+    /// Commit of the most recent passing run; suffixed `-dirty` when that run
+    /// had uncommitted changes.
     last_pass_commit: Option<String>,
-    /// When the latest run failed: commit of the first run in that failing streak.
+    /// When the latest non-skipped run failed: commit of the first run in that
+    /// failing streak (skips inside the streak are ignored). Suffixed `-dirty`
+    /// like `last_pass_commit`.
     first_fail_commit: Option<String>,
     /// When the latest run failed: whether the environment fingerprint
     /// (interpreter, lockfiles, installed packages) differs between the last
@@ -92,7 +95,8 @@ struct HistorySummary {
     env_changed: Option<bool>,
     /// When the latest run failed: the commits after `last_pass_commit` up to
     /// `first_fail_commit` (`git log last..first`), newest first. Empty when
-    /// both are the same commit; null when git can't resolve them here.
+    /// both are the same commit, or the failing one is an ancestor of the
+    /// passing one; null when git can't resolve them here.
     suspect_commits: Option<Vec<SuspectCommit>>,
     /// Flips in the recorded runs: a pass only on rerun, or a failure right
     /// after a pass (the `--auto-quarantine` rule).
@@ -101,7 +105,8 @@ struct HistorySummary {
     /// auto-quarantine` or the default; `0` = off).
     auto_quarantine_at: u32,
     /// Whether the next run auto-quarantines this test (`flips` reached
-    /// `auto_quarantine_at`), unless the `--auto-quarantine-max` cap trips.
+    /// `auto_quarantine_at` and its last 3 pass/fail runs did not all fail),
+    /// unless the `--auto-quarantine-max` cap trips.
     auto_quarantined_next_run: bool,
 }
 
@@ -142,6 +147,10 @@ fn is_fail(outcome: &str) -> bool {
     matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
 }
 
+fn is_neutral(outcome: &str) -> bool {
+    !is_pass(outcome) && !is_fail(outcome)
+}
+
 /// Middle value (mean of the two middles for an even count). `v` sorted.
 pub(crate) fn median(v: &[f64]) -> Option<f64> {
     let n = v.len();
@@ -170,7 +179,7 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     let passing: Vec<&Entry> = series
         .iter()
         .map(|(_, e)| *e)
-        .filter(|e| is_pass(&e.outcome))
+        .filter(|e| is_pass(e.outcome_name()))
         .collect();
     let mut call: Vec<f64> = passing.iter().filter_map(|e| e.call.map(round4)).collect();
     let mut setup: Vec<f64> = passing.iter().map(|e| round4(e.setup)).collect();
@@ -179,13 +188,15 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     let last_pass_commit = series
         .iter()
         .rev()
-        .find(|(_, e)| is_pass(&e.outcome))
+        .find(|(_, e)| is_pass(e.outcome_name()))
         .and_then(|(r, _)| r.commit.clone());
-    let last_pass = series.iter().rev().find(|(_, e)| is_pass(&e.outcome));
+    let last_pass = series.iter().rev().find(|(_, e)| is_pass(e.outcome_name()));
+    // Skips and other neutral outcomes neither break nor start the streak.
     let first_fail = series
         .iter()
         .rev()
-        .take_while(|(_, e)| is_fail(&e.outcome))
+        .filter(|(_, e)| !is_neutral(e.outcome_name()))
+        .take_while(|(_, e)| is_fail(e.outcome_name()))
         .last();
     let first_fail_commit = first_fail.and_then(|(r, _)| r.commit.clone());
     let env_changed = match (last_pass, first_fail) {
@@ -194,7 +205,10 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
     };
     Some(HistorySummary {
         runs: series.len(),
-        outcomes: series.iter().map(|(_, e)| e.outcome.clone()).collect(),
+        outcomes: series
+            .iter()
+            .map(|(_, e)| e.outcome_name().to_string())
+            .collect(),
         call_median: median(&call),
         call_p95: p95(&call),
         setup_median: median(&setup),
@@ -202,20 +216,34 @@ fn summarize(series: &[(&RunMeta, &Entry)]) -> Option<HistorySummary> {
         first_fail_commit,
         env_changed,
         suspect_commits: None,
-        flips: crate::reporting::history::flip_positions(series.iter().map(|(_, e)| *e)).len(),
+        flips: crate::reporting::history::flip_positions(series.iter().copied()).len(),
         auto_quarantine_at: 0,
         auto_quarantined_next_run: false,
     })
 }
 
+/// Whether the next run auto-quarantines this test: the same rule as
+/// `History::flippers`.
+fn quarantines_next_run(h: &HistorySummary) -> bool {
+    h.auto_quarantine_at > 0
+        && h.flips >= h.auto_quarantine_at as usize
+        && !failing_now(h.outcomes.iter().map(String::as_str))
+}
+
+/// A history commit without its `-dirty` marker: the sha git knows.
+fn bare_sha(c: &str) -> &str {
+    c.strip_suffix("-dirty").unwrap_or(c)
+}
+
 /// The commits that could have broken the test: `git log last..first`.
 /// `None` when git fails (not a checkout, or a commit this clone lacks).
+/// A `-dirty` marker is dropped: git only knows the bare sha.
 pub(crate) fn suspects(
     last: &str,
     first: &str,
     git: impl Fn(&[&str]) -> Result<String>,
 ) -> Option<Vec<SuspectCommit>> {
-    let range = format!("{last}..{first}");
+    let range = format!("{}..{}", bare_sha(last), bare_sha(first));
     let out = git(&["log", "--format=%h%x1f%an%x1f%s", &range]).ok()?;
     Some(
         out.lines()
@@ -300,8 +328,7 @@ fn gather(nodeid: &str) -> ExplainReport {
         h.auto_quarantine_at = crate::config::rstest_settings(&scope, &mut std::io::sink())
             .auto_quarantine
             .unwrap_or(crate::cli::AUTO_QUARANTINE);
-        h.auto_quarantined_next_run =
-            h.auto_quarantine_at > 0 && h.flips >= h.auto_quarantine_at as usize;
+        h.auto_quarantined_next_run = quarantines_next_run(h);
     }
 
     let found = duration_seconds.is_some()
@@ -442,7 +469,11 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
             if let (Some(m), Some(p)) = (h.call_median, h.call_p95) {
                 sink.out_line(&format!("             call median {m:.4}s, p95 {p:.4}s"));
             }
-            let short = |c: &str| c.chars().take(10).collect::<String>();
+            // 10-char sha, keeping a `-dirty` marker.
+            let short = |c: &str| {
+                let (sha, dirty) = c.strip_suffix("-dirty").map_or((c, ""), |s| (s, "-dirty"));
+                format!("{}{dirty}", sha.chars().take(10).collect::<String>())
+            };
             if let Some(c) = &h.last_pass_commit {
                 sink.out_line(&format!("             last passed at {}", short(c)));
             }
@@ -453,7 +484,24 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                     short(c)
                 ));
             }
+            let (last, first) = (
+                h.last_pass_commit.as_deref().unwrap_or_default(),
+                h.first_fail_commit.as_deref().unwrap_or_default(),
+            );
+            let dirty = last.ends_with("-dirty") || first.ends_with("-dirty");
             match &h.suspect_commits {
+                // An empty `git log last..first` with different commits: the
+                // failing one is an ancestor of the passing one.
+                Some(cs) if cs.is_empty() && bare_sha(last) != bare_sha(first) => {
+                    sink.out_line(&format!(
+                        "             {}",
+                        pal.dim("failing commit is older than the last pass: a code change")
+                    ))
+                }
+                Some(cs) if cs.is_empty() && dirty => sink.out_line(&format!(
+                    "             {}",
+                    pal.dim("same commit as the last pass, but with uncommitted edits")
+                )),
                 Some(cs) if cs.is_empty() => sink.out_line(&format!(
                     "             {}",
                     pal.dim("same commit as the last pass: not a code change")
@@ -491,8 +539,14 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
                     ))
                 ));
             } else if h.flips > 0 && h.auto_quarantine_at > 0 {
+                // At the threshold but not quarantined: `failing_now` released it.
+                let why = if h.flips >= h.auto_quarantine_at as usize {
+                    ": failing steadily now, so not quarantined"
+                } else {
+                    ""
+                };
                 sink.out_line(&format!(
-                    "             flipped {}x (auto-quarantine at {})",
+                    "             flipped {}x (auto-quarantine at {}){why}",
                     h.flips, h.auto_quarantine_at
                 ));
             }
@@ -886,14 +940,13 @@ mod tests {
         assert_eq!(v["found"], false);
     }
 
-    fn run(seq: u32, commit: Option<&str>) -> RunMeta {
+    fn run(seq: u64, commit: Option<&str>) -> RunMeta {
         RunMeta {
             seq,
             id: format!("r{seq}"),
             epoch: 0,
             commit: commit.map(String::from),
             env: String::new(),
-            workers: 1,
         }
     }
 
@@ -926,6 +979,8 @@ mod tests {
         };
         let cs = suspects("aaa", "bbb", git).unwrap();
         assert_eq!(cs.len(), 2);
+        // A dirty run's commit still resolves.
+        assert_eq!(suspects("aaa-dirty", "bbb-dirty", git).unwrap().len(), 2);
         assert_eq!((cs[0].sha.as_str(), cs[0].author.as_str()), ("bbb", "Ada"));
         assert_eq!(cs[0].subject, "fix: a \x1f in subject");
         assert_eq!(cs[1].subject, "init");
@@ -950,11 +1005,39 @@ mod tests {
         // Never flipped, or auto-quarantine off: no line at all.
         assert!(!with(0, 3, false).contains("flipped"));
         assert!(!with(5, 0, false).contains("flipped"));
+        // Over the threshold but not quarantined: failing steadily now.
+        assert!(with(4, 3, false).contains(
+            "             flipped 4x (auto-quarantine at 3): failing steadily now, so not quarantined"
+        ));
+        // Under the threshold: no reason needed.
+        let under = with(2, 3, false);
+        assert!(under.contains("             flipped 2x (auto-quarantine at 3)\n"));
+        assert!(!under.contains("failing steadily"));
+    }
+
+    #[test]
+    fn steadily_failing_flipper_is_not_quarantined_next_run() {
+        // `pfpfpffff` on one clean commit: 3 flips, but the last 3 runs all
+        // failed, so `History::flippers` releases it and the run fails on it.
+        let runs: Vec<RunMeta> = (0..9).map(|i| run(i, Some("c"))).collect();
+        let es: Vec<Entry> = "pfpfpffff"
+            .chars()
+            .map(|c| ent(if c == 'p' { "passed" } else { "failed" }, None))
+            .collect();
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let mut h = summarize(&series).unwrap();
+        h.auto_quarantine_at = 3;
+        assert_eq!(h.flips, 3);
+        assert!(!quarantines_next_run(&h));
+        // Still flapping (last run passed): quarantined.
+        h.outcomes.push("passed".into());
+        assert!(quarantines_next_run(&h));
     }
 
     #[test]
     fn summarize_counts_flips() {
-        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, None)).collect();
+        // One clean commit: pass->fail flips only count within one.
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some("c"))).collect();
         let es = [
             ent("passed", None),
             ent("failed", None),
@@ -975,7 +1058,34 @@ mod tests {
             h.env_changed = Some(false);
             rendered(&r).0
         };
-        assert!(with(Some(vec![])).contains("same commit as the last pass: not a code change"));
+        let mut r = full_report();
+        let h = r.history.as_mut().unwrap();
+        h.first_fail_commit = h.last_pass_commit.clone();
+        h.suspect_commits = Some(vec![]);
+        assert!(rendered(&r)
+            .0
+            .contains("same commit as the last pass: not a code change"));
+        // Uncommitted edits on either side are a code change git can't list.
+        for (last, first) in [("abc", "abc-dirty"), ("abc-dirty", "abc")] {
+            let mut r = full_report();
+            let h = r.history.as_mut().unwrap();
+            h.last_pass_commit = Some(last.into());
+            h.first_fail_commit = Some(first.into());
+            h.suspect_commits = Some(vec![]);
+            let out = rendered(&r).0;
+            assert!(!out.contains("not a code change"), "{last}..{first}: {out}");
+            assert!(out.contains("uncommitted edits"), "{last}..{first}: {out}");
+        }
+        // Failing commit is an ancestor of the passing one: `git log` is empty,
+        // but the code differs (an older checkout).
+        let mut r = full_report();
+        let h = r.history.as_mut().unwrap();
+        h.last_pass_commit = Some("bbb".into());
+        h.first_fail_commit = Some("aaa".into());
+        h.suspect_commits = Some(vec![]);
+        let out = rendered(&r).0;
+        assert!(!out.contains("not a code change"), "{out}");
+        assert!(out.contains("older than the last pass"), "{out}");
         assert!(with(None)
             .contains("commits in between: unknown here (not a git checkout, or not fetched)"));
         let many: Vec<SuspectCommit> = (0..12)
@@ -996,7 +1106,7 @@ mod tests {
     fn ent(outcome: &str, call: Option<f32>) -> Entry {
         Entry {
             run: 0,
-            outcome: outcome.into(),
+            outcome: crate::reporting::history::outcome_code(outcome).unwrap(),
             call,
             setup: 0.01,
         }
@@ -1053,6 +1163,68 @@ mod tests {
         assert_eq!(h.call_p95, None);
         assert_eq!(h.last_pass_commit, None);
         assert_eq!(h.first_fail_commit.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn skip_does_not_break_or_end_failure_streak() {
+        let runs: Vec<RunMeta> = (0..5).map(|i| run(i, Some(&format!("c{i}")))).collect();
+        let es = [
+            ent("passed", Some(0.1)),
+            ent("failed", None),
+            ent("skipped", None),
+            ent("failed", None),
+            ent("skipped", None),
+        ];
+        let series: Vec<_> = runs.iter().zip(es.iter()).collect();
+        let h = summarize(&series).unwrap();
+        assert_eq!(h.first_fail_commit.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn render_keeps_dirty_marker_on_short_commit() {
+        let mut r = report("t");
+        r.found = true;
+        r.history = Some(HistorySummary {
+            runs: 2,
+            outcomes: ["passed", "failed"].map(String::from).to_vec(),
+            call_median: None,
+            call_p95: None,
+            setup_median: None,
+            last_pass_commit: Some("0123456789abcdef-dirty".into()),
+            first_fail_commit: Some("fedcba9876543210".into()),
+            env_changed: None,
+            suspect_commits: None,
+            flips: 0,
+            auto_quarantine_at: 0,
+            auto_quarantined_next_run: false,
+        });
+        let (out, _) = rendered(&r);
+        assert!(out.contains("last passed at 0123456789-dirty\n"), "{out}");
+        assert!(out.contains("failing since fedcba9876\n"), "{out}");
+    }
+
+    /// A corrupt or hand-edited cache must not panic `explain`: the short
+    /// commit cuts on chars, not bytes.
+    #[test]
+    fn render_survives_non_ascii_commit() {
+        let mut r = report("t");
+        r.found = true;
+        r.history = Some(HistorySummary {
+            runs: 1,
+            outcomes: vec!["passed".into()],
+            call_median: None,
+            call_p95: None,
+            setup_median: None,
+            last_pass_commit: Some("€€€€€€€€€€€-dirty".into()),
+            first_fail_commit: None,
+            env_changed: None,
+            suspect_commits: None,
+            flips: 0,
+            auto_quarantine_at: 0,
+            auto_quarantined_next_run: false,
+        });
+        let (out, _) = rendered(&r);
+        assert!(out.contains("last passed at €€€€€€€€€€-dirty\n"), "{out}");
     }
 
     #[test]

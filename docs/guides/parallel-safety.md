@@ -56,7 +56,8 @@ single file would hold up the run. Pass
 ## Choosing the worker count
 
 `-n auto` is the safe default. It never exceeds your logical cores, and caps
-further by file count and cached runtime, so it will not oversubscribe. Two
+further by the selected work (test files on a cold cache, tests once timings
+are cached) and cached runtime, so it will not oversubscribe. Two
 reasons to override it with an explicit `-n`, in opposite directions:
 
 - **Wait-bound suites want *more* workers than cores.** When tests mostly

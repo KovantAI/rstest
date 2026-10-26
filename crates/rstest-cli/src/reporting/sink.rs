@@ -30,6 +30,7 @@ pub struct Sink {
     /// pytest's `--tb` style: shapes the failures block and bar mode's
     /// inline failures.
     tb: TbStyle,
+    report_chars: String,
     /// Optional `--stream-json` sink: a side channel that receives one NDJSON
     /// object per test-phase report as the run progresses, independent of the
     /// human stdout/stderr. `None` unless `--stream-json` was given.
@@ -44,6 +45,7 @@ impl Sink {
             err: Box::new(io::stderr()),
             palette,
             tb: TbStyle::Full,
+            report_chars: "fE".into(),
             stream: None,
         }
     }
@@ -64,6 +66,7 @@ impl Sink {
             err: Box::new(err),
             palette: Palette::default(),
             tb: TbStyle::Full,
+            report_chars: "fE".into(),
             stream: None,
         };
         (sink, captured)
@@ -83,6 +86,16 @@ impl Sink {
     /// Set the run's `--tb` style, resolved once from the session options.
     pub fn set_tb_style(&mut self, tb: TbStyle) {
         self.tb = tb;
+    }
+
+    /// The run's resolved `-r` chars (see [`crate::reporting::report::report_chars`]).
+    pub fn report_chars(&self) -> &str {
+        &self.report_chars
+    }
+
+    /// Set the run's `-r` chars, resolved once from the session options.
+    pub fn set_report_chars(&mut self, chars: String) {
+        self.report_chars = chars;
     }
 
     /// A full stdout line (newline appended).
@@ -253,6 +266,9 @@ mod tests {
             lineno: Some(12),
             subtest: false,
             crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
             network: Vec::new(),
         }
     }

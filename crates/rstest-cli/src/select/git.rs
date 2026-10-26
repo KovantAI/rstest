@@ -145,6 +145,19 @@ pub fn resolve_base_rev(rev: &str, sink: &mut Sink) -> Result<String> {
     Ok(sha)
 }
 
+/// `git diff <flags> <base>` argv with the output pinned against user config:
+/// an external diff tool, forced color or `diff.mnemonicPrefix` /
+/// `diff.noprefix` would otherwise change what the parsers below read.
+fn diff_args<'a>(flags: &[&'a str], base: &'a str) -> Vec<&'a str> {
+    let pin = [
+        "--no-ext-diff",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+    [&["diff"], flags, &pin, &[base]].concat()
+}
+
 /// The changed files under `dir` (the project rootdir, or a monorepo root),
 /// as paths relative to it. Git runs IN `dir`, so the result is independent
 /// of the directory rstest was started from.
@@ -157,22 +170,13 @@ pub fn changed_files_from_git(dir: &Path, rev: Option<&str>) -> Result<Vec<PathB
     // sides, so the old path's importers are still selected.
     let out = git_stdout_in(
         dir,
-        &[
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "--relative",
-            diff_base,
-        ],
+        &diff_args(&["--name-only", "--no-renames", "--relative"], diff_base),
     )?;
     for line in out.lines() {
         files.insert(PathBuf::from(line));
     }
     // Untracked files are changes too (ls-files is dir-relative by default).
-    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
-    for line in out.lines() {
-        files.insert(PathBuf::from(line));
-    }
+    files.extend(untracked_files(dir)?);
     // Runner artifacts churn on every run and must not defeat selection
     // (users usually gitignore them, but don't rely on it).
     Ok(files
@@ -193,6 +197,36 @@ fn is_selectable_path(f: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml")
+}
+
+/// An untracked tool artifact no stock `.gitignore` lists; left over, it
+/// would stamp every run `-dirty` (see [`crate::incremental::checkout_dirty`]).
+/// Untracked only: a project may commit one (a `.benchmarks/` baseline), and
+/// an edit to that is a real change. The tool cache dirs match at any depth
+/// (nobody keeps test data in a `.mypy_cache`); a coverage report only at the
+/// top of `dir`, where the tool writes it, since `tests/data/coverage.json`
+/// may be a fixture.
+// ponytail: a monorepo project's own `pkg/coverage.json` still dirties the
+// whole-checkout stamp; anchor to the project rootdir too if that bites.
+fn is_untracked_artifact(f: &Path) -> bool {
+    f.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str().unwrap_or(""),
+            ".hypothesis" | ".benchmarks" | ".mypy_cache" | ".ruff_cache"
+        )
+    }) || f
+        .to_str()
+        .is_some_and(|n| matches!(n, "coverage.json" | "coverage.lcov"))
+}
+
+/// `git ls-files --others` in `dir`, tool artifacts left out.
+fn untracked_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok(out
+        .lines()
+        .map(PathBuf::from)
+        .filter(|f| !is_untracked_artifact(f))
+        .collect())
 }
 
 /// What changed in one file, from `git diff -U0`. The coverage index is keyed by
@@ -217,7 +251,7 @@ pub fn changed_line_ranges(dir: &Path, rev: Option<&str>) -> Result<ChangedLines
     // added, so the old path reaches its importers and the new one is new code.
     let out = git_stdout_in(
         dir,
-        &["diff", "-U0", "--no-renames", "--relative", diff_base],
+        &diff_args(&["-U0", "--no-renames", "--relative"], diff_base),
     )?;
     let mut map: ChangedLines = parse_diff_hunks(&out)
         .into_iter()
@@ -228,13 +262,7 @@ pub fn changed_line_ranges(dir: &Path, rev: Option<&str>) -> Result<ChangedLines
     // authoritative `--name-only` set; hunk-parsed keys win, the rest fall back.
     let out = git_stdout_in(
         dir,
-        &[
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "--relative",
-            diff_base,
-        ],
+        &diff_args(&["--name-only", "--no-renames", "--relative"], diff_base),
     )?;
     for line in out.lines() {
         map.entry(PathBuf::from(line)).or_insert(FileChange {
@@ -244,9 +272,8 @@ pub fn changed_line_ranges(dir: &Path, rev: Option<&str>) -> Result<ChangedLines
     }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
-    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
-    for line in out.lines() {
-        map.entry(PathBuf::from(line)).or_insert(FileChange {
+    for f in untracked_files(dir)? {
+        map.entry(f).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,
         });
@@ -330,7 +357,7 @@ fn parse_hunk_old_range(hunk: &str) -> Option<Option<(u32, u32)>> {
 pub fn changed_new_lines(rev: Option<&str>) -> Result<BTreeMap<PathBuf, Vec<u32>>> {
     let diff_base = rev.unwrap_or("HEAD");
     let out = std::process::Command::new("git")
-        .args(["diff", "-U0", "--relative", diff_base])
+        .args(diff_args(&["-U0", "--relative"], diff_base))
         .output()
         .context("running git diff -U0 (is this a git repository?)")?;
     if !out.status.success() {
@@ -602,6 +629,32 @@ mod tests {
         let b = ranges.get(Path::new("b.py")).expect("b.py present");
         assert!(b.has_new_code && b.old_ranges.is_empty(), "{b:?}");
         assert!(!ranges.contains_key(Path::new(".coverage")), "{ranges:?}");
+    }
+
+    /// R30: the parsed diff must not depend on the user's git config. A
+    /// mnemonic `w/` prefix, forced color or an external diff tool used to
+    /// yield no hunks, so `--cov-diff-fail-under` scored nothing.
+    #[cfg(unix)]
+    #[test]
+    fn diff_parsing_ignores_user_git_config() {
+        let held = test_env::lock();
+        let repo = init_repo(&held, "hostile-config");
+        write(&repo, "a.py", "a = 1\nb = 2\nc = 3\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        write(&repo, "a.py", "a = 1\nb = 20\nc = 3\n");
+        git(&repo, &["config", "diff.mnemonicPrefix", "true"]);
+        git(&repo, &["config", "color.ui", "always"]);
+        git(&repo, &["config", "diff.external", "echo"]);
+        let _cwd = test_env::set_cwd(&held, &repo);
+
+        let ranges = changed_line_ranges(Path::new("."), None).unwrap();
+        let a = ranges.get(Path::new("a.py")).expect("a.py present");
+        assert_eq!(a.old_ranges, [(2, 2)], "{ranges:?}");
+        let lines = changed_new_lines(None).unwrap();
+        assert_eq!(lines.get(Path::new("a.py")), Some(&vec![2u32]), "{lines:?}");
+        let files = changed_files_from_git(Path::new("."), None).unwrap();
+        assert_eq!(files, [PathBuf::from("a.py")], "{files:?}");
     }
 
     #[test]

@@ -182,7 +182,10 @@ def gate_bisect(g, args, binary):
         str(jpath),
         cwd=g.tmp / "bisectfix",
     )
-    repro = "rstest -n 0 -p no:randomly test_pol.py::test_poison test_pol.py::test_victim"
+    repro = (
+        "rstest -n 0 --auto-quarantine=0 -p no:randomly"
+        " test_pol.py::test_poison test_pol.py::test_victim"
+    )
     check(
         "bisect: polluter found, minimal reproduce command printed (exit 0)",
         r.returncode == 0 and "culprit: 1 predecessor" in r.stdout and repro in r.stdout,

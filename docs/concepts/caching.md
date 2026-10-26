@@ -30,8 +30,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   `0` keeps history forever) are ignored on read. Auto-written, safe to
   delete, persisted the same way as `durations.json`.
 - `history.msgpack`: each test's last runs (default 50, set with
-  `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit,
-  environment fingerprint and worker count. Read by
+  `RSTEST_HISTORY_RUNS`): outcome, call and setup time, plus the run's commit
+  (`<sha>-dirty` when the tree had uncommitted changes). Read by
   [`rstest explain`](../reference/cli-commands.md#explain) for the outcome
   strip, the duration spread and the commit a test started failing at, and
   at the start of every run by
@@ -145,8 +145,8 @@ clobber each other.
       slices **union into a full index**; if a file's content differs between
       segments the newer wins and `--changed` falls back to the import graph for
       that file: still correct, only coarser.
-    - *run history*: each segment carries its run (commit, environment
-      fingerprint, worker count) and one entry per test. Runs are unioned by
+    - *run history*: each segment carries its run (id, epoch, commit)
+      and one entry per test. Runs are unioned by
       run id, so a run that arrives from the base, a segment and the local
       `history.msgpack` lands once, then replayed oldest first; each test keeps
       its newest `RSTEST_HISTORY_RUNS` runs. Every shard of a sharded run is
@@ -269,8 +269,10 @@ Recipes: [Shared cache across CI jobs](../guides/ci-shared-cache.md).
 
 Workers read it normally (`--lf`/`--ff` deselection happens inside the
 vendored core). Writes to the run-level keys (`lastfailed`, `nodeids`,
-`stepwise`) are blocked in workers (each worker sees only its own slice)
-and the orchestrator writes the merged truth after the run. `lastfailed` is
+`stepwise`) are blocked in workers (each worker sees only its own slice).
+After the run the orchestrator writes the merged `lastfailed`; nothing
+writes `nodeids` in a parallel run, and `--sw` runs as a single session, so
+pytest's own stepwise plugin keeps `stepwise`. `lastfailed` is
 updated the way pytest updates it: this run's failures are added, tests that
 passed or were skipped are removed, and the failures of tests the run did not
 execute stay, so a passing subset run keeps the rest. A test that was running

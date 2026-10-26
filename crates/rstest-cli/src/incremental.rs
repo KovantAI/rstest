@@ -77,14 +77,54 @@ pub fn record_green(scope: &Path, sha: &str, fingerprint: &str) {
 /// old baseline, so the next run re-diffs from it (edits included). Returns
 /// whether the baseline was recorded; a git failure counts as dirty. The tree
 /// checked is the project rootdir found from `scope`, the same one `--changed`
-/// diffs.
-pub fn record_green_if_clean(scope: &Path, head: &str, fingerprint: &str) -> bool {
-    let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
-    let clean = crate::select::changed_files_from_git(&rootdir, None).is_ok_and(|f| f.is_empty());
+/// diffs; `outputs` are this run's own report files (see [`tree_dirty`]).
+pub fn record_green_if_clean(
+    scope: &Path,
+    outputs: &[&Path],
+    head: &str,
+    fingerprint: &str,
+) -> bool {
+    let clean = !tree_dirty(scope, outputs);
     if clean {
         record_green(scope, head, fingerprint);
     }
     clean
+}
+
+/// Whether the project's tree has uncommitted (or untracked) changes, runner
+/// artifacts aside. `outputs` (relative to `scope`, or absolute) are the files
+/// the run writes itself (--junitxml, --html, ...): left untracked in the
+/// checkout they'd otherwise mark every later run dirty. A git failure reads as
+/// dirty: never claim a clean commit.
+pub fn tree_dirty(scope: &Path, outputs: &[&Path]) -> bool {
+    let rootdir = crate::config::discover(scope, &mut std::io::sink()).rootdir;
+    dirty_under(&rootdir, scope, outputs)
+}
+
+/// [`tree_dirty`] over the whole git checkout, for the flip history's `-dirty`
+/// stamp: an uncommitted edit outside the rootdir (`../src` next to a
+/// `tests/` config, a sibling monorepo package) changes what the tests run
+/// too, and missing it turns edit-and-rerun cycles into flips on a "clean"
+/// commit. Outside git it reads as dirty.
+pub fn checkout_dirty(scope: &Path, outputs: &[&Path]) -> bool {
+    crate::select::git_toplevel(scope).is_none_or(|top| dirty_under(&top, scope, outputs))
+}
+
+fn dirty_under(rootdir: &Path, scope: &Path, outputs: &[&Path]) -> bool {
+    // Canonical on both sides: `scope` may be a symlinked path (macOS /var vs
+    // /private/var) the rootdir isn't. An output not on disk can't be listed.
+    let outputs: Vec<PathBuf> = outputs
+        .iter()
+        .filter_map(|o| scope.join(o).canonicalize().ok())
+        .collect();
+    crate::select::changed_files_from_git(rootdir, None).map_or(true, |f| {
+        f.iter().any(|f| {
+            rootdir
+                .join(f)
+                .canonicalize()
+                .map_or(true, |p| !outputs.contains(&p))
+        })
+    })
 }
 
 /// The one-line notice for a green run that could not advance the baseline.
@@ -383,6 +423,124 @@ mod tests {
     }
 
     const FP: &str = "fp-A";
+
+    fn git(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn checkout_dirty_sees_edits_outside_the_rootdir() {
+        // Config in tests/, code in src/: the rootdir is tests/.
+        let repo = tmp("checkout-dirty");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("tests").join("pytest.ini"), "[pytest]\n").unwrap();
+        std::fs::write(repo.join("src").join("m.py"), "x = 1\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let tests = repo.join("tests");
+        assert!(!checkout_dirty(&tests, &[]));
+        std::fs::write(repo.join("src").join("m.py"), "x = 2\n").unwrap();
+        assert!(!tree_dirty(&tests, &[]), "rootdir-scoped, by design");
+        assert!(checkout_dirty(&tests, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn untracked_tool_artifacts_leave_the_tree_clean() {
+        // `--cov-report=json|lcov` and Hypothesis leave these untracked; the
+        // stock Python .gitignore misses them. Counting them would stamp every
+        // later run -dirty and freeze the since-green baseline for good.
+        let repo = tmp("artifacts-clean");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::write(repo.join("coverage.json"), "{}").unwrap();
+        std::fs::write(repo.join("coverage.lcov"), "").unwrap();
+        for d in [
+            ".hypothesis/examples",
+            ".benchmarks",
+            ".mypy_cache",
+            ".ruff_cache",
+        ] {
+            std::fs::create_dir_all(repo.join(d)).unwrap();
+            std::fs::write(repo.join(d).join("x"), "x").unwrap();
+        }
+        assert!(!checkout_dirty(&repo, &[]));
+        assert!(!tree_dirty(&repo, &[]));
+        // A real untracked file still counts.
+        std::fs::write(repo.join("conftest.py"), "").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn untracked_fixture_named_like_a_coverage_report_is_a_change() {
+        // Only the tool's own top-level report is an artifact; a new fixture
+        // deeper down is a change, for the dirty stamp and `--changed` alike.
+        let repo = tmp("artifacts-fixture");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::create_dir_all(repo.join("tests").join("data")).unwrap();
+        std::fs::write(repo.join("tests").join("data").join("coverage.json"), "{}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        assert!(tree_dirty(&repo, &[]));
+        let changed = crate::select::changed_files_from_git(&repo, None).unwrap();
+        assert_eq!(changed, vec![PathBuf::from("tests/data/coverage.json")]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn committed_tool_artifact_names_are_real_changes() {
+        // A committed benchmark baseline or coverage.json fixture: editing it
+        // is a change, whatever its name.
+        let repo = tmp("artifacts-tracked");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        std::fs::create_dir_all(repo.join(".benchmarks")).unwrap();
+        std::fs::write(repo.join(".benchmarks").join("base.json"), "{}").unwrap();
+        std::fs::write(repo.join("coverage.json"), "{}").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "-f", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        assert!(!checkout_dirty(&repo, &[]));
+        std::fs::write(repo.join(".benchmarks").join("base.json"), "{\"x\":1}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        assert!(tree_dirty(&repo, &[]));
+        git(&repo, &["checkout", "--", "."]);
+        std::fs::write(repo.join("coverage.json"), "{\"x\":1}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn green_baseline_advances_only_on_a_clean_tree() {
+        let repo = tmp("green-if-clean");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        // The run's own untracked report doesn't dirty the tree.
+        std::fs::write(repo.join("report.xml"), "<x/>").unwrap();
+        let outputs = [Path::new("report.xml")];
+        assert!(record_green_if_clean(&repo, &outputs, "sha1", FP));
+        assert_eq!(baseline(&repo, FP).as_deref(), Some("sha1"));
+        assert!(!record_green_if_clean(&repo, &[], "sha2", FP));
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\nx=1\n").unwrap();
+        assert!(!record_green_if_clean(&repo, &outputs, "sha3", FP));
+        assert_eq!(baseline(&repo, FP).as_deref(), Some("sha1"));
+        std::fs::remove_dir_all(&repo).ok();
+    }
 
     #[test]
     fn hex_encode_pads_and_orders() {

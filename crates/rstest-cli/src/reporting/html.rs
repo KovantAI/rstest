@@ -102,7 +102,7 @@ pub fn write(path: &Path, run: &Run, meta: &RunMeta, history: &History) -> Resul
             let strip: String = series
                 .iter()
                 .skip(series.len().saturating_sub(STRIP))
-                .map(|(_, e)| crate::explain::glyph(&e.outcome))
+                .map(|(_, e)| crate::explain::glyph(e.outcome_name()))
                 .collect();
             (!strip.is_empty()).then_some((id.as_str(), strip))
         })
@@ -442,6 +442,9 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
             network: Vec::new(),
         }
     }
@@ -551,22 +554,21 @@ mod tests {
 
     #[test]
     fn renders_history_strip_and_auto_quarantine_badge() {
-        use crate::reporting::history::{Entry, RunMeta as HistRun};
+        use crate::reporting::history::{outcome_code, Entry, RunMeta as HistRun};
         let mut h = History::default();
         for (seq, o) in ["passed", "failed", "flaky", "passed"].iter().enumerate() {
             h.runs.push(HistRun {
-                seq: seq as u32,
+                seq: seq as u64,
                 id: format!("r{seq}"),
                 epoch: seq as u64,
                 commit: None,
                 env: String::new(),
-                workers: 1,
             });
             for id in ["t.py::flap", "t.py::steady"] {
                 let outcome = if id == "t.py::flap" { o } else { "passed" };
                 h.tests.entry(id.into()).or_default().push_back(Entry {
-                    run: seq as u32,
-                    outcome: outcome.to_string(),
+                    run: seq as u64,
+                    outcome: outcome_code(outcome).unwrap(),
                     call: None,
                     setup: 0.0,
                 });

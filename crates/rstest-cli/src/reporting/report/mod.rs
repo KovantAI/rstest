@@ -117,6 +117,12 @@ pub struct TestEntry {
     /// "failed"): pytest counts the parent by it, apart from its subtests.
     #[serde(skip)]
     pub(crate) own_call: Option<String>,
+    /// Short test summary only: the xfail/xpass reason and where a skip
+    /// happened (see [`proto::Report`]). Not serialized.
+    #[serde(skip)]
+    pub(crate) xfail_reason: Option<String>,
+    #[serde(skip)]
+    pub(crate) skip_location: Option<(String, Option<u64>)>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -246,8 +252,19 @@ pub struct ShardJson<'a> {
     pub n: usize,
 }
 
-/// A recorded failure: (nodeid, longrepr, sections of (header, body)).
-type Failure = (Option<usize>, String, String, Vec<(String, String)>);
+/// One failed phase report, in arrival order.
+#[derive(Debug)]
+struct Failure {
+    worker: Option<usize>,
+    nodeid: String,
+    /// `setup`, `call` or `teardown`: a setup/teardown failure is an error.
+    when: String,
+    longrepr: String,
+    /// Captured output sections, (header, body).
+    sections: Vec<(String, String)>,
+    /// The short test summary's message (see [`proto::Report::crash`]).
+    crash: Option<String>,
+}
 
 /// Byte cap on any failure/collection-error text we persist. junit/html embed
 /// it and the console failures block prints it, so an uncapped copy would let a
@@ -303,6 +320,55 @@ impl TbStyle {
     }
 }
 
+/// pytest's resolved `-r` chars (`getreportopt`) from `opts` in precedence
+/// order (ini `addopts`, `PYTEST_ADDOPTS`, argv; the last `-r` wins):
+/// `a`/`A` expanded, `N` resets, `F`/`S` lowered. `w` is left out: the
+/// warnings summary is its own block. Default `fE`.
+pub fn report_chars<'a>(opts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut raw = "fE";
+    let mut opts = opts.into_iter();
+    while let Some(a) = opts.next() {
+        let value = if a == "--report-chars" {
+            opts.next()
+        } else if let Some(v) = a.strip_prefix("--report-chars=") {
+            Some(v)
+        } else {
+            // `-r X`, `-rX` or a cluster ending in it (`-vrA`).
+            let switches = crate::cli::short_switches(a);
+            if switches.last() == Some(&'r') {
+                let rest = &a[1 + switches.len()..];
+                if rest.is_empty() {
+                    opts.next()
+                } else {
+                    Some(rest)
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(v) = value {
+            raw = v;
+        }
+    }
+    let mut chars = String::new();
+    for c in raw.chars() {
+        let c = match c {
+            'F' => 'f',
+            'S' => 's',
+            c => c,
+        };
+        match c {
+            'a' => chars = "sxXEf".into(),
+            'A' => chars = "PpsxXEf".into(),
+            'N' => chars.clear(),
+            'w' => {}
+            c if !chars.contains(c) => chars.push(c),
+            _ => {}
+        }
+    }
+    chars
+}
+
 #[derive(Debug, Default)]
 pub struct Run {
     tests: BTreeMap<String, TestEntry>,
@@ -329,13 +395,18 @@ pub struct Run {
     /// `-x`/`--maxfail` stopped the pool after this many failures: the
     /// closing summary prints pytest's `stopping after N failures` banner.
     pub stopped_after: Option<u64>,
+    /// The test count the in-run `--auto-quarantine-max` cap was a share of
+    /// (the collected suite or a shard's bucket), so the post-run demotion
+    /// uses the same cap even when `-x` stopped the run early. `None` when
+    /// never known; the demotion then counts the tests that reported.
+    pub cap_total: Option<usize>,
     /// Set when SIGINT/SIGTERM stopped the run.
     pub interruption: Option<Interruption>,
     /// Set when a test called `pytest.exit()`, which stops the whole run.
     pub session_exit: Option<SessionExit>,
     /// Each failed test's exception and project frame, from its failing
     /// report (for [`Run::failure_groups`]).
-    crashes: std::collections::HashMap<String, proto::Crash>,
+    causes: std::collections::HashMap<String, proto::Cause>,
     /// Outbound destinations each test reached (network guard), by nodeid.
     pub network: BTreeMap<String, Vec<String>>,
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
@@ -392,9 +463,12 @@ impl Run {
                 .or_default()
                 .extend(r.network.iter().cloned());
         }
-        if r.outcome == "failed" && !r.subtest {
-            if let Some(c) = &r.crash {
-                self.crashes.insert(r.nodeid.clone(), c.clone());
+        // The cause comes from the same report as the test's failure text (its
+        // first failed one), so a group's example traceback shows that cause;
+        // a later teardown error or rerun doesn't regroup the test.
+        if r.outcome == "failed" && !self.failure_by_id.contains_key(&r.nodeid) {
+            if let Some(c) = r.cause.as_ref().filter(|_| !r.subtest) {
+                self.causes.insert(r.nodeid.clone(), c.clone());
             }
         }
         if self.track_phase_durations {
@@ -411,8 +485,14 @@ impl Run {
                 .or_insert(self.failures.len());
             let mut repr = r.longrepr.clone().unwrap_or_default();
             crate::text::truncate_on_boundary(&mut repr, FAILURE_TEXT_CAP);
-            self.failures
-                .push((worker, r.nodeid.clone(), repr.clone(), r.sections.clone()));
+            self.failures.push(Failure {
+                worker,
+                nodeid: r.nodeid.clone(),
+                when: r.when.clone(),
+                longrepr: repr.clone(),
+                sections: r.sections.clone(),
+                crash: r.crash.clone(),
+            });
             r.longrepr.as_ref().map(|_| repr)
         } else {
             None
@@ -476,6 +556,12 @@ impl Run {
         }
         if entry.skip_reason.is_none() {
             entry.skip_reason = r.skip_reason;
+        }
+        if entry.xfail_reason.is_none() {
+            entry.xfail_reason = r.xfail_reason;
+        }
+        if entry.skip_location.is_none() {
+            entry.skip_location = r.skip_location;
         }
     }
 
@@ -677,7 +763,7 @@ impl Run {
             if !e.any_phase_failed() || e.quarantined || e.flaky {
                 continue;
             }
-            let Some(c) = self.crashes.get(id) else {
+            let Some(c) = self.causes.get(id) else {
                 continue;
             };
             let g = groups
@@ -703,7 +789,7 @@ impl Run {
 
     pub fn failure_text(&self, nodeid: &str) -> Option<&str> {
         let idx = *self.failure_by_id.get(nodeid)?;
-        Some(self.failures[idx].2.as_str())
+        Some(self.failures[idx].longrepr.as_str())
     }
 
     pub fn all_passed(&self) -> bool {
@@ -971,6 +1057,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn report_chars_resolve_like_pytest_getreportopt() {
+        let r = |opts: &[&str]| super::report_chars(opts.iter().copied());
+        assert_eq!(r(&[]), "fE");
+        assert_eq!(r(&["-rA"]), "PpsxXEf");
+        assert_eq!(r(&["-r", "a"]), "sxXEf");
+        assert_eq!(r(&["-vrA"]), "PpsxXEf", "a cluster ending in -r");
+        assert_eq!(r(&["--report-chars=fs"]), "fs");
+        assert_eq!(r(&["--report-chars", "FS"]), "fs", "old aliases lowered");
+        assert_eq!(r(&["-rN"]), "");
+        assert_eq!(r(&["-rNf"]), "f", "N resets what came before");
+        assert_eq!(
+            r(&["-rffw"]),
+            "f",
+            "deduped, w left to the warnings summary"
+        );
+        assert_eq!(r(&["-rA", "-k", "x", "-rs"]), "s", "the last -r wins");
+        assert_eq!(r(&["-ksmoke"]), "fE", "-k's value is not -r");
+    }
+
+    #[test]
     fn tb_style_last_flag_wins_in_both_forms() {
         assert_eq!(TbStyle::from_opts([]), TbStyle::Full);
         assert_eq!(TbStyle::from_opts(["--tb=line"]), TbStyle::Line);
@@ -996,6 +1102,9 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
             network: Vec::new(),
         }
     }
@@ -1020,7 +1129,7 @@ mod tests {
     fn crashed(run: &mut Run, nodeid: &str, exc: &str, message: &str, at: Option<&str>) {
         run.record(None, report(nodeid, "setup", "passed"));
         let mut r = report(nodeid, "call", "failed");
-        r.crash = Some(proto::Crash {
+        r.cause = Some(proto::Cause {
             exc: exc.into(),
             message: message.into(),
             at: at.map(String::from),
@@ -1115,6 +1224,49 @@ mod tests {
         let mut quiet = Run::default();
         full(&mut quiet, "t/a.py::x", "failed");
         assert!(quiet.snapshot_value(&meta).get("failure_groups").is_none());
+    }
+
+    #[test]
+    fn failure_group_cause_matches_failure_text() {
+        let mut run = Run::default();
+        let refused = |r: &mut proto::Report| {
+            r.cause = Some(proto::Cause {
+                exc: "ConnectionRefusedError".into(),
+                message: "[Errno 111] Connection refused".into(),
+                at: Some("app/db.py:12".into()),
+            });
+        };
+        for id in ["t/a.py::x", "t/b.py::y"] {
+            run.record(None, report(id, "setup", "passed"));
+            let mut call = report(id, "call", "failed");
+            refused(&mut call);
+            run.record(None, call);
+        }
+        // Its own assertion first, then the shared teardown error: it keeps
+        // the assertion as its cause, matching its failure text.
+        run.record(None, report("t/c.py::z", "setup", "passed"));
+        let mut call = report("t/c.py::z", "call", "failed");
+        call.longrepr = Some("assert 1 == 2".into());
+        call.cause = Some(proto::Cause {
+            exc: "AssertionError".into(),
+            message: "assert 1 == 2".into(),
+            at: Some("t/c.py:7".into()),
+        });
+        run.record(None, call);
+        let mut teardown = report("t/c.py::z", "teardown", "failed");
+        refused(&mut teardown);
+        run.record(None, teardown);
+        // A first failure without a cause (a crash report) isn't grouped by a
+        // later attempt's cause either.
+        run.record(None, report("t/d.py::w", "call", "failed"));
+        let mut rerun = report("t/d.py::w", "call", "failed");
+        refused(&mut rerun);
+        run.record(None, rerun);
+
+        let groups = run.failure_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].nodeids, ["t/a.py::x", "t/b.py::y"]);
+        assert_eq!(run.failure_text("t/c.py::z"), Some("assert 1 == 2"));
     }
 
     #[test]
@@ -1552,6 +1704,9 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                cause: None,
+                xfail_reason: None,
+                skip_location: None,
                 network: Vec::new(),
             },
         );
@@ -1574,6 +1729,9 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                cause: None,
+                xfail_reason: None,
+                skip_location: None,
                 network: Vec::new(),
             },
         );
