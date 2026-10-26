@@ -455,8 +455,11 @@ impl Interruption {
 
 impl Run {
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
-        if r.outcome == "failed" && !r.subtest {
-            if let Some(c) = &r.cause {
+        // The cause comes from the same report as the test's failure text (its
+        // first failed one), so a group's example traceback shows that cause;
+        // a later teardown error or rerun doesn't regroup the test.
+        if r.outcome == "failed" && !self.failure_by_id.contains_key(&r.nodeid) {
+            if let Some(c) = r.cause.as_ref().filter(|_| !r.subtest) {
                 self.causes.insert(r.nodeid.clone(), c.clone());
             }
         }
@@ -1201,6 +1204,49 @@ mod tests {
         let mut quiet = Run::default();
         full(&mut quiet, "t/a.py::x", "failed");
         assert!(quiet.snapshot_value(&meta).get("failure_groups").is_none());
+    }
+
+    #[test]
+    fn failure_group_cause_matches_failure_text() {
+        let mut run = Run::default();
+        let refused = |r: &mut proto::Report| {
+            r.cause = Some(proto::Cause {
+                exc: "ConnectionRefusedError".into(),
+                message: "[Errno 111] Connection refused".into(),
+                at: Some("app/db.py:12".into()),
+            });
+        };
+        for id in ["t/a.py::x", "t/b.py::y"] {
+            run.record(None, report(id, "setup", "passed"));
+            let mut call = report(id, "call", "failed");
+            refused(&mut call);
+            run.record(None, call);
+        }
+        // Its own assertion first, then the shared teardown error: it keeps
+        // the assertion as its cause, matching its failure text.
+        run.record(None, report("t/c.py::z", "setup", "passed"));
+        let mut call = report("t/c.py::z", "call", "failed");
+        call.longrepr = Some("assert 1 == 2".into());
+        call.cause = Some(proto::Cause {
+            exc: "AssertionError".into(),
+            message: "assert 1 == 2".into(),
+            at: Some("t/c.py:7".into()),
+        });
+        run.record(None, call);
+        let mut teardown = report("t/c.py::z", "teardown", "failed");
+        refused(&mut teardown);
+        run.record(None, teardown);
+        // A first failure without a cause (a crash report) isn't grouped by a
+        // later attempt's cause either.
+        run.record(None, report("t/d.py::w", "call", "failed"));
+        let mut rerun = report("t/d.py::w", "call", "failed");
+        refused(&mut rerun);
+        run.record(None, rerun);
+
+        let groups = run.failure_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].nodeids, ["t/a.py::x", "t/b.py::y"]);
+        assert_eq!(run.failure_text("t/c.py::z"), Some("assert 1 == 2"));
     }
 
     #[test]

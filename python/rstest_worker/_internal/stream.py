@@ -223,7 +223,12 @@ def cause_of(excinfo: Any, rootpath: Any) -> m.CauseInfo | None:
         at = None
         for entry in reversed(excinfo.traceback):
             try:
-                rel = Path(entry.path).resolve().relative_to(root)
+                path = Path(entry.path)
+                # Generated code (`<string>` from dataclasses, attrs) has no
+                # file: resolved against the cwd it would pass as the rootdir's.
+                if not path.is_file():
+                    continue
+                rel = path.resolve().relative_to(root)
             except (TypeError, ValueError, OSError):
                 continue
             if "site-packages" in rel.parts:

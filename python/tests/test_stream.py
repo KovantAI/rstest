@@ -1310,6 +1310,26 @@ def test_cause_of_names_the_project_frame_not_site_packages(tmp_path):
     }
 
 
+def test_cause_of_skips_generated_code_frames(tmp_path, monkeypatch):
+    import dataclasses
+
+    from rstest_worker._internal.stream import cause_of
+
+    # A frozen dataclass raises from its generated `<string>` __setattr__,
+    # which resolves inside the rootdir when the cwd is there.
+    monkeypatch.chdir(tmp_path)
+    model = tmp_path / "app" / "model.py"
+    model.parent.mkdir()
+    model.write_text("def rename(obj):\n    obj.name = 'b'\n")
+    app_model = _load(model, "app_model_fake")
+    Frozen = dataclasses.make_dataclass("Frozen", ["name"], frozen=True)
+    with pytest.raises(dataclasses.FrozenInstanceError) as excinfo:
+        app_model.rename(Frozen("a"))
+    cause = cause_of(excinfo, tmp_path)
+    assert cause is not None
+    assert cause["at"] == "app/model.py:2"
+
+
 def test_cause_of_without_a_project_frame_and_on_surprises(tmp_path):
     from rstest_worker._internal.stream import cause_of
 
