@@ -231,15 +231,22 @@ if you'd rather not commit to advance anything.
 
 ## What changed since green
 
-Every full run that exits 0 records what it ran with in
+Every whole-suite run that exits 0 records what it ran with in
 `.rstest_cache/green_env.json`: the commit, the interpreter version, the
 installed third-party packages, and a few environment variables that change
 how tests behave (`PYTEST_ADDOPTS`, `PYTHONPATH`, `PYTHONHASHSEED`,
 `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`). This happens with or
-without `--since-green`. "Full" means a run over the whole suite: no `-k`, `-m`, nodeid, sub-path, `--lf`, `--deselect`, `--ignore` or stepwise, and no `--changed`, `--since-green`, `--shard` or `--incremental`. A path argument is
-fine when it covers the suite (the rootdir, or one that contains every
-`testpaths` entry, like CI's `rstest tests/`). A green run over part of the
-suite proves nothing about the rest, so it leaves the snapshot alone.
+without `--since-green`. A run that passes only part of the suite records
+nothing: `--co`, `-k`/`-m`, node ids, a sub-path, `--lf`/`--sw`,
+`--deselect`/`--ignore`, `--setup-plan`/`--setup-only`/`--fixtures`,
+`--markers`, `--pyargs`, a shard, `--changed`/`--since-green` narrowing,
+`--incremental` cache hits and `--watch`, as does a run from a subdirectory
+with no path argument. Path arguments are fine when they cover the suite: the
+rootdir, or paths that together contain every `testpaths` entry. CI's
+`rstest tests/` counts only when `testpaths` names `tests`; without
+`testpaths`, run from the rootdir with no path. An `@argsfile` is judged by
+the arguments it lists. Neither does a green run over uncommitted edits,
+for the same reason as the `--since-green` baseline above.
 
 When a later run has failing tests, rstest prints what differs on stderr:
 
@@ -257,8 +264,8 @@ rstest: changed since the last green run (3f9c2a1b7e, 6h ago):
 
 Many CI breaks are a transitive dependency bump or an interpreter change, not
 a code change; this names them without digging through the logs of two runs.
-The block is skipped when nothing differs, so a red cycle in a local edit loop
-stays quiet. `rstest since-green` shows the same diff without running tests,
+The block is skipped when nothing but local edits differs, so a red cycle in
+a local edit loop stays quiet. `rstest since-green` shows the same diff without running tests,
 including the "nothing changed" verdict that points back at the tests
 themselves; `--json` for tooling
 ([`since-green`](../reference/cli-commands.md#since-green)).

@@ -204,15 +204,24 @@ def parse_ndjson(text):
     return ok, objs
 
 
+# Fixture repos must not lean on the developer's global gitconfig: CI runners
+# have no identity, so a commit that works locally exits 128 there. Ignore the
+# global config and disable identity auto-detection so local runs fail the same.
+os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+os.environ["GIT_CONFIG_COUNT"] = "1"
+os.environ["GIT_CONFIG_KEY_0"] = "user.useConfigOnly"
+os.environ["GIT_CONFIG_VALUE_0"] = "true"
+
+
 def git(cwd, *args):
-    """Run a git subcommand in cwd, raising on failure."""
-    subprocess.run(["git", *args], cwd=cwd, check=True)
+    """Run a git subcommand in cwd with a fixed throwaway identity (no gate
+    check inspects the author), raising on failure."""
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True)
 
 
 def git_commit(cwd, msg="base"):
-    """Commit staged changes with a fixed throwaway identity (no gate check
-    inspects the author)."""
-    git(cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg)
+    """Commit staged changes."""
+    git(cwd, "commit", "-qm", msg)
 
 
 def git_init_commit(cwd, msg="base"):
@@ -316,6 +325,9 @@ SCOPE_C = fx("scope_c.py")
 
 
 SECTIONS = fx("sections.py")
+# R23: every short-summary category (pass/fail with teardown errors, setup
+# error, skip, xfail, xpass).
+SHORT_SUMMARY = fx("short_summary.py")
 
 
 REPLAY_CRASH = fx("replay_crash.py")

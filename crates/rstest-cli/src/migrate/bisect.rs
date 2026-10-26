@@ -453,13 +453,19 @@ fn under_nested_config(rootdir: &Path, file: &Path) -> bool {
 const NULL_CONFIG: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 /// The minimal reproducing command: the culprits then the victim at `-n 0`,
-/// order-pinned. Runnable from where bisect ran: ids are cwd-relative, options
+/// order-pinned, auto-quarantine off (a victim that flips by order is exactly
+/// what it demotes, so the repro would exit 0). Runnable from where bisect ran: ids are cwd-relative, options
 /// verbatim. When a repro file sits where a plain run would re-root (see
 /// [`under_nested_config`]) it also pins what the child runs had: the rootdir,
 /// and the loaded config, or with none an empty config plus the conftest
 /// cutoff at the rootdir.
 fn repro_command(ctx: &ReproCtx, culprits: &[String], victim: &str) -> String {
-    let mut parts = vec!["rstest".to_string(), "-n".into(), "0".into()];
+    let mut parts = vec![
+        "rstest".to_string(),
+        "-n".into(),
+        "0".into(),
+        "--auto-quarantine=0".into(),
+    ];
     if let Some(py) = ctx.python_flag {
         parts.push("--python".into());
         parts.push(shell_quote(py));
@@ -1177,7 +1183,7 @@ mod tests {
         };
         assert_eq!(
             repro_command(&at_root, &ids(&["a.py::p"]), "a.py::v[1]"),
-            "rstest -n 0 -p no:randomly a.py::p 'a.py::v[1]'"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly a.py::p 'a.py::v[1]'"
         );
         // From a subdirectory: no `cd`, ids go cwd-relative, so a relative
         // option (`-c sub/pytest.ini`) still points where the user meant.
@@ -1192,7 +1198,7 @@ mod tests {
         };
         assert_eq!(
             repro_command(&below, &ids(&["tests/int/a.py::p"]), "tests/unit/v.py::v"),
-            "rstest -n 0 --python '/my venv/bin/python' -p no:randomly -c sub/pytest.ini \
+            "rstest -n 0 --auto-quarantine=0 --python '/my venv/bin/python' -p no:randomly -c sub/pytest.ini \
              -p no:cacheprovider ../int/a.py::p v.py::v"
         );
     }
@@ -1219,12 +1225,15 @@ mod tests {
             nested,
             // Paths go through shell_quote: a Windows path (`C:\...`) is quoted.
             format!(
-                "rstest -n 0 -p no:randomly --rootdir {} -c {} pkg/tests/test_v.py::v",
+                "rstest -n 0 --auto-quarantine=0 -p no:randomly --rootdir {} -c {} pkg/tests/test_v.py::v",
                 shell_quote(&root.display().to_string()),
                 shell_quote(&ini.display().to_string())
             )
         );
-        assert_eq!(flat, "rstest -n 0 -p no:randomly tests/test_a.py::v");
+        assert_eq!(
+            flat,
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly tests/test_a.py::v"
+        );
     }
 
     #[test]
@@ -1250,7 +1259,7 @@ mod tests {
         assert_eq!(
             cmd,
             format!(
-                "rstest -n 0 -p no:randomly --rootdir {r} -c {NULL_CONFIG} --confcutdir {r} \
+                "rstest -n 0 --auto-quarantine=0 -p no:randomly --rootdir {r} -c {NULL_CONFIG} --confcutdir {r} \
                  pkg/test_v.py::v"
             )
         );
@@ -1370,7 +1379,7 @@ mod tests {
         // After the user's `-x`, so it wins (the last --maxfail does).
         assert_eq!(
             repro_command(&ctx, &ids(&["a.py::p"]), "a.py::v"),
-            "rstest -n 0 -p no:randomly -x --maxfail=0 a.py::p a.py::v"
+            "rstest -n 0 --auto-quarantine=0 -p no:randomly -x --maxfail=0 a.py::p a.py::v"
         );
     }
 
@@ -1390,7 +1399,7 @@ mod tests {
         assert_eq!(
             repro_command(&ctx, &[], "a.py::v"),
             format!(
-                "rstest -n 0 -p no:randomly -o {} --cache-clear a.py::v",
+                "rstest -n 0 --auto-quarantine=0 -p no:randomly -o {} --cache-clear a.py::v",
                 shell_quote(&format!("cache_dir={}", cache.display()))
             )
         );

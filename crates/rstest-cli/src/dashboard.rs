@@ -40,7 +40,6 @@ fn is_pass(o: &str) -> bool {
 struct RunStat {
     epoch: u64,
     commit: Option<String>,
-    workers: usize,
     tests: usize,
     failed: usize,
     flaky: usize,
@@ -57,14 +56,13 @@ fn run_stats(h: &History) -> Vec<RunStat> {
         .map(|r: &RunMeta| RunStat {
             epoch: r.epoch,
             commit: r.commit.clone(),
-            workers: r.workers,
             tests: 0,
             failed: 0,
             flaky: 0,
             call_seconds: 0.0,
         })
         .collect();
-    let index: std::collections::HashMap<u32, usize> =
+    let index: std::collections::HashMap<u64, usize> =
         h.runs.iter().enumerate().map(|(i, r)| (r.seq, i)).collect();
     for e in h.tests.values().flatten() {
         let Some(&i) = index.get(&e.run) else {
@@ -72,8 +70,8 @@ fn run_stats(h: &History) -> Vec<RunStat> {
         };
         let s = &mut stats[i];
         s.tests += 1;
-        s.failed += usize::from(is_fail(&e.outcome));
-        s.flaky += usize::from(e.outcome == "flaky");
+        s.failed += usize::from(is_fail(e.outcome_name()));
+        s.flaky += usize::from(e.outcome_name() == "flaky");
         s.call_seconds += e.call.map_or(0.0, f64::from);
     }
     stats.sort_by_key(|s| s.epoch);
@@ -83,7 +81,7 @@ fn run_stats(h: &History) -> Vec<RunStat> {
 fn passing_calls(series: &std::collections::VecDeque<Entry>) -> Vec<f64> {
     series
         .iter()
-        .filter(|e| is_pass(&e.outcome))
+        .filter(|e| is_pass(e.outcome_name()))
         .filter_map(|e| e.call.map(f64::from))
         .collect()
 }
@@ -455,18 +453,17 @@ fn render(
     // ---- Runs (the charts' table view) -----------------------------------
     html.push_str(
         "<section>\n<h2>Runs</h2>\n<table><thead><tr><th>when</th><th>commit</th>\
-         <th class=\"num\">workers</th><th class=\"num\">tests</th><th class=\"num\">failed</th>\
+         <th class=\"num\">tests</th><th class=\"num\">failed</th>\
          <th class=\"num\">flaky</th><th class=\"num\">call time</th></tr></thead><tbody>\n",
     );
     for r in runs.iter().rev() {
         let _ = write!(
             html,
-            "<tr><td>{}</td><td><code>{}</code></td><td class=\"num\">{}</td>\
+            "<tr><td>{}</td><td><code>{}</code></td>\
              <td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
              <td class=\"num\">{:.2}s</td></tr>\n",
             when(r.epoch, now),
             esc(&short(&r.commit)),
-            r.workers,
             r.tests,
             r.failed,
             r.flaky,
@@ -565,20 +562,21 @@ const DASH_JS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reporting::history::outcome_code;
 
     /// History of `runs` runs (epoch = 100 * seq); each test gets the given
     /// strip (`p` passed, `f` failed, `~` flaky) with call `secs`.
     fn history(tests: &[(&str, &str, f32)]) -> History {
         let mut h = History::default();
         let n = tests.iter().map(|t| t.1.len()).max().unwrap_or(0);
-        for seq in 0..n as u32 {
+        for seq in 0..n as u64 {
             h.runs.push(RunMeta {
                 seq,
                 id: format!("r{seq}"),
-                epoch: 100 * u64::from(seq),
-                commit: Some(format!("c{seq}aaaaaaaaaa")),
+                epoch: 100 * seq,
+                // One clean commit: flips only count within a commit.
+                commit: Some("caaaaaaaaaaa".into()),
                 env: String::new(),
-                workers: 4,
             });
         }
         for (id, strip, secs) in tests {
@@ -586,13 +584,13 @@ mod tests {
                 .chars()
                 .enumerate()
                 .map(|(i, c)| Entry {
-                    run: i as u32,
-                    outcome: match c {
+                    run: i as u64,
+                    outcome: outcome_code(match c {
                         'p' => "passed",
                         'f' => "failed",
                         _ => "flaky",
-                    }
-                    .into(),
+                    })
+                    .unwrap(),
                     call: Some(*secs),
                     setup: 0.0,
                 })
@@ -611,7 +609,6 @@ mod tests {
         assert_eq!((s[1].failed, s[1].flaky), (1, 0));
         assert_eq!((s[2].failed, s[2].flaky), (1, 1));
         assert!((s[2].call_seconds - 1.5).abs() < 1e-6);
-        assert_eq!(s[1].workers, 4);
     }
 
     #[test]
@@ -683,8 +680,9 @@ mod tests {
         // Runs table, newest first, and no green snapshot.
         assert!(doc.contains("<h2>Runs</h2>"));
         assert!(doc.contains("none yet"));
-        let newest = doc.find("<code>c8aaaaaaaa</code>").unwrap();
-        let oldest = doc.find("<code>c0aaaaaaaa</code>").unwrap();
+        let runs = &doc[doc.find("<h2>Runs</h2>").unwrap()..];
+        let newest = runs.find("data-epoch=\"800\"").unwrap();
+        let oldest = runs.find("data-epoch=\"0\"").unwrap();
         assert!(newest < oldest);
         // No drift in flat data: section absent.
         assert!(!doc.contains("Duration drift"));
