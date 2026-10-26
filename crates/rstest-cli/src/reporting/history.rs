@@ -106,6 +106,11 @@ impl Entry {
 }
 
 impl History {
+    /// No recorded run.
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
     /// `nodeid`'s entries paired with their run, oldest first.
     pub fn series(&self, nodeid: &str) -> Vec<(&RunMeta, &Entry)> {
         let runs: HashMap<u64, &RunMeta> = self.runs.iter().map(|r| (r.seq, r)).collect();

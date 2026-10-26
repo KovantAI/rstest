@@ -890,10 +890,10 @@ pub(super) fn run_post_gates(
         let full_suite = !passthrough
             && shard.is_none()
             && !since_green
-            && cli.changed.is_none()
+            && changed_base.is_none()
             && !cli.watch
             && outcome.run.cached_nodeids().is_empty()
-            && !crate::since_green::run_narrows_suite(args);
+            && !crate::since_green::run_narrows_suite(args, scope);
         let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
         let now = crate::since_green::capture(scope, python, head.as_deref(), dirty, started_epoch);
         crate::since_green::after_run(sink, exitstatus, full_suite, &now);

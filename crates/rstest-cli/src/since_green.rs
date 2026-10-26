@@ -317,6 +317,81 @@ fn render(sink: &mut Sink, d: &SinceGreen, now_epoch: u64, red: bool) {
     }
 }
 
+/// pytest long flags that select a subset of the suite (with their `=`
+/// forms): a run using one says nothing about the whole suite being green.
+/// `-k`/`-m` are matched as short switches, clustered or attached. Setup and
+/// fixture listings exit 0 without running a test body; `--pyargs` names
+/// modules, not paths, so it is taken as a subset.
+const SELECTION_FLAGS: [&str; 19] = [
+    "--lf",
+    "--last-failed",
+    "--deselect",
+    "--ignore",
+    "--ignore-glob",
+    "--sw",
+    "--stepwise",
+    "--sw-skip",
+    "--stepwise-skip",
+    "--co",
+    "--collect-only",
+    "--collectonly",
+    "--setup-plan",
+    "--setup-only",
+    "--fixtures",
+    "--fixtures-per-test",
+    "--funcargs",
+    "--markers",
+    "--pyargs",
+];
+
+/// Whether the session args, run from `cwd`, select only part of the suite:
+/// a nodeid, a selection flag, or paths that don't cover the suite. Paths
+/// cover it when one is the rootdir (or above it) or together they contain
+/// every `testpaths` match (globbed like pytest, else the rootdir), so CI's
+/// `rstest tests/` still counts as a full run. No path below the rootdir
+/// selects `cwd`, as pytest reads `testpaths` only from the rootdir itself.
+/// Only positionals are nodeids: `-W error::DeprecationWarning` is no
+/// selection.
+pub fn narrows_selection(
+    args: &[String],
+    project: &crate::config::ProjectConfig,
+    cwd: &Path,
+) -> bool {
+    let flag_or_nodeid = args
+        .iter()
+        .zip(crate::cli::positional_mask(args))
+        .any(|(a, pos)| {
+            (pos && a.contains("::"))
+                || SELECTION_FLAGS
+                    .iter()
+                    .any(|f| a == f || a.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
+                || crate::cli::has_short(a, 'k')
+                || crate::cli::has_short(a, 'm')
+        });
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(&project.rootdir);
+    let mut paths: Vec<std::path::PathBuf> = crate::cli::path_args(args)
+        .iter()
+        .map(|p| canon(&cwd.join(p)))
+        .collect();
+    let cwd = canon(cwd);
+    if paths.is_empty() && cwd != root {
+        paths.push(cwd);
+    }
+    let mut roots: Vec<std::path::PathBuf> = project
+        .testpaths
+        .iter()
+        .flat_map(|t| crate::collect::expand_glob(&project.rootdir, t))
+        .map(|r| canon(&r))
+        .collect();
+    if roots.is_empty() {
+        roots.push(root.clone());
+    }
+    let covered = paths.iter().any(|p| root.starts_with(p))
+        || roots.iter().all(|r| paths.iter().any(|p| r.starts_with(p)));
+    flag_or_nodeid || (!paths.is_empty() && !covered)
+}
+
 /// After a run: a green run (exit 0) over the whole suite (`full_suite`) on
 /// a clean tree records the snapshot; a subset (`-k`, `--co`, a shard, ...)
 /// passing says nothing about the suite. A run with failed tests (exit 1)
@@ -339,37 +414,46 @@ pub fn after_run(sink: &mut Sink, exitstatus: i32, full_suite: bool, now: &Snaps
 }
 
 /// Does this run select part of the suite, from its argv or
-/// `PYTEST_ADDOPTS`? See [`narrows_suite`].
-pub(crate) fn run_narrows_suite(args: &[String]) -> bool {
-    narrows_suite(args)
-        || std::env::var("PYTEST_ADDOPTS")
-            .is_ok_and(|v| narrows_suite(&crate::config::shell_split(&v)))
-}
-
-/// Does the session argv select part of the suite? Positional nodeids,
-/// `-k`/`-m`, `--deselect`, last-failed/stepwise, `--co`. A plain path
-/// selection counts as the suite: CI commonly runs `rstest tests/`. Only
-/// positionals are nodeids: `-W error::DeprecationWarning` is no selection.
-fn narrows_suite(args: &[String]) -> bool {
-    const FLAGS: [&str; 7] = [
-        "--deselect",
-        "--lf",
-        "--last-failed",
-        "--sw",
-        "--stepwise",
-        "--co",
-        "--collect-only",
-    ];
-    args.iter()
-        .zip(crate::cli::positional_mask(args))
-        .any(|(a, pos)| {
-            (pos && a.contains("::"))
-                || FLAGS
-                    .iter()
-                    .any(|f| a == f || a.strip_prefix(f).is_some_and(|r| r.starts_with('=')))
-                || crate::cli::has_short(a, 'k')
-                || crate::cli::has_short(a, 'm')
+/// `PYTEST_ADDOPTS` (which pytest puts before the argv)? The suite is that of
+/// pytest's rootdir for these args, with `testpaths` only from a config file
+/// in that dir. See [`narrows_selection`].
+pub(crate) fn run_narrows_suite(args: &[String], cwd: &Path) -> bool {
+    let mut all = std::env::var("PYTEST_ADDOPTS")
+        .map(|v| crate::config::shell_split(&v))
+        .unwrap_or_default();
+    all.extend_from_slice(args);
+    // pytest expands an `@argsfile` (one arg per line) before anything else,
+    // the rootdir included.
+    let all: Vec<String> = all
+        .into_iter()
+        .flat_map(|a| {
+            match a
+                .strip_prefix('@')
+                .map(|f| std::fs::read_to_string(cwd.join(f)))
+            {
+                Some(Ok(body)) => body
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => vec![a],
+            }
         })
+        .collect();
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root = crate::config::rootdir(cwd, &all);
+    // ponytail: `-c other.ini` still reads testpaths from the rootdir's own
+    // config; parse the named file if anyone runs since-green that way.
+    let found = crate::config::discover(&root, &mut std::io::sink());
+    let project = if canon(&found.rootdir) == canon(&root) {
+        found
+    } else {
+        crate::config::ProjectConfig {
+            rootdir: root,
+            ..Default::default()
+        }
+    };
+    narrows_selection(&all, &project, cwd)
 }
 
 /// Uncommitted edits to tracked files anywhere in the checkout. Untracked
@@ -508,6 +592,64 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_selections_never_count_as_green() {
+        let root = std::env::temp_dir().join(format!("rstest-sg-narrow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests/unit")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("pkgs/a/tests")).unwrap();
+        std::fs::create_dir_all(root.join("pkgs/b/tests")).unwrap();
+        std::fs::write(root.join("tests/unit/test_a.py"), "").unwrap();
+        let mut project = crate::config::ProjectConfig {
+            rootdir: root.clone(),
+            testpaths: vec!["tests".into()],
+            ..Default::default()
+        };
+        let p = |rel: &str| root.join(rel).display().to_string();
+        let narrows = |args: &[String], project: &crate::config::ProjectConfig| {
+            narrows_selection(args, project, &root)
+        };
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Full: no args, the testpaths dir itself, the rootdir, plain flags.
+        assert!(!narrows(&v(&[]), &project));
+        assert!(!narrows(&[p("tests")], &project));
+        assert!(!narrows(&[p(".")], &project));
+        assert!(!narrows(&v(&["-x", "-v", "--durations=5"]), &project));
+        // Narrowed: a sub-dir, a file, a nodeid, selection flags in every form.
+        assert!(narrows(&[p("tests/unit")], &project));
+        assert!(narrows(&[p("tests/unit/test_a.py")], &project));
+        assert!(narrows(&v(&["tests/unit/test_a.py::test_x"]), &project));
+        for args in [
+            v(&["-k", "slow"]),
+            v(&["-kslow"]),
+            v(&["-m=integration"]),
+            v(&["--lf"]),
+            v(&["--deselect", "t.py::x"]),
+            v(&["--ignore=tests/unit"]),
+            v(&["--sw"]),
+        ] {
+            assert!(narrows(&args, &project), "{args:?}");
+        }
+        // Without testpaths, only the rootdir (or above) is the whole suite.
+        project.testpaths.clear();
+        assert!(narrows(&[p("tests")], &project));
+        assert!(!narrows(&[p(".")], &project));
+        // No args below the rootdir: pytest collects the invocation dir.
+        project.testpaths = vec!["tests".into()];
+        assert!(narrows_selection(&[], &project, &root.join("tests/unit")));
+        assert!(!narrows_selection(&[], &project, &root.join("tests")));
+        // Globbed testpaths: the paths together must cover every match.
+        project.testpaths = vec!["pkgs/*/tests".into()];
+        assert!(!narrows(&[p("pkgs")], &project));
+        assert!(!narrows(&[p("pkgs/a/tests"), p("pkgs/b/tests")], &project));
+        assert!(narrows(&[p("pkgs/a/tests")], &project));
+        // A testpaths glob matching nothing falls back to the rootdir.
+        project.testpaths = vec!["nope/*".into()];
+        assert!(narrows(&[p("tests")], &project));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn json_shape() {
         let green = snap("aaa", "3.12.1", &[("httpx", "0.27.0")], &[]);
         let now = snap("aaa", "3.12.1", &[], &[]);
@@ -557,7 +699,8 @@ mod tests {
     }
 
     #[test]
-    fn narrows_suite_spots_subsets() {
+    fn narrows_selection_spots_subsets() {
+        let project = crate::config::ProjectConfig::default();
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         for a in [
             &["-k", "smoke"][..],
@@ -569,19 +712,31 @@ mod tests {
             &["--deselect=t.py::x"],
             &["tests/test_a.py::test_one"],
             &["--deselect", "t.py::x"],
+            &["--setup-plan"],
+            &["--setup-only"],
+            &["--fixtures"],
+            &["--fixtures-per-test"],
+            &["--funcargs"],
+            &["--markers"],
+            &["--pyargs", "mypkg.tests.unit"],
         ] {
-            assert!(narrows_suite(&v(a)), "{a:?}");
+            assert!(
+                narrows_selection(&v(a), &project, &project.rootdir),
+                "{a:?}"
+            );
         }
         for a in [
             &[][..],
-            &["tests/"],
             &["-v", "-x"],
             &["--maxfail=2"],
             &["-W", "error::DeprecationWarning"],
             &["-Wignore::UserWarning"],
             &["-o", "filterwarnings=error::DeprecationWarning"],
         ] {
-            assert!(!narrows_suite(&v(a)), "{a:?}");
+            assert!(
+                !narrows_selection(&v(a), &project, &project.rootdir),
+                "{a:?}"
+            );
         }
     }
 
@@ -618,17 +773,58 @@ mod tests {
     #[test]
     fn pytest_addopts_selection_narrows_the_run() {
         let held = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("rstest-sg-addopts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pytest.ini"), "[pytest]\n").unwrap();
         let args: Vec<String> = Vec::new();
         {
             let _v = crate::test_env::set_var(&held, "PYTEST_ADDOPTS", "-k 'smoke or api'");
-            assert!(run_narrows_suite(&args));
+            assert!(run_narrows_suite(&args, &root));
         }
         {
             let _v = crate::test_env::set_var(&held, "PYTEST_ADDOPTS", "-W error::UserWarning");
-            assert!(!run_narrows_suite(&args));
+            assert!(!run_narrows_suite(&args, &root));
         }
         let _v = crate::test_env::remove_var(&held, "PYTEST_ADDOPTS");
-        assert!(!run_narrows_suite(&args));
+        assert!(!run_narrows_suite(&args, &root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_suite_is_pytests_rootdir_for_the_args() {
+        let held = crate::test_env::lock();
+        let _v = crate::test_env::remove_var(&held, "PYTEST_ADDOPTS");
+        let root = std::env::temp_dir().join(format!("rstest-sg-rootdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::create_dir_all(root.join("pkgs/a/tests")).unwrap();
+        // A plain pyproject.toml (no pytest section) still anchors the
+        // rootdir: running from `tests/` is a subset of it.
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert!(run_narrows_suite(&[], &root.join("tests")));
+        assert!(!run_narrows_suite(&[], &root));
+        // A sub-project with its own pytest config is its own suite.
+        std::fs::write(
+            root.join("pkgs/a/pyproject.toml"),
+            "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+        )
+        .unwrap();
+        let a = root.join("pkgs/a").display().to_string();
+        assert!(!run_narrows_suite(&[a], &root));
+        let a_tests = root.join("pkgs/a/tests").display().to_string();
+        assert!(!run_narrows_suite(&[a_tests], &root));
+        // An @argsfile counts by what it lists, rootdir included: one naming
+        // the sub-project is that project's whole suite, `-k` narrows.
+        std::fs::write(
+            root.join("full.txt"),
+            format!("{}\n", root.join("pkgs/a").display()),
+        )
+        .unwrap();
+        std::fs::write(root.join("sub.txt"), "-k\nslow\n").unwrap();
+        assert!(!run_narrows_suite(&["@full.txt".into()], &root));
+        assert!(run_narrows_suite(&["@sub.txt".into()], &root));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

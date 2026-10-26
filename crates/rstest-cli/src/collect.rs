@@ -143,7 +143,7 @@ fn fnmatch_ex(pattern: &str, path: &Path) -> bool {
 /// `*`/`?` per path component (never matching a leading `.` unless the
 /// component starts with one), `**` for zero or more directories. A pattern
 /// without wildcards yields itself only when it exists.
-fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
+pub(crate) fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
     use std::path::Component;
     let mut start = base.to_path_buf();
     let mut parts: Vec<&str> = Vec::new();
