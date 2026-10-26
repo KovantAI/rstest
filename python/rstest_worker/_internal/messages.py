@@ -46,7 +46,7 @@ class FixtureStat(TypedDict):
     fingerprint: str | None
 
 
-class CrashInfo(TypedDict):
+class CauseInfo(TypedDict):
     exc: str  # exception type name
     message: str  # first line of the exception message (<= 300 chars)
     at: str | None  # "path:line" of the deepest rootdir frame outside site-packages
@@ -69,7 +69,10 @@ class ReportPayload(_ReportRequired, total=False):
     sections: list[list[str]]  # [name, content] pairs; wire arrays
     skip_reason: str
     subtest: bool  # a subtest's report (shares the parent's nodeid/phase)
-    crash: CrashInfo  # failed reports: what raised and where (grouping by cause)
+    crash: str  # failure: the short test summary's message (reprcrash.message)
+    xfail_reason: str  # xfail/xpass: report.wasxfail, when non-empty
+    skip_location: list[str | int | None]  # skip: [relpath, lineno|None] as pytest folds it
+    cause: CauseInfo  # failed reports: what raised and where (grouping by cause)
     network: list[str]  # teardown: outbound destinations ("host:port") the test reached
 
 

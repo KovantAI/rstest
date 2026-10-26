@@ -473,6 +473,9 @@ mod tests {
             lineno,
             subtest: false,
             crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
             network: Vec::new(),
         }
     }
@@ -521,7 +524,7 @@ mod tests {
                 Some(3),
                 Some("Traceback ...\nConnectionRefusedError"),
             );
-            r.crash = Some(crate::scheduling::proto::Crash {
+            r.cause = Some(crate::scheduling::proto::Cause {
                 exc: "ConnectionRefusedError".into(),
                 message: format!("port {}", 5000 + i),
                 at: Some("app/db.py:12".into()),
@@ -565,7 +568,7 @@ mod tests {
                 Some(3),
                 Some("    connect()\nE   ConnectionRefusedError: [Errno 111] refused"),
             );
-            r.crash = Some(crate::scheduling::proto::Crash {
+            r.cause = Some(crate::scheduling::proto::Cause {
                 exc: "ConnectionRefusedError".into(),
                 message: "[Errno 111] refused".into(),
                 at: Some("app/db.py:12".into()),

@@ -28,7 +28,8 @@ The short version, in order:
 Most xdist flags carry over unchanged. The ones people actually touch:
 
 - **`-n 4` / `-n auto`**: same, and `auto` is the default. `auto` is capped by
-  test-file count and cached suite time, so pass an explicit `-n` when you
+  the selected work (test files on a cold cache, tests once timings are
+  cached) and by cached suite time, so pass an explicit `-n` when you
   need a fixed count (for example with `--shard`). `auto` also counts
   differently: rstest starts from **logical** cores, while xdist's `auto`
   counts **physical** cores when psutil is installed (logical otherwise). On
