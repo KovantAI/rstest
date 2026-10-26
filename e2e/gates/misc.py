@@ -136,7 +136,7 @@ def gate_failures_by_cause(g, args, binary):
         and "=========== failures by cause ===========" in out
         and "3 tests: ConnectionRefusedError: [Errno 111] Connection refused: port" in out
         and "  at app/db.py:2" in out
-        and "test_math" not in out.split("failures by cause")[1].split("failed")[0],
+        and "test_math" not in out.split("failures by cause")[1].split("short test summary")[0],
         out[-700:],
     )
     doc = json.loads(rj.read_text(encoding="utf-8")) if rj.exists() else {}
