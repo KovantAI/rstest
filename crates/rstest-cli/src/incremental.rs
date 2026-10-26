@@ -117,12 +117,20 @@ fn dirty_under(rootdir: &Path, scope: &Path, outputs: &[&Path]) -> bool {
         .iter()
         .filter_map(|o| scope.join(o).canonicalize().ok())
         .collect();
+    // rstest's own cache: only `.rstest_cache` is known by name (see
+    // `is_untracked_artifact`); an `RSTEST_CACHE` elsewhere in the checkout
+    // would otherwise stamp every run after the first `-dirty`. Only strictly
+    // inside it: a cache at (or above) the checkout would hide every edit.
+    let root = rootdir.canonicalize().ok();
+    let cache = cache::dir()
+        .canonicalize()
+        .ok()
+        .filter(|c| root.as_ref().is_some_and(|r| !r.starts_with(c)));
     crate::select::changed_files_from_git(rootdir, None).map_or(true, |f| {
         f.iter().any(|f| {
-            rootdir
-                .join(f)
-                .canonicalize()
-                .map_or(true, |p| !outputs.contains(&p))
+            rootdir.join(f).canonicalize().map_or(true, |p| {
+                !outputs.contains(&p) && cache.as_ref().is_none_or(|c| !p.starts_with(c))
+            })
         })
     })
 }
@@ -480,6 +488,35 @@ mod tests {
         // A real untracked file still counts.
         std::fs::write(repo.join("conftest.py"), "").unwrap();
         assert!(checkout_dirty(&repo, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn custom_cache_dir_inside_the_checkout_leaves_the_tree_clean() {
+        let held = crate::test_env::lock();
+        let repo = tmp("custom-cache");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let cache = repo.join("rstest-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("history.msgpack"), "x").unwrap();
+        {
+            let _env = crate::test_env::set_var(&held, "RSTEST_CACHE", &cache);
+            assert!(!checkout_dirty(&repo, &[]));
+            assert!(!tree_dirty(&repo, &[]));
+            // A real untracked file still counts.
+            std::fs::write(repo.join("conftest.py"), "").unwrap();
+            assert!(checkout_dirty(&repo, &[]));
+        }
+        // A cache at the checkout root (`RSTEST_CACHE=.`) or above it would
+        // hide every edit: it is not excluded.
+        for c in [repo.clone(), repo.parent().unwrap().to_path_buf()] {
+            let _env = crate::test_env::set_var(&held, "RSTEST_CACHE", &c);
+            assert!(checkout_dirty(&repo, &[]), "{c:?}");
+            assert!(tree_dirty(&repo, &[]), "{c:?}");
+        }
         std::fs::remove_dir_all(&repo).ok();
     }
 

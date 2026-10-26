@@ -30,7 +30,7 @@ Task-oriented how-tos. Start with the one that matches what you are doing.
 - [CI quickstart](ci-quickstart.md): GitHub Actions, Django and monorepo worked examples, doctor trending
 - [CI output formats](ci-output.md): `--output` styles for CI annotations and machine-readable streams
 - [More CI systems](ci-recipes.md): GitLab CI, Azure Pipelines, CircleCI, Jenkins, Buildkite, AWS CodeBuild, Google Cloud Build, pre-commit
-- [Shared cache across CI jobs](ci-shared-cache.md): merging durations, flakes, and coverage across jobs
+- [Shared cache across CI jobs](ci-shared-cache.md): merging durations, flakes, run history, coverage and the green snapshot across jobs
 - [Sharding across CI jobs](sharding.md): splitting one suite over N machines with `--shard K/N`
 
 ## Plugins and coverage

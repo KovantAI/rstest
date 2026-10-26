@@ -10,7 +10,7 @@ rstest ships two [Agent Skills](https://agentskills.io) that let a coding agent
 - **`rstest-triage`**: debug failures on a suite that already runs on rstest: a
   CI run that is red but passes locally, a test that fails only in parallel, a
   polluter, a flaky test, a hung worker. It drives `replay`, `bisect`, `audit`,
-  `explain`, and the flaky-test controls.
+  `explain`, `flaky`, `since-green`, and the flaky-test controls.
 
 Both ask before they edit your tests or CI.
 

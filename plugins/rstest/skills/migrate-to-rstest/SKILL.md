@@ -43,7 +43,7 @@ to leave alone, what to change). Read the matching reference when you reach it:
 
 Once the suite is on rstest, later failures (a red CI run that passes locally,
 a polluter, a recurring flake) belong to the `rstest-triage` skill, which
-drives `replay`, `bisect`, `audit` and `explain`.
+drives `replay`, `bisect`, `audit`, `explain`, `flaky` and `since-green`.
 
 Install rstest into the project's environment first (`uv pip install rstest`).
 It runs its own vendored pytest 9.1.1 core, not the installed pytest, but it
@@ -110,7 +110,8 @@ may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
    for local loops and PR jobs.
 3. **Re-measure.** Compare wall time before/after; report the delta.
 4. **Keep it fast.** Offer CI gates so the win doesn't erode:
-   `--durations-regress 2` (fail when a test doubles its cached time) and
+   `--durations-regress 2` (fail when a test doubles its baseline: the median
+   of its recent passing runs, or its cached time with less history) and
    `--doctor-fail-on 'parallel_efficiency<30'` (see `doctor-playbook.md`).
 
 Note: the *parallel-safety* findings ("which tests aren't parallel-safe", "why

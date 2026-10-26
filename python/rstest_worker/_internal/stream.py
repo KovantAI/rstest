@@ -289,8 +289,7 @@ class StreamPlugin:
         # the counts ride the teardown report.
         self._leakcheck = os.environ.get("RSTEST_LEAKCHECK") == "1"
         self._leaks = LeakTracker() if self._leakcheck else None
-        # Outbound-network guard (--block-network / doctor): installed at
-        # configure time, once the rootdir is known.
+        # Outbound-network recorder (--doctor): installed at configure time.
         self._net: NetGuard | None = None
         # A live JSON consumer (--output json / --stream-json) is attached, so
         # ship captured stdout/stderr/log sections on every report, not only
@@ -461,7 +460,7 @@ class StreamPlugin:
         self._register_markers(config)
         _warn_pytest_pins(config)
         junit.maybe_register(config, self._conn)
-        self._net = NetGuard.from_env(config)
+        self._net = NetGuard.from_env()
         if self._net is not None:
             self._net.install()
         if self._leaks is not None and not config.pluginmanager.is_registered(self._leaks):
@@ -518,11 +517,6 @@ class StreamPlugin:
             "markers",
             "timeout(seconds): rstest - fail this test if its call phase runs "
             "longer than N seconds (per-test override of --timeout)",
-        )
-        config.addinivalue_line(
-            "markers",
-            "network: rstest - this test may open outbound network connections "
-            "(exempt from --block-network)",
         )
 
     @staticmethod
@@ -761,7 +755,7 @@ class StreamPlugin:
         # Connections are checked only while a test runs (setup to teardown).
         if self._net is None:
             return (yield)
-        self._net.start(item)
+        self._net.start(item.nodeid)
         try:
             return (yield)
         finally:

@@ -52,8 +52,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   `PYTHONHASHSEED`, `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`).
   A red run diffs against it; see
   [What changed since green](../guides/since-green.md#what-changed-since-green).
-  Not written by `rstest replay`. Not shared through the shared cache. Safe
-  to delete.
+  Not written by `rstest replay`. Shared through `--cache-push` /
+  `--cache-pull`, including a sharded run once every shard is green (see
+  [Sharded CI](../guides/since-green.md#what-changed-since-green)). Safe to
+  delete.
 - `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting
@@ -149,8 +151,15 @@ clobber each other.
       `history.msgpack` lands once, then replayed oldest first; each test keeps
       its newest `RSTEST_HISTORY_RUNS` runs. Every shard of a sharded run is
       its own run, and each test appears in the shard that ran it.
+    - *green snapshot*: a green run's environment (`green_env.json`). A full
+      green run counts on its own; a sharded run counts once every shard of
+      the same commit pushed a green part, and its parts wait in `base.json`
+      until then. The newest such snapshot replaces the local one when it is
+      newer.
 - **Push** writes just this run's segment (`--cache-push`): its *slice* of the
-  durations, flake events, coverage index and run history this run measured.
+  durations, flake events, coverage index and run history this run measured,
+  plus its green snapshot when its tests passed over the whole suite or one
+  whole shard.
 - **Compact** (`cache-compact`) folds segments into a new base and prunes
   them; a segment already folded is recorded in the base's absorbed-id set, so
   compaction is safe against concurrent pushes. Compaction also drops history
@@ -213,8 +222,13 @@ or corrupted segment can:
 - inflate flake counts in `flakes.json`, so `--reruns-only-known-flaky`
   retries (and hides) failures it should not, `--order fail-fast` reorders
   dispatch around them, and `rstest explain` reports them as genuine history;
-- skew durations, which unbalances shards and can make `--durations-regress`
-  pass or fail wrongly.
+- fabricate flips in the run history, so
+  [auto-quarantine](../guides/flaky-tests.md) (on by default) turns real
+  failures non-fatal and `rstest flaky` ranks the wrong tests;
+- skew durations or the history's per-run times, which unbalances shards and
+  shifts the `--durations-regress` median, so it passes or fails wrongly;
+- publish a fake green snapshot, so `--since-green` diffs against a commit
+  that never passed.
 
 Recommended setup:
 

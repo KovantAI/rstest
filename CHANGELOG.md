@@ -103,13 +103,11 @@ between 0.x releases and are listed here.
   `azure` output emit one annotation per group instead of one per test, and
   `--report-json` adds `failure_groups`. Every traceback still prints.
 
-- **`--block-network` keeps tests offline.** A test that connects outside
-  loopback and `[tool.rstest] network-allow` (hostnames or CIDRs) fails with
-  the destination and the line that connected; `@pytest.mark.network`
-  exempts a test, and `block-network = true` turns it on from config.
-  `--doctor` gains a NETWORK ACCESS section (and `network` in
-  `--doctor-json`) listing every test's outbound connections without
-  blocking.
+- **`--doctor` finds hidden network calls.** A new NETWORK ACCESS section
+  (and `network` in `--doctor-json`) lists every test that connected outside
+  loopback and `[tool.rstest] network-allow` (hostnames or CIDRs), with the
+  host it reached. It only reports; pytest-socket (`--allow-hosts=...`)
+  fails such tests.
 
 - **`audit` and `migrate-check` name the shared resource behind a
   parallel-only failure.** When the error text shows a fixed port
@@ -141,6 +139,14 @@ between 0.x releases and are listed here.
   or whole on CI and at `-vv`. Lines follow file and line order, so they
   don't change between runs. Errors are headed `ERROR at setup of`,
   `ERROR at teardown of` and `ERROR collecting`, as in pytest.
+
+### Fixes
+
+- **A test that a plugin reports in a phase of its own counts as failed,
+  not as an error.** pytest-forked reports a crashed child as one
+  `when="???"` report; rstest dropped it, so the test showed no progress
+  line and the summary counted an error. Any phase but setup and teardown
+  now counts as the test itself, as in pytest.
 
 ## 0.9.0 (2026-10-06)
 
@@ -197,6 +203,13 @@ between 0.x releases and are listed here.
   (`at -n auto = -n 4`).
 - **Behavior change: a session-scoped fixture's resources are never charged
   to a test by the leak check.** See the leak check entry below.
+
+- **Sharded CI gets a green baseline.** Each green shard (`--shard K/N`, no
+  other narrowing) pushes its environment snapshot through the shared cache;
+  once every shard of the same commit has, the run counts as green and the
+  next `--cache-pull` writes it to `green_env.json`, so a red shard prints
+  what changed since. A red shard pushes nothing, and shards of an
+  incomplete run wait in `base.json` across compactions.
 
 ### Fixes
 

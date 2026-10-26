@@ -53,15 +53,17 @@ you don't need it now.
 
 **Doctor**{ #doctor }: the diagnosis report
 [`--doctor`](../reference/cli.md#-doctor) prints after a normal run: where
-test time goes (wait-bound share, parallel floor, fixture hotspots, slowest
-files, leaks), also available as JSON or Markdown. See
+test time goes (wait-bound share, parallel floor, parallel efficiency,
+fixture hotspots, slowest files, coverage waste, leaks, network access,
+suggested timeouts, duration drift), also available as JSON or Markdown. See
 [Suite diagnostics](../guides/doctor.md).
 
 **Duration cache**{ #duration-cache }: `.rstest_cache/durations.json`, the
 per-test call-phase wall times (fixture setup and teardown excluded) that
 earlier runs recorded. It
 drives [duration-aware scheduling](#duration-aware-scheduling), `--shard`
-balancing and `-n auto` sizing, and is the baseline for `--durations-regress`.
+balancing and `-n auto` sizing, and is the `--durations-regress` baseline for a test with fewer than 5
+passing runs in the run history (with more, the baseline is their median).
 A failed test's duration is never recorded. Shared across CI jobs with
 [`--cache-push` / `--cache-pull`](caching.md#shared-cache-backend).
 

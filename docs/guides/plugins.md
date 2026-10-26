@@ -91,7 +91,8 @@ verified/inferred marker), see the
 | pytest-mock | ✅ Works | V | per-test `mocker` fixture |
 | pytest-timeout | 🟦 Native | V | rstest's own [`--timeout`](../reference/cli.md#-timeout-secs) and `@pytest.mark.timeout` replace it; see [pytest-timeout](#pytest-timeout) before removing it |
 | pytest-env | ✅ Works | i | env vars are set by its `pytest_load_initial_conftests` hook, which runs in every worker session |
-| pytest-socket | ✅ Works | V | loads under the pool in two corpus suites; `--disable-socket` itself not yet exercised |
+| pytest-socket | ✅ Works | V | loads under the pool in two corpus suites; `--allow-hosts` blocking gated at `-n 2` (`--disable-socket` not yet exercised) |
+| pytest-forked | ✅ Works | V | `--forked` (after `--`) or `@pytest.mark.forked` runs each test in a forked child inside the worker: module state can't leak between tests, and a crashing child fails only its test (counted failed, as in pytest). Unix only. Use it as a stopgap for an ISOLATION finding, or for a test that segfaults |
 | pytest-repeat | ✅ Works | i | `@mark.repeat(N)` expands at collection, so the copies are ordinary items that distribute across workers |
 | freezegun | ✅ Works | V | in-process time freezing is per-worker (the freezegun, aiohttp, itsdangerous, langchain and python-dateutil corpus suites load it in parallel). The pytest-freezer and pytest-freezegun wrappers use the same model but are not gated (i). Keep `now()` out of parametrize IDs unless every worker computes the same string (see [unstable parametrize IDs](../concepts/compatibility.md#unstable-parametrize-ids)) |
 | pytest-benchmark | 🔶 `-n 0` | V | auto-disables at `-n ≥ 2` (sees the pool as xdist); run benchmarks at `-n 0` and read numbers from `--benchmark-json` (the stats table isn't painted: rstest owns the terminal) |

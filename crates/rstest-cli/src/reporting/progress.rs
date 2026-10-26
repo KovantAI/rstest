@@ -84,7 +84,13 @@ fn outcome_kind(r: &Report) -> Option<OutcomeKind> {
     if r.subtest && r.outcome != "failed" {
         return None;
     }
-    Some(match (r.when.as_str(), r.outcome.as_str()) {
+    // Any phase but setup/teardown is the test itself, as pytest shows it
+    // (pytest-forked reports a crashed child as `when="???"`).
+    let when = match r.when.as_str() {
+        w @ ("setup" | "teardown") => w,
+        _ => "call",
+    };
+    Some(match (when, r.outcome.as_str()) {
         ("call", "passed") => {
             if r.wasxfail {
                 XPass
@@ -644,6 +650,15 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_plugin_phase_shows_as_the_test_outcome() {
+        // pytest-forked's crash report has `when="???"`: a failure, as pytest shows it.
+        assert!(matches!(
+            outcome_kind(&report("???", "failed")),
+            Some(OutcomeKind::Fail)
+        ));
     }
 
     #[test]

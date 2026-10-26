@@ -184,8 +184,7 @@ def test_external():
     reach()
 
 
-@pytest.mark.network
-def test_marked():
+def test_external_too():
     reach()
 
 
@@ -203,31 +202,29 @@ def gate_network_guard(g, args, binary):
     g.write("netguard/test_net.py", NETWORK_TESTS)
     ndir = g.tmp / "netguard"
     for n in ("2", "0"):
-        r = g.run(".", "-n", n, "--block-network", cwd=ndir)
+        r = g.run(".", "-n", n, "--doctor", cwd=ndir)
         check(
-            f"network guard: --block-network fails the hidden call (-n {n})",
-            r.returncode == 1
-            and "1 failed, 2 passed" in r.stdout
-            and "rstest --block-network: connection to 192.0.2.1:80 from test_net.py:" in r.stdout
-            and "test_external" in r.stdout,
-            f"rc={r.returncode} " + r.stdout[-600:],
+            f"network guard: --doctor lists destinations without blocking (-n {n})",
+            r.returncode == 0
+            and "3 passed" in r.stdout
+            and "NETWORK ACCESS (2 test(s) opened outbound connections" in r.stdout
+            and "test_net.py::test_external  -> 192.0.2.1:80" in r.stdout
+            and "pytest-socket" in r.stdout
+            and "test_local" not in r.stdout.split("NETWORK ACCESS")[1].split("\n\n")[0],
+            f"rc={r.returncode} " + r.stdout[-700:],
         )
+    # rstest no longer owns --block-network: it reaches pytest, which (with no
+    # pytest-recording installed) rejects it as an unknown flag.
+    r = g.run(".", "-n", "2", "--block-network", cwd=ndir)
+    check(
+        "network guard: --block-network is no longer an rstest flag",
+        r.returncode != 0 and "--block-network" in r.stdout + r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-400:],
+    )
+    g.write("netguard/pyproject.toml", '[tool.rstest]\nnetwork-allow = ["192.0.2.0/24"]\n')
     r = g.run(".", "-n", "2", "--doctor", cwd=ndir)
     check(
-        "network guard: --doctor lists destinations without blocking",
-        r.returncode == 0
-        and "NETWORK ACCESS (2 test(s) opened outbound connections" in r.stdout
-        and "test_net.py::test_external  -> 192.0.2.1:80" in r.stdout
-        and "test_local" not in r.stdout.split("NETWORK ACCESS")[1].split("\n\n")[0],
-        f"rc={r.returncode} " + r.stdout[-700:],
-    )
-    g.write(
-        "netguard/pyproject.toml",
-        '[tool.rstest]\nblock-network = true\nnetwork-allow = ["192.0.2.0/24"]\n',
-    )
-    r = g.run(".", "-n", "2", cwd=ndir)
-    check(
-        "network guard: [tool.rstest] network-allow CIDR lets it through",
-        r.returncode == 0 and "3 passed" in r.stdout,
+        "network guard: [tool.rstest] network-allow CIDR leaves it out of the report",
+        r.returncode == 0 and "3 passed" in r.stdout and "NETWORK ACCESS" not in r.stdout,
         f"rc={r.returncode} " + r.stdout[-400:],
     )

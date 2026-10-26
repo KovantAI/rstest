@@ -258,7 +258,8 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         let _ = writeln!(
             md,
             "### Network access\n\n> {} test(s) opened outbound connections (outside loopback \
-             and `network-allow`). `--block-network` fails them.\n",
+             and `network-allow`). To fail them, use pytest-socket: \
+             `--allow-hosts=127.0.0.1,...`.\n",
             n.tests_with_network
         );
         md.push_str("| Test | Destinations |\n|---|---|\n");
@@ -584,9 +585,9 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
             ));
         }
         sink.out_line(
-            "  hidden network calls flake and hit rate limits: mock them, mark the test \
-             @pytest.mark.network, or allow the host in [tool.rstest] network-allow; \
-             --block-network fails them",
+            "  hidden network calls flake and hit rate limits: mock them, or allow the host \
+             in [tool.rstest] network-allow; to fail them, use pytest-socket \
+             (-- --allow-hosts=127.0.0.1,...)",
         );
     }
 

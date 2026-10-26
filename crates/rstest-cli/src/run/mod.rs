@@ -438,7 +438,7 @@ fn resolve_run_config(
         reruns: reruns > 0,
         // Filled in once the --quarantine list is loaded (before dispatch).
         quarantine: None,
-        network: network_guard(cli, settings, instrument),
+        network: network_guard(settings, instrument),
     };
 
     // Session args forward verbatim: the vendored core owns ini semantics
@@ -1405,17 +1405,10 @@ fn resolve_incremental(
     })
 }
 
-/// The outbound-network guard for this run's workers: blocking under
-/// `--block-network` (or `[tool.rstest] block-network = true`), recording
-/// only under doctor instrumentation, else off.
-fn network_guard(
-    cli: &Cli,
-    settings: &config::RstestSettings,
-    record: bool,
-) -> Option<worker::NetworkGuard> {
-    let block = cli.block_network || settings.block_network.unwrap_or(false);
-    (block || record).then(|| worker::NetworkGuard {
-        block,
+/// The outbound-network recorder for this run's workers: on under doctor
+/// instrumentation, else off. It never blocks (pytest-socket does that).
+fn network_guard(settings: &config::RstestSettings, record: bool) -> Option<worker::NetworkGuard> {
+    record.then(|| worker::NetworkGuard {
         allow: settings.network_allow.clone().unwrap_or_default(),
     })
 }
@@ -3515,6 +3508,7 @@ mod tests {
             flake_events: Vec::new(),
             cov_index: Default::default(),
             history: None,
+            green: None,
         }
     }
 
@@ -3830,35 +3824,20 @@ mod tests {
     }
 
     #[test]
-    fn network_guard_blocks_on_flag_or_config_and_records_under_doctor() {
-        use clap::Parser;
-        let cli = |args: &[&str]| {
-            crate::cli::Cli::parse_from(std::iter::once("rstest").chain(args.iter().copied()))
-        };
+    fn network_guard_only_records_under_doctor() {
         let off = crate::config::RstestSettings::default();
-        assert_eq!(super::network_guard(&cli(&[]), &off, false), None);
-        // Doctor alone: record, don't block.
-        assert_eq!(
-            super::network_guard(&cli(&[]), &off, true),
-            Some(crate::scheduling::worker::NetworkGuard {
-                block: false,
-                allow: Vec::new()
-            })
-        );
+        assert_eq!(super::network_guard(&off, false), None);
         let configured = crate::config::RstestSettings {
-            block_network: Some(true),
             network_allow: Some(vec!["redis".into()]),
             ..Default::default()
         };
-        for (args, settings) in [(&["--block-network"][..], &off), (&[][..], &configured)] {
-            let g = super::network_guard(&cli(args), settings, false).unwrap();
-            assert!(g.block);
-        }
+        // The allowlist alone turns nothing on: there is no blocking mode.
+        assert_eq!(super::network_guard(&configured, false), None);
         assert_eq!(
-            super::network_guard(&cli(&[]), &configured, false)
-                .unwrap()
-                .allow,
-            ["redis"]
+            super::network_guard(&configured, true),
+            Some(crate::scheduling::worker::NetworkGuard {
+                allow: vec!["redis".into()]
+            })
         );
     }
 

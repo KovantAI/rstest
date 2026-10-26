@@ -742,12 +742,34 @@ pub(super) fn run_post_gates(
             // This run's coverage slice (covtool wrote it just above); empty for
             // non-coverage runs. Published as the segment's cov_index.
             let cov = remote::load_local_cov_index();
+            // Green over the whole suite, or over one whole shard (a shard is
+            // the only narrowing allowed): the pull side calls a sharded run
+            // green once every shard of it has pushed one.
+            // A dirty tree's green proves nothing about HEAD (as `after_run`).
+            let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
+            let green = (outcome.exitstatus == 0
+                && !dirty
+                && changed_base.is_none()
+                && !since_green
+                && !incremental_active
+                && !crate::since_green::run_narrows_suite(args, scope))
+            .then(|| crate::since_green::GreenPart {
+                snapshot: crate::since_green::capture(
+                    scope,
+                    python,
+                    head.as_deref(),
+                    dirty,
+                    started_epoch,
+                ),
+                shard,
+            });
             let seg = remote::segment_from_run(
                 format!("{uid}{shard_suffix}"),
                 started_epoch,
                 &outcome.run,
                 cov,
                 history_slice,
+                green,
             );
             // Build the transport once and reuse it for an optional inline
             // auto-compaction after a successful push.
@@ -1942,6 +1964,7 @@ mod tests {
                 .collect(),
             cov_index: Default::default(),
             history: None,
+            green: None,
         }
     }
 
