@@ -289,7 +289,13 @@ silently stop running.
 
 Only ISOLATION and WALL-CLOCK failures go in the block. Serial is a **stopgap**
 for those; the report also names the real fix (reset leaked state, mock the
-clock). ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
+clock). When a failure's error text names a shared resource, a `CAUSE:` line
+under the test names it and the fix: a fixed port (bind port 0, e.g.
+pytest-asyncio's `unused_tcp_port`), one shared database (pytest-postgresql,
+pytest-django, or a `worker_id` suffix) or one shared home directory
+(pytest-home's `tmp_home_dir`); see
+[Plugins that do it for you](../guides/parallel-safety.md#plugins-that-do-it-for-you).
+`--audit-json` carries that fix in the test's `fix` field. ORDER-DEPENDENCY failures are listed separately with a `--dist loadfile`
 recommendation instead: they depend on tests that run before them in the same
 file, and the serial phase would run them apart from those tests, so marking
 them serial wouldn't make them pass. Intrinsic flakes (serial repeats disagree)

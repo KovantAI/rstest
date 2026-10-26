@@ -415,6 +415,7 @@ mod tests {
                         phase: *phase,
                         wall: 0.0,
                         cpu: None,
+                        resource: None,
                     },
                 )
             })

@@ -20,8 +20,10 @@ pub use try_cmd::run_try;
 pub use xdist_removal::run_xdist_removal_check;
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::Result;
+use regex::Regex;
 
 use crate::scheduling::{proto, worker};
 
@@ -34,6 +36,69 @@ pub(super) struct Rec {
     pub phase: Phase,
     pub wall: f64,        // call-phase wall seconds
     pub cpu: Option<f64>, // call-phase cpu seconds (only with doctor instrumentation)
+    /// A shared resource the failure's error text names (see [`Resource`]).
+    pub resource: Option<Resource>,
+}
+
+/// A resource parallel workers commonly fight over, recognized from a
+/// failure's error text, with the established pytest plugin (and the
+/// no-plugin fallback) that gives each worker its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Resource {
+    /// A fixed port another worker already bound.
+    Port,
+    /// One database (or schema) shared by every worker.
+    Database,
+    /// One home directory (`~/.config`, `~/.cache`) shared by every worker.
+    Home,
+}
+
+impl Resource {
+    /// The resource a failure's text points at, if any.
+    pub(super) fn of(text: &str) -> Option<Resource> {
+        static RES: OnceLock<[(Resource, Regex); 3]> = OnceLock::new();
+        let res = RES.get_or_init(|| {
+            [
+                (
+                    Resource::Port,
+                    Regex::new(r"(?i)address already in use|EADDRINUSE|\[Errno (?:48|98)\]|WinError 10048")
+                        .unwrap(),
+                ),
+                (
+                    Resource::Database,
+                    Regex::new(
+                        r#"(?i)database "?[\w.-]+"? already exists|is being accessed by other users|database is locked|relation "[^"]+" already exists"#,
+                    )
+                    .unwrap(),
+                ),
+                (
+                    Resource::Home,
+                    Regex::new(r"[/\\]\.(?:config|cache|local)[/\\]").unwrap(),
+                ),
+            ]
+        });
+        res.iter()
+            .find(|(_, re)| re.is_match(text))
+            .map(|(r, _)| *r)
+    }
+
+    /// One line naming the cause and the fix.
+    pub(super) fn hint(self) -> &'static str {
+        match self {
+            Resource::Port => {
+                "a fixed port: workers collide on it; bind port 0 instead \
+                 (pytest-asyncio's unused_tcp_port fixture does it)"
+            }
+            Resource::Database => {
+                "one shared database: give each worker its own (pytest-postgresql and \
+                 pytest-django do it per worker; or suffix the name with the worker_id fixture)"
+            }
+            Resource::Home => {
+                "one shared home directory: isolate it per test (pytest-home's tmp_home_dir \
+                 fixture, or monkeypatch HOME to tmp_path)"
+            }
+        }
+    }
 }
 
 impl Rec {
@@ -74,10 +139,21 @@ pub(super) fn parse_outcomes(doc: &serde_json::Value, with_cpu: bool) -> Option<
                 cpu: with_cpu
                     .then(|| entry.get("cpu").and_then(|v| v.as_f64()))
                     .flatten(),
+                resource: entry
+                    .get("longrepr")
+                    .and_then(|v| v.as_str())
+                    .and_then(Resource::of),
             },
         );
     }
     Some(out)
+}
+
+/// The tests whose failure text names a shared resource (see [`Resource`]).
+pub(super) fn resources(par: &Outcomes) -> std::collections::BTreeMap<String, Resource> {
+    par.iter()
+        .filter_map(|(id, r)| r.resource.map(|res| (id.clone(), res)))
+        .collect()
 }
 
 pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
@@ -273,6 +349,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resource_of_recognizes_the_classic_collisions() {
+        for msg in [
+            "OSError: [Errno 98] Address already in use",
+            "OSError: [Errno 48] Address already in use",
+            "OSError: [WinError 10048] Only one usage of each socket address",
+            "socket.error: EADDRINUSE",
+        ] {
+            assert_eq!(Resource::of(msg), Some(Resource::Port), "{msg}");
+        }
+        for msg in [
+            "psycopg.errors.DuplicateDatabase: database \"app_test\" already exists",
+            "database \"app_test\" is being accessed by other users",
+            "sqlite3.OperationalError: database is locked",
+            "relation \"users\" already exists",
+        ] {
+            assert_eq!(Resource::of(msg), Some(Resource::Database), "{msg}");
+        }
+        assert_eq!(
+            Resource::of("FileExistsError: '/home/ci/.config/app/settings.toml'"),
+            Some(Resource::Home)
+        );
+        assert_eq!(Resource::of("assert 1 == 2"), None);
+        // Each hint names its fixture.
+        assert!(Resource::Port.hint().contains("unused_tcp_port"));
+        assert!(Resource::Database.hint().contains("pytest-postgresql"));
+        assert!(Resource::Database.hint().contains("worker_id"));
+        assert!(Resource::Home.hint().contains("tmp_home_dir"));
+    }
+
+    #[test]
+    fn parse_outcomes_reads_the_resource_from_the_failure_text() {
+        let doc = serde_json::json!({"tests": {
+            "t.py::srv": {"call": "failed", "longrepr": "E   OSError: [Errno 98] Address already in use"},
+            "t.py::ok": {"call": "passed"},
+        }});
+        let out = parse_outcomes(&doc, false).unwrap();
+        assert_eq!(out["t.py::srv"].resource, Some(Resource::Port));
+        assert_eq!(out["t.py::ok"].resource, None);
+        let r = resources(&out);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r["t.py::srv"], Resource::Port);
+    }
+
+    #[test]
     fn file_of_strips_at_first_colons() {
         assert_eq!(
             file_of("tests/test_x.py::TestC::test_m[param]"),
@@ -308,6 +428,7 @@ mod tests {
             phase: Phase::Fail,
             wall: 1.0,
             cpu: Some(0.01),
+            resource: None,
         };
         assert!(waiting.wait_bound());
         // cpu-bound: most of the wall is compute.
@@ -315,6 +436,7 @@ mod tests {
             phase: Phase::Fail,
             wall: 1.0,
             cpu: Some(0.9),
+            resource: None,
         };
         assert!(!computing.wait_bound());
         // no cpu data (doctor off) -> can't claim wait-bound.
@@ -322,6 +444,7 @@ mod tests {
             phase: Phase::Fail,
             wall: 1.0,
             cpu: None,
+            resource: None,
         };
         assert!(!no_cpu.wait_bound());
         // trivially short -> not meaningful, don't flag.
@@ -329,6 +452,7 @@ mod tests {
             phase: Phase::Fail,
             wall: 0.001,
             cpu: Some(0.0),
+            resource: None,
         };
         assert!(!quick.wait_bound());
     }

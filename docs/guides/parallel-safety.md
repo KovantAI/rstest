@@ -217,6 +217,24 @@ database, a schema, a bound port, a temp directory) must become per-worker
 under parallelism. Bind port `0` to let the OS assign one, or key the name on
 `RSTEST_WORKER_ID`.
 
+### Plugins that do it for you
+
+Established pytest plugins cover the common cases, and they work the same
+under rstest, pytest and pytest-xdist:
+
+| Shared resource | Plugin | Fixture |
+|---|---|---|
+| a fixed port | [pytest-asyncio](https://pypi.org/project/pytest-asyncio/) | `unused_tcp_port`, `unused_tcp_port_factory` (several per test) |
+| one test database | [pytest-postgresql](https://pypi.org/project/pytest-postgresql/) (template database, per-worker names), [pytest-django](https://pytest-django.readthedocs.io/) (per-worker test database built in) | `postgresql`, `postgresql_proc`; `db` |
+| a shared home directory (`~/.config`, `~/.cache`) | [pytest-home](https://pypi.org/project/pytest-home/) | `tmp_home_dir` |
+| any other per-worker name (schema, Redis prefix, queue) | built in | `worker_id` (above) |
+
+[`rstest audit`](../reference/cli-commands.md#audit) and
+[`rstest migrate-check`](../reference/cli-commands.md#migrate-check) name the
+matching fix in a `CAUSE:` line when a parallel-only failure's error text
+shows one of these collisions ("Address already in use", "database ...
+already exists", a path under `~/.config`).
+
 ## Time-sensitive tests at high concurrency
 
 A class of tests passes at `-n 4` and flakes at `-n 16`: anything

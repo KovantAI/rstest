@@ -152,8 +152,13 @@ only becomes a failure with a hang backstop: pass `--worker-timeout SECS` (off
 by default), or `--timeout SECS`, which also arms it.
 
 **Upstream fix.** Bind an **ephemeral** port (`port=0`, then read back the
-assigned port), the standard xdist-safe pattern. Then the fixture duplicates
-safely per worker.
+assigned port), the standard xdist-safe pattern; pytest-asyncio's
+`unused_tcp_port` fixture does it. Then the fixture duplicates safely per
+worker. The other two classic collisions: one shared test database ->
+pytest-postgresql or pytest-django (both give each worker its own), or a
+`worker_id` suffix on the name; a shared `~/.config` / `HOME` -> pytest-home's
+`tmp_home_dir`. `audit` and `migrate-check` print a `CAUSE:` line naming the
+fix when the error text shows the collision.
 
 **Stopgap.** `@pytest.mark.serial` if the resource is truly single-instance, or
 `--dist loadgroup` + `@pytest.mark.xdist_group("name")` to keep all tests using

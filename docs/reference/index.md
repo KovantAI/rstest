@@ -7,7 +7,7 @@ Evaluating rstest? Read [Compatibility](../concepts/compatibility.md),
 
 - [CLI flags](cli.md): every rstest flag, grouped by topic, and the rule for forwarding pytest flags
 - [CLI subcommands](cli-commands.md): `try`, `migrate-check`, `xdist-removal-check`, `audit`, `bisect`, `replay`, `shard-verify`, `cache-compact`, `explain`, `verify-vendor`, `install-skills`
-- [Markers](markers.md): `serial`, `flaky`, `xdist_group`, `timeout`
+- [Markers](markers.md): `serial`, `flaky`, `xdist_group`, `timeout`, `network`
 - [Environment variables](environment.md): the `RSTEST_*` contract
 - [Exit codes](exit-codes.md): what each code means and which flags gate on it
 - [Report JSON](report-json.md): walkthrough and examples for `--report-json`, discovery, streaming, doctor, and migrate-check output
