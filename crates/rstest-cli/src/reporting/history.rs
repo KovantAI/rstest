@@ -19,6 +19,9 @@ use crate::cache;
 use crate::reporting::report::{Run, TestEntry};
 
 pub const FILE: &str = "history.msgpack";
+/// Bump on any change a released build can't read. Unreleased so far: the
+/// layout still changes under 1, and a dev build's cache in an older layout
+/// is a corrupt one (delete it).
 const SCHEMA: u32 = 1;
 
 /// Outcome names, indexed by [`Entry::outcome`]. Append only: the index is
@@ -329,6 +332,32 @@ fn entry_for(e: &TestEntry) -> Option<Entry> {
     })
 }
 
+/// Decode a msgpack history, either struct encoding. `Ok(None)` is a
+/// well-formed history of another schema: unreadable here, but not damage.
+/// An older schema's fields may not decode at all, so on an error only its
+/// schema number is peeked at.
+pub fn from_msgpack(raw: &[u8]) -> Result<Option<History>, rmp_serde::decode::Error> {
+    match rmp_serde::from_slice::<History>(raw) {
+        Ok(h) => Ok((h.schema == SCHEMA).then_some(h)),
+        Err(e) => match msgpack_schema(raw) {
+            Some(s) if s != u64::from(SCHEMA) => Ok(None),
+            _ => Err(e),
+        },
+    }
+}
+
+/// Whether a msgpack history was written by a newer build: data this one
+/// can't read, but must not overwrite either.
+pub fn from_newer_build(raw: &[u8]) -> bool {
+    msgpack_schema(raw).is_some_and(|s| s > u64::from(SCHEMA))
+}
+
+/// The `schema` of a msgpack history, either struct encoding.
+fn msgpack_schema(raw: &[u8]) -> Option<u64> {
+    let v = rmp_serde::from_slice::<serde_json::Value>(raw).ok()?;
+    v.get("schema").or_else(|| v.get(0))?.as_u64()
+}
+
 pub fn load() -> History {
     load_from(&cache::file(FILE))
 }
@@ -338,8 +367,7 @@ pub fn load() -> History {
 pub fn load_from(path: &std::path::Path) -> History {
     let mut h: History = std::fs::read(path)
         .ok()
-        .and_then(|b| rmp_serde::from_slice::<History>(&b).ok())
-        .filter(|h| h.schema == SCHEMA)
+        .and_then(|b| from_msgpack(&b).ok().flatten())
         .unwrap_or_default();
     h.age(
         crate::time::now_epoch_secs(),
