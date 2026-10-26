@@ -176,10 +176,7 @@ pub fn changed_files_from_git(dir: &Path, rev: Option<&str>) -> Result<Vec<PathB
         files.insert(PathBuf::from(line));
     }
     // Untracked files are changes too (ls-files is dir-relative by default).
-    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
-    for line in out.lines() {
-        files.insert(PathBuf::from(line));
-    }
+    files.extend(untracked_files(dir)?);
     // Runner artifacts churn on every run and must not defeat selection
     // (users usually gitignore them, but don't rely on it).
     Ok(files
@@ -200,6 +197,36 @@ fn is_selectable_path(f: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with(".coverage") || n == "coverage.xml")
+}
+
+/// An untracked tool artifact no stock `.gitignore` lists; left over, it
+/// would stamp every run `-dirty` (see [`crate::incremental::checkout_dirty`]).
+/// Untracked only: a project may commit one (a `.benchmarks/` baseline), and
+/// an edit to that is a real change. The tool cache dirs match at any depth
+/// (nobody keeps test data in a `.mypy_cache`); a coverage report only at the
+/// top of `dir`, where the tool writes it, since `tests/data/coverage.json`
+/// may be a fixture.
+// ponytail: a monorepo project's own `pkg/coverage.json` still dirties the
+// whole-checkout stamp; anchor to the project rootdir too if that bites.
+fn is_untracked_artifact(f: &Path) -> bool {
+    f.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str().unwrap_or(""),
+            ".hypothesis" | ".benchmarks" | ".mypy_cache" | ".ruff_cache"
+        )
+    }) || f
+        .to_str()
+        .is_some_and(|n| matches!(n, "coverage.json" | "coverage.lcov"))
+}
+
+/// `git ls-files --others` in `dir`, tool artifacts left out.
+fn untracked_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok(out
+        .lines()
+        .map(PathBuf::from)
+        .filter(|f| !is_untracked_artifact(f))
+        .collect())
 }
 
 /// What changed in one file, from `git diff -U0`. The coverage index is keyed by
@@ -245,9 +272,8 @@ pub fn changed_line_ranges(dir: &Path, rev: Option<&str>) -> Result<ChangedLines
     }
     // Untracked files are all-new code with no old-side lines: mark
     // has_new_code so the caller falls back to import-graph for them.
-    let out = git_stdout_in(dir, &["ls-files", "--others", "--exclude-standard"])?;
-    for line in out.lines() {
-        map.entry(PathBuf::from(line)).or_insert(FileChange {
+    for f in untracked_files(dir)? {
+        map.entry(f).or_insert(FileChange {
             old_ranges: Vec::new(),
             has_new_code: true,
         });

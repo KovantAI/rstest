@@ -291,11 +291,20 @@ mod packed_history {
         Ok(base64::engine::general_purpose::STANDARD.encode(gz.finish()?))
     }
 
-    pub fn decode(s: &str) -> anyhow::Result<History> {
+    fn unpack(s: &str) -> anyhow::Result<Vec<u8>> {
         let gz = base64::engine::general_purpose::STANDARD.decode(s)?;
         let mut raw = Vec::new();
         flate2::read::GzDecoder::new(gz.as_slice()).read_to_end(&mut raw)?;
-        Ok(rmp_serde::from_slice(&raw)?)
+        Ok(raw)
+    }
+
+    pub fn decode(s: &str) -> anyhow::Result<History> {
+        Ok(crate::reporting::history::from_msgpack(&unpack(s)?)?.unwrap_or_default())
+    }
+
+    /// Whether a packed history was written by a newer build (see [`super::compact_remote_with`]).
+    pub fn from_newer_build(s: &str) -> bool {
+        unpack(s).is_ok_and(|raw| crate::reporting::history::from_newer_build(&raw))
     }
 
     pub fn serialize<S: Serializer>(h: &History, s: S) -> Result<S::Ok, S::Error> {
@@ -304,6 +313,9 @@ mod packed_history {
 
     /// Strict: a damaged value fails the base read like any other corrupt
     /// field, so compaction never rewrites the base with the history dropped.
+    /// Another schema's history (an older or newer build's) reads as empty:
+    /// failing there would break every pull until the base is deleted by hand.
+    /// Compaction refuses a newer build's instead (see [`super::compact_remote_with`]).
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<History, D::Error> {
         decode(&String::deserialize(d)?).map_err(|e| de::Error::custom(format!("history: {e:#}")))
     }
@@ -1169,7 +1181,25 @@ pub fn compact_remote_with(
     policy: &RetentionPolicy,
 ) -> Result<(usize, usize)> {
     let base = match t.read_base()? {
-        Some(bytes) => Some(serde_json::from_slice::<Base>(&bytes).context("parsing base.json")?),
+        Some(bytes) => {
+            // A newer build's history reads as empty here: writing the base
+            // back would destroy it. An older build's is dropped: nothing
+            // from here on reads it.
+            let newer = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| {
+                    v.get("history")?
+                        .as_str()
+                        .map(packed_history::from_newer_build)
+                })
+                .unwrap_or(false);
+            if newer {
+                anyhow::bail!(
+                    "base.json history was written by a newer rstest; compact with that version"
+                );
+            }
+            Some(serde_json::from_slice::<Base>(&bytes).context("parsing base.json")?)
+        }
         None => None,
     };
     let ids = t.list_segment_ids()?;
@@ -1781,6 +1811,70 @@ mod tests {
             let doc = format!(r#"{{"schema":1,"durations":{{"t::a":1.5}},"history":{bad}}}"#);
             assert!(serde_json::from_str::<Base>(&doc).is_err(), "{bad}");
         }
+    }
+
+    /// A base whose history is a hand-built msgpack `doc` (positional, like
+    /// schema 1 wrote), with one duration beside it.
+    fn base_with_history(doc: serde_json::Value) -> Vec<u8> {
+        let raw = rmp_serde::to_vec(&doc).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &raw).unwrap();
+        let packed = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            gz.finish().unwrap(),
+        );
+        format!(r#"{{"schema":1,"durations":{{"t::a":1.5}},"history":"{packed}"}}"#).into_bytes()
+    }
+
+    /// Schema `n` in a shape this build can't decode (string outcomes,
+    /// `workers`), so only its schema number is peeked at.
+    fn history_of_schema(n: u64) -> serde_json::Value {
+        serde_json::json!([
+            n,
+            [[0, "run-0", 1000, null, "env", 4]],
+            {"t::a": [[0, "passed", 0.1, 0.0]]}
+        ])
+    }
+
+    #[test]
+    fn base_history_of_another_schema_reads_as_empty_not_corrupt() {
+        for n in [0, 99] {
+            let root = tmp_dir(&format!("pull-other-history-{n}"));
+            let t = DirTransport::new(&root);
+            t.write_base(&base_with_history(history_of_schema(n)))
+                .unwrap();
+            let m = pull(&t, &mut Sink::captured().0).unwrap();
+            assert!(m.history.is_empty(), "schema {n}");
+            assert_eq!(m.durations.get("t::a"), Some(&1.5), "schema {n}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn compaction_keeps_a_newer_builds_history_and_drops_an_older_ones() {
+        let policy = RetentionPolicy {
+            keep_last: Some(0),
+            max_age: None,
+        };
+        // Newer: unreadable here, so compacting would write it back empty.
+        let root = tmp_dir("compact-newer-history");
+        let t = DirTransport::new(&root);
+        let doc = base_with_history(history_of_schema(99));
+        t.write_base(&doc).unwrap();
+        push(&t, &seg("s1", 10, &[("t::a", 2.0)], &[])).unwrap();
+        assert!(compact_remote_with(&t, &mut Sink::captured().0, 100, &policy).is_err());
+        assert_eq!(t.read_base().unwrap().unwrap(), doc);
+        assert_eq!(t.list_segment_ids().unwrap(), vec!["s1".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+        // Older: no build from here on reads it, so it may go.
+        let root = tmp_dir("compact-older-history");
+        let t = DirTransport::new(&root);
+        t.write_base(&base_with_history(history_of_schema(0)))
+            .unwrap();
+        push(&t, &seg("s1", 10, &[("t::a", 2.0)], &[])).unwrap();
+        assert!(compact_remote_with(&t, &mut Sink::captured().0, 100, &policy).is_ok());
+        assert!(t.list_segment_ids().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

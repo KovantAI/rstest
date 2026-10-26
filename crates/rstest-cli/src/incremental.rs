@@ -455,6 +455,75 @@ mod tests {
     }
 
     #[test]
+    fn untracked_tool_artifacts_leave_the_tree_clean() {
+        // `--cov-report=json|lcov` and Hypothesis leave these untracked; the
+        // stock Python .gitignore misses them. Counting them would stamp every
+        // later run -dirty and freeze the since-green baseline for good.
+        let repo = tmp("artifacts-clean");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::write(repo.join("coverage.json"), "{}").unwrap();
+        std::fs::write(repo.join("coverage.lcov"), "").unwrap();
+        for d in [
+            ".hypothesis/examples",
+            ".benchmarks",
+            ".mypy_cache",
+            ".ruff_cache",
+        ] {
+            std::fs::create_dir_all(repo.join(d)).unwrap();
+            std::fs::write(repo.join(d).join("x"), "x").unwrap();
+        }
+        assert!(!checkout_dirty(&repo, &[]));
+        assert!(!tree_dirty(&repo, &[]));
+        // A real untracked file still counts.
+        std::fs::write(repo.join("conftest.py"), "").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn untracked_fixture_named_like_a_coverage_report_is_a_change() {
+        // Only the tool's own top-level report is an artifact; a new fixture
+        // deeper down is a change, for the dirty stamp and `--changed` alike.
+        let repo = tmp("artifacts-fixture");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::create_dir_all(repo.join("tests").join("data")).unwrap();
+        std::fs::write(repo.join("tests").join("data").join("coverage.json"), "{}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        assert!(tree_dirty(&repo, &[]));
+        let changed = crate::select::changed_files_from_git(&repo, None).unwrap();
+        assert_eq!(changed, vec![PathBuf::from("tests/data/coverage.json")]);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn committed_tool_artifact_names_are_real_changes() {
+        // A committed benchmark baseline or coverage.json fixture: editing it
+        // is a change, whatever its name.
+        let repo = tmp("artifacts-tracked");
+        std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
+        std::fs::create_dir_all(repo.join(".benchmarks")).unwrap();
+        std::fs::write(repo.join(".benchmarks").join("base.json"), "{}").unwrap();
+        std::fs::write(repo.join("coverage.json"), "{}").unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "-f", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        assert!(!checkout_dirty(&repo, &[]));
+        std::fs::write(repo.join(".benchmarks").join("base.json"), "{\"x\":1}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        assert!(tree_dirty(&repo, &[]));
+        git(&repo, &["checkout", "--", "."]);
+        std::fs::write(repo.join("coverage.json"), "{\"x\":1}").unwrap();
+        assert!(checkout_dirty(&repo, &[]));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
     fn green_baseline_advances_only_on_a_clean_tree() {
         let repo = tmp("green-if-clean");
         std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
