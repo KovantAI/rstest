@@ -787,11 +787,19 @@ mod tests {
             md.contains("| `tests/test_a.py::test_fetch` | api.example.com:443 (93.184.215.14) |"),
             "{md}"
         );
+        assert!(!out.contains("... and"), "{out}");
+        // More tests than listed: the rest are counted.
+        let mut r = report(12);
+        r.network.as_mut().unwrap().tests_with_network = 25;
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(cap.out().contains("  ... and 24 more"), "{}", cap.out());
         let mut r = report(12);
         r.network = None;
         let (mut sink, cap) = Sink::captured();
         render(&mut sink, &r);
         assert!(!cap.out().contains("NETWORK ACCESS"));
+        assert!(!render_markdown(&r).contains("Network access"));
     }
 
     #[test]

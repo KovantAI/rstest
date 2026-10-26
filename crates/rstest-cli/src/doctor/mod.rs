@@ -1187,6 +1187,25 @@ mod tests {
     }
 
     #[test]
+    fn network_access_ranks_most_destinations_first_and_keeps_top_20() {
+        let mut run = Run::default();
+        assert!(network_access(&run).is_none());
+        for i in 0..22 {
+            run.network
+                .insert(format!("t.py::one_{i:02}"), vec!["a:80".into()]);
+        }
+        run.network
+            .insert("t.py::two".into(), vec!["a:80".into(), "b:443".into()]);
+        let n = network_access(&run).unwrap();
+        assert_eq!(n.tests_with_network, 23);
+        let ids: Vec<&str> = n.tests.iter().map(|t| t.nodeid.as_str()).collect();
+        assert_eq!(ids.len(), 20);
+        // Most destinations first, then by nodeid.
+        assert_eq!(ids[..3], ["t.py::two", "t.py::one_00", "t.py::one_01"]);
+        assert_eq!(ids[19], "t.py::one_18");
+    }
+
+    #[test]
     fn detect_leaks_flags_positive_deltas_worst_first() {
         let mut run = Run::default();
         teardown_with_leak(&mut run, "t.py::clean", None, None);
