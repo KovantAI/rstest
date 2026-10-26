@@ -838,3 +838,52 @@ def gate_explain(g, args, binary):
     g.run("test_g.py", cwd=gp, env_extra={"PYTHONPATH": str(gp)})
     got = last_pass_commit()
     check("explain: run with uncommitted edits records HEAD-dirty", got == f"{sha}-dirty", f"{got}")
+
+
+def gate_what_changed_since_green(g, args, binary):
+    print("== what changed since green ==")
+    # A green run records its environment; a red run after a commit and an
+    # environment change names both; `rstest since-green` shows the same diff.
+    sg = g.tmp / "since_green_diff"
+    g.write(
+        "since_green_diff/test_s.py",
+        "import os\ndef test_tz(): assert os.environ.get('SG_FAIL') != '1'\n",
+    )
+    git_init_commit(sg)
+    r = g.run(".", "-n", "2", cwd=sg, env_extra={"TZ": "UTC"})
+    check(
+        "since-green: a green run records its environment",
+        r.returncode == 0 and (sg / ".rstest_cache" / "green_env.json").exists(),
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    git(sg, "commit", "-q", "--allow-empty", "-m", "bump the clock config")
+    r = g.run(".", "-n", "2", cwd=sg, env_extra={"TZ": "Asia/Tokyo", "SG_FAIL": "1"})
+    check(
+        "since-green: a red run prints the commits and environment changed since green",
+        r.returncode == 1
+        and "rstest: changed since the last green run" in r.stderr
+        and "1 commit(s):" in r.stderr
+        and "bump the clock config" in r.stderr
+        and "TZ UTC -> Asia/Tokyo" in r.stderr
+        and "changed since" not in r.stdout,
+        f"rc={r.returncode} " + r.stderr[-500:],
+    )
+    r = g.run("since-green", "--json", cwd=sg, env_extra={"TZ": "Asia/Tokyo"})
+    doc = json.loads(r.stdout) if r.returncode == 0 else {}
+    check(
+        "since-green --json: run-less diff against the last green run",
+        doc.get("found") is True
+        and [c["subject"] for c in doc.get("commits") or []] == ["bump the clock config"]
+        and {"name": "TZ", "green": "UTC", "now": "Asia/Tokyo"} in doc.get("env", [])
+        and doc.get("packages") == [],
+        f"rc={r.returncode} " + r.stdout[-400:] + r.stderr[-200:],
+    )
+    # A new green run moves the snapshot; a red run with nothing changed since
+    # stays quiet (no block on every red cycle of a local edit loop).
+    g.run(".", "-n", "2", cwd=sg, env_extra={"TZ": "Asia/Tokyo"})
+    r = g.run(".", "-n", "2", cwd=sg, env_extra={"TZ": "Asia/Tokyo", "SG_FAIL": "1"})
+    check(
+        "since-green: a red run with nothing changed prints no block",
+        r.returncode == 1 and "changed since the last green run" not in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )

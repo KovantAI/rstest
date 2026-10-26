@@ -138,6 +138,17 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// What changed since the last green run, without running tests: commits,
+    /// interpreter version, installed packages and a few test-relevant
+    /// environment variables. Every whole-suite run that exits 0 on a clean
+    /// tree records the state it compares against
+    /// (`.rstest_cache/green_env.json`).
+    SinceGreen {
+        /// Emit the diff as JSON (schema-stamped) to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Install the rstest agent skills (`migrate-to-rstest`, `rstest-triage`)
     /// bundled with this binary, so they match its flags and subcommands.
     /// Writes `.claude/skills/` in the current directory by default (commit it
@@ -853,6 +864,7 @@ const SUBCOMMANDS: &[&str] = &[
     "replay",
     "explain",
     "flaky",
+    "since-green",
     "install-skills",
 ];
 
@@ -1168,7 +1180,13 @@ pub(crate) fn split_args(argv: impl IntoIterator<Item = String>) -> (Vec<String>
     // its real session args from the journal, not argv.
     let consumes_all = matches!(
         sub.as_str(),
-        "shard-verify" | "replay" | "bisect" | "explain" | "flaky" | "install-skills"
+        "shard-verify"
+            | "replay"
+            | "bisect"
+            | "explain"
+            | "flaky"
+            | "since-green"
+            | "install-skills"
     );
     own.push(sub);
     if consumes_all {

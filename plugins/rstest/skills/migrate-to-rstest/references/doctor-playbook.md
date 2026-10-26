@@ -72,6 +72,16 @@ onto their tests. It can't see markers that already exist, so skip tests
 that already carry a fitting one. Not a speed fix: it makes a hang fail fast
 with a traceback instead of eating the job's timeout.
 
+## DURATION DRIFT: slow creep
+
+Tests whose call time rose step by step across their recorded runs (older,
+middle and newer third of 9+ passing runs, 1.5x and 0.2s overall), each step
+too small for `--durations-regress`.
+
+**Action:** look for state that grows between runs: a table, fixture file or
+cache that is never cleaned, or a dependency that got slower release by
+release. `rstest explain <nodeid>` shows the runs.
+
 ## Runner tuning (secondary)
 
 Only after the above:

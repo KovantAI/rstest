@@ -19,6 +19,17 @@
       "type": "number",
       "format": "double"
     },
+    "drift": {
+      "description": "Tests whose typical call time crept up across their recorded runs, in\nsteps too small for `--durations-regress`. `null` unless one did.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Drift"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "fixtures": {
       "description": "Fixture setup cost summed across all workers, costliest first (top 50).",
       "type": "array",
@@ -142,7 +153,8 @@
     "fixtures",
     "slowest_files",
     "coverage_waste",
-    "timeouts"
+    "timeouts",
+    "drift"
   ],
   "definitions": {
     "CoverageWaste": {
@@ -172,6 +184,66 @@
         "wasted_seconds",
         "redundant_tests",
         "tests"
+      ]
+    },
+    "Drift": {
+      "description": "Slow creep: a test whose median call time rose from the older third of\nits recorded passing runs to the middle third to the newest, by at least\n1.5x and 0.2s overall.",
+      "type": "object",
+      "properties": {
+        "drifting_tests": {
+          "description": "Tests in this run that drift.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tests": {
+          "description": "The largest rises, worst first (top 10).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DriftTest"
+          }
+        }
+      },
+      "required": [
+        "drifting_tests",
+        "tests"
+      ]
+    },
+    "DriftTest": {
+      "type": "object",
+      "properties": {
+        "middle_median": {
+          "description": "Median over the middle third.",
+          "type": "number",
+          "format": "double"
+        },
+        "newer_median": {
+          "description": "Median over the newest third.",
+          "type": "number",
+          "format": "double"
+        },
+        "nodeid": {
+          "description": "The test.",
+          "type": "string"
+        },
+        "older_median": {
+          "description": "Median call-phase seconds over the oldest third of its passing runs.",
+          "type": "number",
+          "format": "double"
+        },
+        "runs": {
+          "description": "Passing runs the medians come from.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "nodeid",
+        "older_median",
+        "middle_median",
+        "newer_median",
+        "runs"
       ]
     },
     "FileEntry": {

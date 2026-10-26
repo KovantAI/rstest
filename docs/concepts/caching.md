@@ -41,6 +41,15 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   `rstest replay` or `--dist each`. Shared through `--cache-push` /
   `--cache-pull` (each pushed run carries its own entries; see
   [Shared cache](#shared-cache-backend)). Safe to delete.
+- `green_env.json`: what the last run that exited 0 ran with: its commit,
+  the interpreter version, installed third-party packages (read from the
+  venv's `site-packages`, the project's own editable install excluded) and a
+  few test-relevant environment variables (`PYTEST_ADDOPTS`, `PYTHONPATH`,
+  `PYTHONHASHSEED`, `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`).
+  A red run diffs against it; see
+  [What changed since green](../guides/since-green.md#what-changed-since-green).
+  Not written by `rstest replay`. Not shared through the shared cache. Safe
+  to delete.
 - `coverage_index.json`: line→test index (which tests' coverage executed
   each source line), written by any [`--cov-context=test`](../guides/coverage.md#per-test-contexts-cov-contexttest)
   run. Lets [`--changed`](../guides/changed.md) select only the tests hitting

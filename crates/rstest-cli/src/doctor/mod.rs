@@ -93,6 +93,9 @@ pub struct DoctorReport {
     /// from each test's slowest recorded passing run (call phase). `null`
     /// until some test in this run has 5 passing runs in the run history.
     timeouts: Option<TimeoutAdvice>,
+    /// Tests whose typical call time crept up across their recorded runs, in
+    /// steps too small for `--durations-regress`. `null` unless one did.
+    drift: Option<Drift>,
     /// Tests that leaked threads / fds (created by the test, still open after
     /// its teardown). Empty
     /// unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`).
@@ -160,6 +163,95 @@ struct TimeoutOverride {
     timeout: u64,
 }
 
+/// Slow creep: a test whose median call time rose from the older third of
+/// its recorded passing runs to the middle third to the newest, by at least
+/// 1.5x and 0.2s overall.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct Drift {
+    /// Tests in this run that drift.
+    drifting_tests: usize,
+    /// The largest rises, worst first (top 10).
+    tests: Vec<DriftTest>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct DriftTest {
+    /// The test.
+    nodeid: String,
+    /// Median call-phase seconds over the oldest third of its passing runs.
+    older_median: f64,
+    /// Median over the middle third.
+    middle_median: f64,
+    /// Median over the newest third.
+    newer_median: f64,
+    /// Passing runs the medians come from.
+    runs: usize,
+}
+
+/// Passing runs a test needs before its trend is judged (three per window).
+const DRIFT_MIN_RUNS: usize = 9;
+const DRIFT_SHOWN: usize = 10;
+
+/// Older/middle/newer medians of `calls` (oldest first) when they rise step
+/// by step, at least 1.5x and 0.2s overall.
+fn drift_of(calls: &[f64]) -> Option<(f64, f64, f64)> {
+    if calls.len() < DRIFT_MIN_RUNS {
+        return None;
+    }
+    let third = calls.len() / 3;
+    let med = |w: &[f64]| {
+        let mut w = w.to_vec();
+        w.sort_by(f64::total_cmp);
+        crate::explain::median(&w)
+    };
+    let (a, b, c) = (
+        med(&calls[..third])?,
+        med(&calls[third..2 * third])?,
+        med(&calls[2 * third..])?,
+    );
+    (a < b && b < c && c >= a * 1.5 && c - a >= 0.2).then_some((a, b, c))
+}
+
+fn drift(run: &Run, history: &crate::reporting::history::History) -> Option<Drift> {
+    let round = |x: f64| (x * 1e4).round() / 1e4;
+    let mut tests: Vec<DriftTest> = run
+        .tests()
+        .keys()
+        .filter_map(|id| {
+            let calls: Vec<f64> = history
+                .series(id)
+                .iter()
+                .filter(|(_, e)| matches!(e.outcome_name(), "passed" | "flaky"))
+                .filter_map(|(_, e)| e.call.map(f64::from))
+                .collect();
+            let (a, b, c) = drift_of(&calls)?;
+            Some(DriftTest {
+                nodeid: id.clone(),
+                older_median: round(a),
+                middle_median: round(b),
+                newer_median: round(c),
+                runs: calls.len(),
+            })
+        })
+        .collect();
+    if tests.is_empty() {
+        return None;
+    }
+    tests.sort_by(|x, y| {
+        (y.newer_median - y.older_median)
+            .total_cmp(&(x.newer_median - x.older_median))
+            .then_with(|| x.nodeid.cmp(&y.nodeid))
+    });
+    let drifting_tests = tests.len();
+    tests.truncate(DRIFT_SHOWN);
+    Some(Drift {
+        drifting_tests,
+        tests,
+    })
+}
+
 /// Overrides listed in a report (`override_count` has the total).
 const TIMEOUT_OVERRIDES_SHOWN: usize = 20;
 
@@ -212,9 +304,10 @@ fn timeout_advice(
 }
 
 impl DoctorReport {
-    /// Add the history-based sections ([`TimeoutAdvice`]).
+    /// Add the history-based sections ([`TimeoutAdvice`], [`Drift`]).
     pub fn with_history(mut self, run: &Run, history: &crate::reporting::history::History) -> Self {
         self.timeouts = timeout_advice(run, history);
+        self.drift = drift(run, history);
         self
     }
 }
@@ -561,6 +654,7 @@ pub fn analyze(
         slowest_files: files,
         coverage_waste,
         timeouts: None,
+        drift: None,
         leaks,
     }
 }
@@ -755,6 +849,61 @@ mod timeout_tests {
     }
 
     #[test]
+    fn drift_needs_a_steady_rise_of_1_5x_and_0_2s() {
+        let creep: Vec<f64> = (0..12).map(|i| 0.4 + 0.03 * f64::from(i)).collect();
+        let (a, b, c) = drift_of(&creep).unwrap();
+        assert!(a < b && b < c);
+        // Under 9 runs: not judged.
+        assert!(drift_of(&creep[..8]).is_none());
+        // Noisy but flat: medians don't rise step by step.
+        let flat = [1.0, 2.0, 1.5, 1.0, 2.0, 1.5, 1.0, 2.0, 1.5];
+        assert!(drift_of(&flat).is_none());
+        // Rising, but only 10%: noise, not drift.
+        let small: Vec<f64> = (0..9).map(|i| 1.0 + 0.012 * f64::from(i)).collect();
+        assert!(drift_of(&small).is_none());
+        // 2x, but only 0.1s overall: too small to matter.
+        let tiny: Vec<f64> = (0..9).map(|i| 0.1 + 0.0125 * f64::from(i)).collect();
+        assert!(drift_of(&tiny).is_none());
+        // A jump then flat: medians 1, 3, 3 don't rise twice.
+        let jump = [1.0, 1.0, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0];
+        assert!(drift_of(&jump).is_none());
+    }
+
+    #[test]
+    fn drift_section_lists_creeping_tests_in_this_run() {
+        let mut h = History::default();
+        for seq in 0..12u64 {
+            h.runs.push(RunMeta {
+                seq,
+                id: format!("r{seq}"),
+                epoch: seq,
+                commit: None,
+                env: String::new(),
+            });
+            for (id, secs) in [
+                ("t.py::creep", 0.4 + 0.05 * seq as f32),
+                ("t.py::steady", 0.5),
+                ("t.py::gone", 0.1 + 0.2 * seq as f32),
+            ] {
+                h.tests.entry(id.into()).or_default().push_back(Entry {
+                    run: seq,
+                    outcome: crate::reporting::history::outcome_code("passed").unwrap(),
+                    call: Some(secs),
+                    setup: 0.0,
+                });
+            }
+        }
+        let mut run = Run::default();
+        record_test(&mut run, "t.py::creep", 0, 1.0);
+        record_test(&mut run, "t.py::steady", 0, 0.5);
+        let d = drift(&run, &h).unwrap();
+        assert_eq!(d.drifting_tests, 1);
+        assert_eq!(d.tests[0].nodeid, "t.py::creep");
+        assert_eq!(d.tests[0].runs, 12);
+        assert!(drift(&run, &History::default()).is_none());
+    }
+
+    #[test]
     fn timeout_for_is_3x_with_a_one_second_floor() {
         assert_eq!(timeout_for(0.1), 2); // 0.1 + 1 = 1.1 -> 2
         assert_eq!(timeout_for(0.5), 2); // 1.5 -> 2
@@ -904,6 +1053,16 @@ pub(crate) mod testutil {
                     slowest_seconds: 8.4,
                     runs: 12,
                     timeout: 26,
+                }],
+            }),
+            drift: Some(Drift {
+                drifting_tests: 1,
+                tests: vec![DriftTest {
+                    nodeid: "tests/test_a.py::test_creep".into(),
+                    older_median: 0.4,
+                    middle_median: 0.55,
+                    newer_median: 0.7,
+                    runs: 30,
                 }],
             }),
             leaks: Vec::new(),

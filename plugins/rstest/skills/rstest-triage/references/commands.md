@@ -11,6 +11,7 @@ triaging.
 - audit
 - explain
 - flaky
+- since-green
 - --shuffle
 - Hangs: --timeout and --worker-timeout
 - Flaky controls: --reruns, --reruns-only-known-flaky, --quarantine, --auto-quarantine
@@ -163,6 +164,23 @@ $ rstest flaky --top 0 --json # every flipping test, for a dashboard
   fewer flips than the older half; else `steady`.
 - Use it to answer "which tests are flaky?" or to review the auto-quarantine
   set; then `explain` one test, and `bisect` it before calling it flaky.
+
+## since-green
+
+```console
+$ rstest since-green          # what changed since the last green run
+$ rstest since-green --json
+```
+
+- Every run that exits 0 records its commit, interpreter version, installed
+  third-party packages and a few env vars (`PYTEST_ADDOPTS`, `PYTHONPATH`,
+  `PYTHONHASHSEED`, `PYTHONWARNINGS`, `PYTHONUTF8`, `TZ`, `LANG`, `LC_ALL`) in
+  `.rstest_cache/green_env.json`. A run with failing tests prints the diff on
+  stderr when anything changed.
+- "nothing: same commit, interpreter, packages and environment" means the
+  cause is in the tests or what they call: go to `explain`, `flaky`, `bisect`.
+- Packages changed and no commits: a dependency bump. Pin it or fix the
+  incompatibility. Not the same as the `--since-green` flag (test selection).
 
 ## --shuffle
 

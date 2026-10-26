@@ -358,7 +358,7 @@ reference doesn't spell out:
   time in the document (`test_time_seconds`, worker load, long pole, slowest
   files, wait-bound and coverage-waste durations) is the whole protocol:
   setup + call + teardown, so fixture time counts. The exception is
-  `timeouts`: its `slowest_seconds` is the call phase, read from the run
+  `timeouts` and `drift`: their times are the call phase, read from the run
   history across recent runs (not this run), because the call phase is what
   `--timeout` limits.
   `cpu_time_seconds` sums CPU time over the same span (including child
@@ -381,7 +381,10 @@ reference doesn't spell out:
       (`--cov --cov-context=test`) and at least one slow test qualified;
     - `timeouts` until at least one test in this run has 5 passing runs in
       the run history (`.rstest_cache/history.msgpack`). `overrides` is empty
-      when every judged test fits under `suite_timeout`.
+      when every judged test fits under `suite_timeout`;
+    - `drift` unless a test in this run has 9 or more passing runs whose
+      older, middle and newer medians rise step by step (by 1.5x and 0.2 s
+      overall). Like `timeouts`, its times are call phase, from the history.
 - **`leaks`** (`{nodeid, threads, fds}`) is omitted when empty, and empty
   unless leak checking ran (`--doctor` or
   [`--fail-on-leak`](cli.md#-fail-on-leak)).
