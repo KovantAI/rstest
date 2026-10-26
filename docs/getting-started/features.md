@@ -33,6 +33,7 @@ Everything pytest does (via a vendored pytest core), plus:
 | Flaky handling | `--reruns N`, `@pytest.mark.flaky`, `--only-rerun` | failed-then-passed = flaky (green run, counted, listed); crash-aware. Works at any `-n`: at `-n 0/1`, `--reruns` runs a one-worker pool instead of single-worker mode |
 | Quarantine | `--quarantine FILE`, `--auto-quarantine[=N]` (on by default) | listed tests, and tests the run history shows flipping pass/fail 3+ times, fail without reddening the run; capped by `--auto-quarantine-max` so a broken environment stays red ([Flaky tests](../guides/flaky-tests.md)) |
 | Flaky report | `rstest flaky` | ranks tests that flip between pass and fail, with trend and the auto-quarantine set; `--json` for dashboards |
+| History dashboard | `rstest report` | self-contained HTML across recorded runs: failing and flaky tests per run, test time per run, flaky ranking, slowest tests, drift |
 | Test dossier | `rstest explain NODEID` | one test's timing, flakes, outcome strip, the commits between its last pass and first failure, and whether the environment changed |
 | What changed since green | `rstest since-green`, automatic on a red run | commits, interpreter, package and environment changes since the last run that exited 0 ([guide](../guides/since-green.md#what-changed-since-green)) |
 | Duration regression gate | `--durations-regress RATIO` | fails the run when a test got slower than its history median (or last time) beyond its usual noise ([Catching slowdowns](../guides/slowdowns.md)) |

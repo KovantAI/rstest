@@ -29,7 +29,7 @@ what each one accepts.
 
 - **Adoption and parallel safety:** [`try`](#try), [`migrate-check`](#migrate-check), [`xdist-removal-check`](#xdist-removal-check), [`audit`](#audit), [`bisect <nodeid>`](#bisect-nodeid), [`replay`](#replay)
 - **CI and the shared cache:** [`shard-verify`](#shard-verify), [`cache-compact`](#cache-compact)
-- **Inspection and integrity:** [`explain`](#explain), [`flaky`](#flaky), [`since-green`](#since-green), [`verify-vendor`](#verify-vendor)
+- **Inspection and integrity:** [`explain`](#explain), [`flaky`](#flaky), [`report`](#report), [`since-green`](#since-green), [`verify-vendor`](#verify-vendor)
 - **Agent skills:** [`install-skills`](#install-skills)
 
 ## Adoption and parallel safety
@@ -714,6 +714,38 @@ interpreter, runs no tests, and exits `0`. To see a history that CI builds on
 sharded or ephemeral runners, pull it first: any run with `--cache-pull`
 merges the pushed runs into the local file
 ([`--cache-remote`](cli.md#-cache-remote-urldir-cache-pull-cache-push)).
+
+### `report`
+
+Write a self-contained HTML dashboard of the per-test run history, without
+running anything. [`--html`](cli.md#-html-path) shows one run; this shows the
+trend across the recorded runs:
+
+- tiles: tests tracked, flaky tests, tests the next run
+  [auto-quarantines](cli.md#-auto-quarantinen), and the last green run;
+- **Failing and flaky tests per run** and **Test call time per run**, one
+  column per run, oldest first, with a tooltip on hover or keyboard focus;
+- the flaky ranking (the same as [`rstest flaky`](#flaky), top 20);
+- the slowest tests by median call time, with p95 (tests with 3 or more
+  passing runs);
+- duration drift (the [doctor's rule](../guides/doctor.md#duration-drift));
+- every recorded run as a table (the charts' values without hovering).
+
+```console
+$ rstest report
+rstest: report: wrote .rstest_cache/report.html
+$ rstest report --out ci/history.html
+```
+
+It writes to `.rstest_cache/report.html` unless `--out PATH` says otherwise,
+and opens from disk: no server, no external assets, readable with
+JavaScript off (dates then read "3h ago"). It reads only
+`.rstest_cache/history.msgpack` (plus `green_env.json` for the last green
+run), needs no interpreter, and exits `0`; with no history yet it says so and
+writes nothing. On CI, run it after `--cache-pull` (or on a restored
+`.rstest_cache`) and upload the file as an artifact to see every shard's and
+runner's runs. The oldest runs can be partial: each test keeps only its newest
+`RSTEST_HISTORY_RUNS` runs.
 
 ### `since-green`
 

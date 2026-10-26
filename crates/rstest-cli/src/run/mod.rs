@@ -824,6 +824,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
         }
         Command::Explain { nodeid, json } => crate::explain::run_explain(&mut sink, nodeid, *json),
         Command::Flaky { top, json } => crate::flaky::run_flaky(&mut sink, *top, *json),
+        Command::Report { out } => crate::dashboard::run_report(&mut sink, out.as_deref()),
         // Needs the interpreter's path (its venv's packages), not a session.
         Command::SinceGreen { json } => {
             python().and_then(|py| crate::since_green::run_since_green(&mut sink, &py, *json))
@@ -1441,16 +1442,24 @@ fn apply_quarantine(
         !demoted.is_empty(),
         outcome.run.all_passed(),
         outcome.run.stopped_after.is_some(),
+        !auto_applied,
     );
     Ok(())
 }
 
 /// The exit status once quarantined failures are demoted.
-fn quarantined_exit(status: i32, demoted: bool, all_passed: bool, stopped: bool) -> i32 {
+fn quarantined_exit(
+    status: i32,
+    demoted: bool,
+    all_passed: bool,
+    stopped: bool,
+    over_cap: bool,
+) -> i32 {
     // A session's own count skips quarantined failures, so the single-session
-    // path can report 0 over failures the demotion then keeps (the auto set
-    // over its cap): those still fail the run.
-    if status == 0 && !all_passed {
+    // path can report 0 over the auto set's failures the demotion then keeps
+    // (over its cap): those still fail the run. Any other 0 is the session's
+    // own call (`pytest.exit(returncode=0)`, a plugin), kept as under pytest.
+    if status == 0 && over_cap && !all_passed {
         return 1;
     }
     // pytest exit 1 = tests failed; if every failure was quarantined the run is
@@ -3806,16 +3815,21 @@ mod tests {
 
     #[test]
     fn quarantined_exit_never_passes_kept_failures() {
-        // Session said 0 but a failure survived the demotion: red.
-        assert_eq!(quarantined_exit(0, false, false, false), 1);
-        assert_eq!(quarantined_exit(0, true, false, false), 1);
+        // Session said 0 but the auto set went over its cap, so its failures
+        // survived the demotion: red.
+        assert_eq!(quarantined_exit(0, false, false, false, true), 1);
+        assert_eq!(quarantined_exit(0, true, false, false, true), 1);
+        // Under the cap, a 0 over a kept failure is the session's own call
+        // (pytest.exit(returncode=0), a plugin): kept, as with no quarantine.
+        assert_eq!(quarantined_exit(0, false, false, false, false), 0);
+        assert_eq!(quarantined_exit(0, true, false, false, false), 0);
         // Every failure demoted: green, unless -x / --maxfail stopped it.
-        assert_eq!(quarantined_exit(1, true, true, false), 0);
-        assert_eq!(quarantined_exit(1, true, true, true), 1);
+        assert_eq!(quarantined_exit(1, true, true, false, false), 0);
+        assert_eq!(quarantined_exit(1, true, true, true, false), 1);
         // Nothing demoted, or a severe code: untouched.
-        assert_eq!(quarantined_exit(1, false, false, false), 1);
-        assert_eq!(quarantined_exit(2, true, true, false), 2);
-        assert_eq!(quarantined_exit(0, false, true, false), 0);
+        assert_eq!(quarantined_exit(1, false, false, false, false), 1);
+        assert_eq!(quarantined_exit(2, true, true, false, false), 2);
+        assert_eq!(quarantined_exit(0, false, true, false, false), 0);
     }
 
     #[test]

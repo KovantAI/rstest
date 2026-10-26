@@ -276,7 +276,9 @@ and the auto set as the safety net for flakes nobody has triaged yet.
 its recent outcome strip, whether it is getting worse, and which ones the
 next run will auto-quarantine
 ([`rstest flaky`](../reference/cli-commands.md#flaky)). `--json` feeds a
-dashboard.
+dashboard, and `rstest report` writes an HTML page with the same ranking plus
+failing and flaky tests per run
+([`rstest report`](../reference/cli-commands.md#report)).
 
 **On CI**, persist `.rstest_cache` between runs (see
 [CI quickstart](ci-quickstart.md)), or share it with

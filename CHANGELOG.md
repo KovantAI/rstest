@@ -85,6 +85,12 @@ between 0.x releases and are listed here.
   `drift` in `--doctor-json`) lists tests whose call time rose step by step
   across their recorded runs, in steps too small for `--durations-regress`.
 
+- **`rstest report` writes a history dashboard.** A run-less command that
+  turns the per-test run history into one self-contained HTML page: failing
+  and flaky tests per run, test call time per run, the flaky ranking, the
+  slowest tests, duration drift and the runs table. Written to
+  `.rstest_cache/report.html` (or `--out PATH`); opens from disk, no server.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind

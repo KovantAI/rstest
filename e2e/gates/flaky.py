@@ -489,6 +489,18 @@ def gate_quarantine(g, args, binary):
         and "[auto-quarantined]" not in row("test_a.py::test_broke"),
         f"rc={r.returncode} " + r.stdout[-500:],
     )
+    report = g.tmp / "autoq_report.html"
+    r = g.run("report", "--out", str(report), cwd=adir)
+    page = report.read_text(encoding="utf-8") if report.exists() else ""
+    check(
+        "report: writes the history dashboard with the flaky table",
+        r.returncode == 0
+        and "rstest: report: wrote" in r.stdout
+        and "<h2>Failing and flaky tests per run</h2>" in page
+        and "test_a.py::test_flap" in page
+        and "auto-quarantined</span>" in page,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
     r = g.run("flaky", "--json", "--top", "1", cwd=adir)
     fj = json.loads(r.stdout)
     check(
@@ -707,6 +719,74 @@ def gate_quarantine(g, args, binary):
     check(
         "lazy: -x stops on a failure whose reruns are spent",
         r.returncode == 1 and "stopping after 1 failures" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Lazy, -x stopped by a real failure before every file is collected: the
+    # in-run count never settled, so the post-run cap must come from the
+    # collected count (40+ at 5%, cap 2+), not the few that reported (cap 1).
+    # test_flap.py sorts first (heaviest cached duration); the 20 slow-importing
+    # files keep the queue from draining before test_c stops the run.
+    g.write(
+        "autoq_lazyx/test_flap.py",
+        "import os, pathlib, time\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_c(): assert not os.environ.get('AQ_SLOW')\n\n"
+        "def test_heavy(): time.sleep(0.5)\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(36)),
+    )
+    for i in range(20):
+        g.write(
+            f"autoq_lazyx/test_s{i}.py",
+            "import os, time\nif os.environ.get('AQ_SLOW'): time.sleep(1)\n\ndef test_ok(): pass\n",
+        )
+    lxdir = g.tmp / "autoq_lazyx"
+    git_init_commit(lxdir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=lxdir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("1")
+    r = g.run(
+        ".",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        "-x",
+        "--auto-quarantine-max",
+        "5",
+        cwd=lxdir,
+        env_extra={"AQ_COUNT": str(cnt), "AQ_SLOW": "1"},
+    )
+    check(
+        "auto-quarantine: lazy -x early stop keeps the collected-count cap",
+        r.returncode == 1 and "2 quarantined in" in r.stdout and "over the cap" not in r.stderr,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
+    )
+    # pytest.exit(returncode=0) after a real failure exits 0 under pytest; an
+    # unrelated flapper in the history (auto-quarantine, under its cap) must
+    # not turn that into 1.
+    g.write(
+        "autoq_exit/test_e.py",
+        "import os, pathlib, pytest\n"
+        "N = pathlib.Path(os.environ['AQ_COUNT'])\n\n"
+        "def test_a(): assert int(N.read_text()) % 2 == 0\n\n"
+        "def test_b(): assert not os.environ.get('AQ_EXIT')\n\n"
+        "def test_c():\n"
+        "    if os.environ.get('AQ_EXIT'): pytest.exit('done', returncode=0)\n\n"
+        + "".join(f"def test_ok{i}(): pass\n\n" for i in range(17)),
+    )
+    edir = g.tmp / "autoq_exit"
+    git_init_commit(edir, "init")
+    for i in range(6):
+        cnt.write_text(str(i))
+        g.run(".", "-n", "0", "--auto-quarantine=0", cwd=edir, env_extra={"AQ_COUNT": str(cnt)})
+    cnt.write_text("0")
+    r = g.run(".", "-n", "0", cwd=edir, env_extra={"AQ_COUNT": str(cnt), "AQ_EXIT": "1"})
+    check(
+        "auto-quarantine: pytest.exit(returncode=0) keeps its exit code",
+        r.returncode == 0 and "1 failed" in r.stdout and "--auto-quarantine: 1 test(s)" in r.stderr,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-300:],
     )
 
