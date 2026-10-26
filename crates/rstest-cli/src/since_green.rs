@@ -114,10 +114,11 @@ pub struct GreenPart {
 /// counts at its last shard's time. Returns it with the parts still waiting
 /// for the rest of their run (the caller keeps those for a later merge):
 /// shards of a newer run than the snapshot returned, at most `keep` of them.
+/// A dirty part proves nothing about its commit and is dropped.
 pub fn newest_complete(parts: Vec<GreenPart>, keep: usize) -> (Option<Snapshot>, Vec<GreenPart>) {
     let mut best: Option<Snapshot> = None;
     let mut sets: BTreeMap<(String, usize), Vec<GreenPart>> = BTreeMap::new();
-    for p in parts {
+    for p in parts.into_iter().filter(|p| !p.snapshot.dirty) {
         match (p.shard, &p.snapshot.commit) {
             (None, _) => {
                 if best.as_ref().is_none_or(|b| p.snapshot.epoch > b.epoch) {
@@ -765,6 +766,27 @@ mod tests {
             50,
         );
         assert_eq!(best, None);
+    }
+
+    #[test]
+    fn a_dirty_green_part_never_becomes_the_baseline() {
+        // Pushed from a tree with uncommitted edits (or by an older rstest
+        // that pushed those): newer than the clean one, but it never tested
+        // its commit.
+        let dirty = |mut p: GreenPart| {
+            p.snapshot.dirty = true;
+            p
+        };
+        let parts = vec![
+            part(Some("c1"), 10, None),
+            dirty(part(Some("c2"), 20, None)),
+            part(Some("c3"), 30, Some((1, 2))),
+            dirty(part(Some("c3"), 31, Some((2, 2)))),
+        ];
+        let (best, pending) = newest_complete(parts, 50);
+        assert_eq!(best.map(|b| b.epoch), Some(10));
+        let epochs: Vec<u64> = pending.iter().map(|p| p.snapshot.epoch).collect();
+        assert_eq!(epochs, [30]);
     }
 
     #[test]

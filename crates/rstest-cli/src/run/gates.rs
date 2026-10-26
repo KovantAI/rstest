@@ -745,7 +745,10 @@ pub(super) fn run_post_gates(
             // Green over the whole suite, or over one whole shard (a shard is
             // the only narrowing allowed): the pull side calls a sharded run
             // green once every shard of it has pushed one.
+            // A dirty tree's green proves nothing about HEAD (as `after_run`).
+            let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
             let green = (outcome.exitstatus == 0
+                && !dirty
                 && changed_base.is_none()
                 && !since_green
                 && !incremental_active
@@ -755,7 +758,7 @@ pub(super) fn run_post_gates(
                     scope,
                     python,
                     head.as_deref(),
-                    history_commit.is_some_and(|c| c.ends_with("-dirty")),
+                    dirty,
                     started_epoch,
                 ),
                 shard,
