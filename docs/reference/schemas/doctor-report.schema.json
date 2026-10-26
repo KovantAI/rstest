@@ -48,6 +48,17 @@
         "$ref": "#/definitions/Leak"
       }
     },
+    "network": {
+      "description": "Tests that opened outbound network connections (outside loopback and\n`[tool.rstest] network-allow`). `null` when none did.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NetworkAccess"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "parallel_efficiency": {
       "description": "Realized speedup and worker load balance; present only on multi-worker\npool runs.",
       "anyOf": [
@@ -154,7 +165,8 @@
     "slowest_files",
     "coverage_waste",
     "timeouts",
-    "drift"
+    "drift",
+    "network"
   ],
   "definitions": {
     "CoverageWaste": {
@@ -350,6 +362,49 @@
         "nodeid",
         "threads",
         "fds"
+      ]
+    },
+    "NetworkAccess": {
+      "description": "Tests that reached the network, from the worker's network guard.",
+      "type": "object",
+      "properties": {
+        "tests": {
+          "description": "Those tests, most destinations first (top 20).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NetworkTest"
+          }
+        },
+        "tests_with_network": {
+          "description": "Tests that connected outside loopback and the allowlist.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tests_with_network",
+        "tests"
+      ]
+    },
+    "NetworkTest": {
+      "type": "object",
+      "properties": {
+        "destinations": {
+          "description": "Destinations it connected to, as `host:port` (with the IP when it was\nresolved from a name).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodeid": {
+          "description": "The test.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeid",
+        "destinations"
       ]
     },
     "ParallelEfficiency": {

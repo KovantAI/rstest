@@ -220,6 +220,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         junitxml: None,
         reruns: false,
         quarantine: None,
+        network: None,
     };
     let mut collect_args = args.to_vec();
     if !collect_args

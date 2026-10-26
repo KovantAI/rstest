@@ -111,6 +111,19 @@ even when you pass no `--timeout` and even with pytest-timeout installed
 (`-p no:timeout` does not turn it off). If pytest-timeout is also installed,
 both honor the marker, so uninstall it rather than run two timers.
 
+## `@pytest.mark.network`
+
+```python
+@pytest.mark.network
+def test_live_rates(): ...
+```
+
+This test may open outbound network connections: it is exempt from
+[`--block-network`](cli.md#-block-network) (its connections are still listed
+under `--doctor`'s NETWORK ACCESS). Use it for tests that hit a real service on
+purpose, and keep the rest offline. Registered by rstest, so
+`--strict-markers` accepts it.
+
 ## A note on `@pytest.mark.parametrize` IDs
 
 Not a marker rstest owns, but the one that most often blocks parallelism:

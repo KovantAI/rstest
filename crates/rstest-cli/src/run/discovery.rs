@@ -87,6 +87,7 @@ pub(super) fn run_collect_discovery(
         junitxml: None,
         reruns: false,
         quarantine: None,
+        network: None,
     };
     let mut w = worker::Worker::spawn_with_io(python, None, worker::Stdio::Null, &env)?;
     // Item-dispatch session: its `pytest_collection_finish` emits the

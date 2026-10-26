@@ -103,6 +103,14 @@ between 0.x releases and are listed here.
   `azure` output emit one annotation per group instead of one per test, and
   `--report-json` adds `failure_groups`. Every traceback still prints.
 
+- **`--block-network` keeps tests offline.** A test that connects outside
+  loopback and `[tool.rstest] network-allow` (hostnames or CIDRs) fails with
+  the destination and the line that connected; `@pytest.mark.network`
+  exempts a test, and `block-network = true` turns it on from config.
+  `--doctor` gains a NETWORK ACCESS section (and `network` in
+  `--doctor-json`) listing every test's outbound connections without
+  blocking.
+
 ### Fixes
 
 - **Parallel runs no longer leave a temp folder behind

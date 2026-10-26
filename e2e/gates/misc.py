@@ -160,3 +160,74 @@ def gate_failures_by_cause(g, args, binary):
         and "test_db.py%3A%3Atest_math" in errors[1],
         "\n".join(e[:160] for e in errors),
     )
+
+
+NETWORK_TESTS = """import socket
+
+import pytest
+
+
+def reach():
+    # 192.0.2.1 is TEST-NET-1: never routed, so this fails fast without
+    # the guard (and the test passes, as a hidden network call would).
+    s = socket.socket()
+    s.settimeout(0.2)
+    try:
+        s.connect(("192.0.2.1", 80))
+    except OSError:
+        pass
+    finally:
+        s.close()
+
+
+def test_external():
+    reach()
+
+
+@pytest.mark.network
+def test_marked():
+    reach()
+
+
+def test_local():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    socket.create_connection(srv.getsockname()).close()
+    srv.close()
+"""
+
+
+def gate_network_guard(g, args, binary):
+    print("== network guard ==")
+    g.write("netguard/test_net.py", NETWORK_TESTS)
+    ndir = g.tmp / "netguard"
+    for n in ("2", "0"):
+        r = g.run(".", "-n", n, "--block-network", cwd=ndir)
+        check(
+            f"network guard: --block-network fails the hidden call (-n {n})",
+            r.returncode == 1
+            and "1 failed, 2 passed" in r.stdout
+            and "rstest --block-network: connection to 192.0.2.1:80 from test_net.py:" in r.stdout
+            and "test_external" in r.stdout,
+            f"rc={r.returncode} " + r.stdout[-600:],
+        )
+    r = g.run(".", "-n", "2", "--doctor", cwd=ndir)
+    check(
+        "network guard: --doctor lists destinations without blocking",
+        r.returncode == 0
+        and "NETWORK ACCESS (2 test(s) opened outbound connections" in r.stdout
+        and "test_net.py::test_external  -> 192.0.2.1:80" in r.stdout
+        and "test_local" not in r.stdout.split("NETWORK ACCESS")[1].split("\n\n")[0],
+        f"rc={r.returncode} " + r.stdout[-700:],
+    )
+    g.write(
+        "netguard/pyproject.toml",
+        '[tool.rstest]\nblock-network = true\nnetwork-allow = ["192.0.2.0/24"]\n',
+    )
+    r = g.run(".", "-n", "2", cwd=ndir)
+    check(
+        "network guard: [tool.rstest] network-allow CIDR lets it through",
+        r.returncode == 0 and "3 passed" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:],
+    )

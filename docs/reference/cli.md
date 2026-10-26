@@ -77,6 +77,7 @@ means none.
 | [`--doctor-md PATH`](#-doctor-md-path) | write the diagnosis as markdown | none | | |
 | [`--doctor-fail-on COND`](#-doctor-fail-on-cond) | fail on a doctor metric threshold | none | | |
 | [`--fail-on-leak`](#-fail-on-leak) | fail on a leaked thread or fd | off | | |
+| [`--block-network`](#-block-network) | fail tests that connect outside loopback | off | `block-network`, `network-allow` | |
 | [`--cov-diff-fail-under PCT`](#-cov-diff-fail-under-pct) | fail on low diff coverage | none | | |
 | [`--cov-diff-json PATH`](#-cov-diff-json-path) | write diff coverage as JSON | none | | |
 | [`--output STYLE`](#output) | terminal output style | `bar` on a TTY, else `dots`; pytest's own in single-worker mode | `output` | |
@@ -675,8 +676,10 @@ process, one after another.
 After the run, print a diagnosis: wait-bound tests (wall vs CPU time), the
 parallel floor (tests that cap any `-n`), parallel efficiency (`-n ≥ 2` only),
 fixture hotspots with scope advice, slowest files, **resource leaks**
-(threads or fds a test left open), and, once the run history has 5 runs of a
-test, a suggested **`--timeout`** with per-test overrides. Adds a few cheap measurements; outcomes are
+(threads or fds a test left open), **network access** (tests that connected
+outside loopback; see [`--block-network`](#-block-network)), and, once the run
+history has 5 runs of a test, a suggested **`--timeout`** with per-test
+overrides. Adds a few cheap measurements; outcomes are
 unaffected. Reading each section: [Suite diagnostics](../guides/doctor.md).
 
 ### `--doctor-json <path>`
@@ -777,6 +780,42 @@ only the test outcome, so a green session that fails the gate still shows
 
 `--fail-on-leak` and `--doctor-fail-on` are command-line only (neither is a
 `[tool.rstest]` key): put them in the CI step that invokes rstest.
+
+### `--block-network`
+
+Fail any test that opens a network connection outside loopback and the
+allowlist. Hidden outbound calls (a real API, a telemetry endpoint, a package
+index) are a leading source of flaky tests and rate-limit trouble; this turns
+them into failures that name the destination and the line that connected:
+
+```text
+RuntimeError: rstest --block-network: connection to api.example.com:443 (93.184.215.14) from app/client.py:42; allow it with @pytest.mark.network or [tool.rstest] network-allow
+```
+
+- **Allowed:** loopback (`127.0.0.0/8`, `::1`, `localhost`), `0.0.0.0`,
+  Unix sockets, and every entry of `[tool.rstest] network-allow`: hostnames
+  (`"postgres"` for a CI service container) or CIDRs (`"10.0.0.0/8"`).
+- **Exempt a test:** [`@pytest.mark.network`](markers.md#pytestmarknetwork).
+- **Only tests are checked** (setup, call and teardown); collection and
+  session-level code are not.
+- The error is a `RuntimeError`, not an `OSError`, so code that retries on
+  connection errors can't swallow it.
+- `[tool.rstest] block-network = true` turns it on without the flag.
+
+```toml
+[tool.rstest]
+block-network = true
+network-allow = ["postgres", "redis", "10.0.0.0/8"]
+```
+
+Without blocking, [`--doctor`](#-doctor) lists every test's outbound
+connections ([NETWORK ACCESS](../guides/doctor.md#network-access)): run it once
+to see what a suite reaches, then allow what is intended and turn the block
+on. It patches `socket.connect`, so it sees every Python client (`requests`,
+`httpx`, database drivers); a C extension that opens its own sockets is not
+seen. With pytest-socket installed it works unchanged; with pytest-socket's
+`--disable-socket` on, pytest-socket refuses to create any socket first, so
+its stricter rule wins. Monorepo runs forward the flag to every project.
 
 ## Coverage
 
@@ -1031,6 +1070,8 @@ projects = ["libs/*", "services/api"]   # monorepo subprojects; replaces auto-di
 quarantine = "ci/quarantine.txt"        # relative to this pyproject.toml
 auto-quarantine = 3     # 0 turns it off
 auto-quarantine-max = 5 # percent of the run's tests
+block-network = true    # fail tests that connect outside loopback
+network-allow = ["postgres", "10.0.0.0/8"]   # hostnames or CIDRs
 ```
 
 These are the only keys read (kebab-case); every other rstest flag
@@ -1059,8 +1100,9 @@ rstest: /repo/pyproject.toml: ignoring [tool.rstest] reruns = "2" (expected a no
 Expected types: a non-negative integer (`reruns`, `worker-timeout`,
 `auto-quarantine`), an integer from 0 to 100 (`auto-quarantine-max`), a
 non-negative integer or `"auto"` (`numprocesses`), `true` or `false`
-(`reruns-only-known-flaky`), a string (`dist`, `collect`, `order`, `output`, `quarantine`),
-and a list of glob strings (`projects`). `numprocesses` is checked in full: a
+(`reruns-only-known-flaky`, `block-network`), a string (`dist`, `collect`,
+`order`, `output`, `quarantine`), a list of glob strings (`projects`), and a
+list of hostnames or CIDRs (`network-allow`). `numprocesses` is checked in full: a
 string other than `"auto"` or a plain digit string (`"four"`, `"4 "`) gets
 the same warning and is ignored, where the same value as `-n` is a parse
 error (exit 2). For the other keys only the type is checked here; an unknown

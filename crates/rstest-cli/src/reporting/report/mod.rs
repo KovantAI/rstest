@@ -407,6 +407,8 @@ pub struct Run {
     /// Each failed test's exception and project frame, from its failing
     /// report (for [`Run::failure_groups`]).
     causes: std::collections::HashMap<String, proto::Cause>,
+    /// Outbound destinations each test reached (network guard), by nodeid.
+    pub network: BTreeMap<String, Vec<String>>,
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
     /// included); empty when it was off or over its cap.
     pub auto_quarantined: std::collections::BTreeSet<String>,
@@ -455,6 +457,15 @@ impl Interruption {
 
 impl Run {
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
+        if !r.network.is_empty() {
+            // Each attempt (rerun) ships its own list: keep each host once.
+            let dests = self.network.entry(r.nodeid.clone()).or_default();
+            for d in &r.network {
+                if !dests.contains(d) {
+                    dests.push(d.clone());
+                }
+            }
+        }
         // The cause comes from the same report as the test's failure text (its
         // first failed one), so a group's example traceback shows that cause;
         // a later teardown error or rerun doesn't regroup the test.
@@ -1096,6 +1107,7 @@ mod tests {
             cause: None,
             xfail_reason: None,
             skip_location: None,
+            network: Vec::new(),
         }
     }
 
@@ -1437,6 +1449,7 @@ mod tests {
         proto::Report {
             subtest: true,
             crash: None,
+            network: Vec::new(),
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1686,6 +1699,7 @@ mod tests {
                 cause: None,
                 xfail_reason: None,
                 skip_location: None,
+                network: Vec::new(),
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1710,6 +1724,7 @@ mod tests {
                 cause: None,
                 xfail_reason: None,
                 skip_location: None,
+                network: Vec::new(),
             },
         );
         assert_eq!(run.phase_durations.len(), 1);
@@ -1738,6 +1753,26 @@ mod tests {
         assert!(run.tests().contains_key("a.py::exits_late"));
         assert!(run.tests().contains_key("a.py::setup_err"));
         assert_eq!(run.summary_line(), "1 passed, 1 error");
+    }
+
+    #[test]
+    fn record_merges_network_destinations_per_test() {
+        let net = |nodeid: &str, dests: &[&str]| proto::Report {
+            network: dests.iter().map(|d| d.to_string()).collect(),
+            ..report(nodeid, "teardown", "passed")
+        };
+        let mut run = Run::default();
+        run.record(None, report("a.py::quiet", "teardown", "passed"));
+        run.record(None, net("a.py::net", &["x:80"]));
+        // A rerun reaching the same host again, plus a new one.
+        run.record(None, net("a.py::net", &["x:80", "y:443"]));
+        assert_eq!(
+            run.network.into_iter().collect::<Vec<_>>(),
+            [(
+                "a.py::net".to_string(),
+                vec!["x:80".to_string(), "y:443".into()]
+            )]
+        );
     }
 
     #[test]

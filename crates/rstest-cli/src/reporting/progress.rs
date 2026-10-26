@@ -642,6 +642,7 @@ mod tests {
             cause: None,
             xfail_reason: None,
             skip_location: None,
+            network: Vec::new(),
         }
     }
 
@@ -650,6 +651,7 @@ mod tests {
         let sub = |outcome| Report {
             subtest: true,
             crash: None,
+            network: Vec::new(),
             ..report("call", outcome)
         };
         assert!(outcome_kind(&sub("passed")).is_none());

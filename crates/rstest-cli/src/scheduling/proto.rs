@@ -122,6 +122,10 @@ pub struct Report {
     /// for grouping failures by cause. Absent when the worker couldn't tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<Cause>,
+    /// Teardown report under the network guard: outbound destinations
+    /// (`host:port`, with the IP when resolved from a name) the test reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<String>,
 }
 
 /// What a failure raised and where (see [`Report::cause`]).
@@ -424,9 +428,33 @@ mod tests {
                 assert_eq!(r.nodeid, "a.py::t");
                 assert!(!r.wasxfail); // optional fields default
                 assert!(r.sections.is_empty());
+                assert!(r.network.is_empty());
             }
             other => panic!("wrong event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn event_report_carries_network_destinations() {
+        let e = from_python(serde_json::json!({
+            "kind": "report",
+            "payload": {
+                "nodeid": "a.py::t", "when": "teardown", "outcome": "passed",
+                "duration": 0.0, "longrepr": null,
+                "network": ["api.example.com:443 (93.184.215.14)"],
+            }
+        }));
+        let Event::Report(r) = e else {
+            panic!("wrong event: {e:?}")
+        };
+        assert_eq!(r.network, ["api.example.com:443 (93.184.215.14)"]);
+        // Replay journals stay lean: an empty list isn't written.
+        let json = serde_json::to_value(Report {
+            network: Vec::new(),
+            ..r
+        })
+        .unwrap();
+        assert!(json.get("network").is_none(), "{json}");
     }
 
     #[test]
@@ -552,6 +580,7 @@ mod property {
                 cause: None,
                 xfail_reason: None,
                 skip_location: None,
+                network: Vec::new(),
             }
         }
     }

@@ -71,6 +71,7 @@ from gates.misc import (
     gate_collection_error_semantics,
     gate_failures_by_cause,
     gate_lone_surrogate_in_report,
+    gate_network_guard,
     gate_worker_identity_fixtures,
 )
 from gates.monorepo import (
@@ -176,6 +177,7 @@ def main():
         gate_collection_error_semantics,
         gate_lone_surrogate_in_report,
         gate_failures_by_cause,
+        gate_network_guard,
         gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,

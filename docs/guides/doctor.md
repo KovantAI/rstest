@@ -243,6 +243,25 @@ flakiness. Full model, false-positive cases, and fixes:
 [Resource leaks](resource-leaks.md). To make it a CI gate, use
 [`--fail-on-leak`](../reference/cli.md#-fail-on-leak).
 
+### NETWORK ACCESS
+
+Tests that opened outbound connections, outside loopback and
+`[tool.rstest] network-allow`:
+
+```text
+NETWORK ACCESS (2 test(s) opened outbound connections, outside loopback and network-allow):
+  tests/test_rates.py::test_convert  -> api.exchangerate.host:443 (104.21.4.48)
+  tests/test_signup.py::test_welcome_mail  -> smtp.mailgun.org:587 (34.111.20.5)
+  hidden network calls flake and hit rate limits: mock them, mark the test @pytest.mark.network, or allow the host in [tool.rstest] network-allow; --block-network fails them
+```
+
+Hidden network calls are a leading source of flaky tests: the service is slow,
+rate-limits CI, or is down. Mock the call, mark a test that needs the network
+on purpose with `@pytest.mark.network`, or allow an intended host (a CI service
+container) in `network-allow`. Then [`--block-network`](../reference/cli.md#-block-network)
+keeps new ones out. Destinations name the host when the test resolved one,
+with the address it connected to. Top 20 tests, most destinations first.
+
 ### TIMEOUTS
 
 A [`--timeout`](../reference/cli.md#-timeout-secs) for the suite, and the
@@ -323,7 +342,8 @@ parallel-efficiency (realized speedup and per-worker load), fixture timings
 advisor), slowest files, and the coverage-waste list (`coverage_waste`, `null`
 unless the same run collected per-test coverage with `--cov --cov-context=test`),
 the timeout advice (`timeouts`, `null` until tests have 5 passing runs in
-the run history), and duration drift (`drift`, `null` unless a test drifts).
+the run history), duration drift (`drift`, `null` unless a test drifts), and
+network access (`network`, `null` unless a test connected outside loopback).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

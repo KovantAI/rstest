@@ -92,6 +92,9 @@ pub struct WorkerEnv {
     pub reruns: bool,
     /// The run's quarantine, for a session's own `-x` / `--maxfail` count.
     pub quarantine: Option<WorkerQuarantine>,
+    /// Outbound-network guard: block (`--block-network`) or only record
+    /// (doctor) connections outside loopback and the allowlist. None = off.
+    pub network: Option<NetworkGuard>,
 }
 
 /// [`WorkerEnv::quarantine`]: a session never counts a `--quarantine` file
@@ -106,6 +109,23 @@ pub struct WorkerQuarantine {
     pub auto: String,
     /// `--auto-quarantine-max` (`RSTEST_AUTO_QUARANTINE_MAX`).
     pub max_pct: u32,
+}
+
+/// See [`WorkerEnv::network`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkGuard {
+    /// Fail a test that connects outside the allowlist (else just record).
+    pub block: bool,
+    /// Hostnames and CIDRs a test may reach, beyond loopback.
+    pub allow: Vec<String>,
+}
+
+/// Set the network guard's variables on a worker command.
+fn apply_network_env(command: &mut Command, env: &WorkerEnv) {
+    if let Some(g) = &env.network {
+        command.env("RSTEST_NETWORK", if g.block { "block" } else { "record" });
+        command.env("RSTEST_NETWORK_ALLOW", g.allow.join("\n"));
+    }
 }
 
 /// Transport: a pair of anonymous OS pipes per worker (POSIX pipes on unix,
@@ -1043,6 +1063,8 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_QUARANTINE",
     "RSTEST_AUTO_QUARANTINE",
     "RSTEST_AUTO_QUARANTINE_MAX",
+    "RSTEST_NETWORK",
+    "RSTEST_NETWORK_ALLOW",
 ];
 
 /// Credentials rstest itself consumes and test code never needs. Stripped from
@@ -1146,6 +1168,7 @@ fn build_worker_command(
         command.env("RSTEST_JUNITXML", path);
     }
     apply_maxfail_env(&mut command, env);
+    apply_network_env(&mut command, env);
     // Exactly one worker ships the full id list (D5); the rest verify their
     // collection by count+hash. Worker 0 in a pool; the lone worker only
     // when the caller asks (collect-only discovery / migrate-check).
@@ -1410,6 +1433,7 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
         command.env("RSTEST_JUNITXML", path);
     }
     apply_maxfail_env(command, env);
+    apply_network_env(command, env);
 }
 
 /// What a session's own `-x` / `--maxfail` count must skip (see
@@ -1884,6 +1908,46 @@ mod tests {
         assert!(err.contains("No module named 'exceptiongroup'"), "{err}");
     }
 
+    #[test]
+    fn network_guard_env_reaches_the_worker() {
+        let envs = |network: Option<super::NetworkGuard>| {
+            let mut cmd = Command::new("true");
+            super::apply_network_env(
+                &mut cmd,
+                &WorkerEnv {
+                    network,
+                    ..base_env()
+                },
+            );
+            cmd.get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        assert!(envs(None).is_empty());
+        let e = envs(Some(super::NetworkGuard {
+            block: true,
+            allow: vec!["postgres".into(), "10.0.0.0/8".into()],
+        }));
+        assert_eq!(e["RSTEST_NETWORK"].as_deref(), Some("block"));
+        assert_eq!(
+            e["RSTEST_NETWORK_ALLOW"].as_deref(),
+            Some("postgres\n10.0.0.0/8")
+        );
+        let e = envs(Some(super::NetworkGuard {
+            block: false,
+            allow: Vec::new(),
+        }));
+        assert_eq!(e["RSTEST_NETWORK"].as_deref(), Some("record"));
+        // Never inherited from the caller's environment.
+        assert!(super::INTERNAL_ENV.contains(&"RSTEST_NETWORK"));
+        assert!(super::INTERNAL_ENV.contains(&"RSTEST_NETWORK_ALLOW"));
+    }
+
     fn base_env() -> WorkerEnv {
         WorkerEnv {
             run_uid: "uid-1".into(),
@@ -1896,6 +1960,7 @@ mod tests {
             junitxml: None,
             reruns: false,
             quarantine: None,
+            network: None,
         }
     }
 
@@ -2240,6 +2305,7 @@ mod tests {
                 junitxml: None,
                 reruns: false,
                 quarantine: None,
+                network: None,
             };
             // A freshly spawned worker blocks on its first command: alive, and never
             // sent anything — the decode-error/respawn precondition (child still
@@ -2285,6 +2351,7 @@ mod tests {
                 junitxml: None,
                 reruns: false,
                 quarantine: None,
+                network: None,
             };
             let n = 3;
             let workers = Worker::spawn_pool(python, n, &env, true).expect("fork-prewarm pool");
@@ -2336,6 +2403,7 @@ mod tests {
                 junitxml: None,
                 reruns: false,
                 quarantine: None,
+                network: None,
             };
             let mut workers = Worker::spawn_pool(python, 1, &env, true).expect("fork-prewarm pool");
             let mut worker = workers.pop().expect("one forked worker");

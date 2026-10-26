@@ -254,6 +254,19 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         }
         md.push('\n');
     }
+    if let Some(n) = &r.network {
+        let _ = writeln!(
+            md,
+            "### Network access\n\n> {} test(s) opened outbound connections (outside loopback \
+             and `network-allow`). `--block-network` fails them.\n",
+            n.tests_with_network
+        );
+        md.push_str("| Test | Destinations |\n|---|---|\n");
+        for t in &n.tests {
+            let _ = writeln!(md, "| `{}` | {} |", t.nodeid, t.destinations.join(", "));
+        }
+        md.push('\n');
+    }
     if !r.leaks.is_empty() {
         md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
@@ -555,6 +568,28 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         );
     }
 
+    if let Some(n) = &r.network {
+        sink.out_line(&format!(
+            "\nNETWORK ACCESS ({} test(s) opened outbound connections, outside loopback \
+             and network-allow):",
+            n.tests_with_network
+        ));
+        for t in &n.tests {
+            sink.out_line(&format!("  {}  -> {}", t.nodeid, t.destinations.join(", ")));
+        }
+        if n.tests_with_network > n.tests.len() {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                n.tests_with_network - n.tests.len()
+            ));
+        }
+        sink.out_line(
+            "  hidden network calls flake and hit rate limits: mock them, mark the test \
+             @pytest.mark.network, or allow the host in [tool.rstest] network-allow; \
+             --block-network fails them",
+        );
+    }
+
     if !r.leaks.is_empty() {
         sink.out_line(
             "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
@@ -731,6 +766,40 @@ mod tests {
             "{out}"
         );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
+    }
+
+    #[test]
+    fn network_section_in_terminal_and_markdown() {
+        let r = report(12);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(
+            out.contains("NETWORK ACCESS (1 test(s) opened outbound connections"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  tests/test_a.py::test_fetch  -> api.example.com:443 (93.184.215.14)"),
+            "{out}"
+        );
+        let md = render_markdown(&r);
+        assert!(
+            md.contains("| `tests/test_a.py::test_fetch` | api.example.com:443 (93.184.215.14) |"),
+            "{md}"
+        );
+        assert!(!out.contains("... and"), "{out}");
+        // More tests than listed: the rest are counted.
+        let mut r = report(12);
+        r.network.as_mut().unwrap().tests_with_network = 25;
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(cap.out().contains("  ... and 24 more"), "{}", cap.out());
+        let mut r = report(12);
+        r.network = None;
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("NETWORK ACCESS"));
+        assert!(!render_markdown(&r).contains("Network access"));
     }
 
     #[test]

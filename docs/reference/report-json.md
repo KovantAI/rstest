@@ -390,6 +390,8 @@ reference doesn't spell out:
     - `timeouts` until at least one test in this run has 5 passing runs in
       the run history (`.rstest_cache/history.msgpack`). `overrides` is empty
       when every judged test fits under `suite_timeout`;
+    - `network` unless a test connected outside loopback and
+      `network-allow`;
     - `drift` unless a test in this run has 9 or more passing runs whose
       older, middle and newer medians rise step by step (by 1.5x and 0.2 s
       overall). Like `timeouts`, its times are call phase, from the history.

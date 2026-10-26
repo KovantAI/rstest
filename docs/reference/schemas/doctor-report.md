@@ -12,6 +12,7 @@ Source: `--doctor-json`
 | `fixtures` | array of FixtureEntry | yes | Fixture setup cost summed across all workers, costliest first (top 50). |
 | `fork_prewarm` | boolean | yes | Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the "try --fork-pool" hint so it isn't suggested when already on. |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (created by the test, still open after its teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
+| `network` | NetworkAccess or null | yes | Tests that opened outbound network connections (outside loopback and `[tool.rstest] network-allow`). `null` when none did. |
 | `parallel_efficiency` | ParallelEfficiency or null | yes | Realized speedup and worker load balance; present only on multi-worker pool runs. |
 | `parallel_floor` | ParallelFloor or null | yes | Present only when the longest test outlasts both a worker's even share of the test time and 1 second, plus 10%: no worker count can finish faster than that test. |
 | `rstest_version` | string | yes | The rstest version that wrote the report. |
@@ -89,6 +90,22 @@ A test that ended with more threads / open fds than it started: a resource it op
 | `fds` | integer | yes | Fds the test opened that are still open after its teardown (0 if only threads leaked). |
 | `nodeid` | string | yes | The test that leaked. |
 | `threads` | integer | yes | Threads the test created that outlived its teardown (0 if only fds leaked). |
+
+### NetworkAccess
+
+Tests that reached the network, from the worker's network guard.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tests` | array of NetworkTest | yes | Those tests, most destinations first (top 20). |
+| `tests_with_network` | integer | yes | Tests that connected outside loopback and the allowlist. |
+
+### NetworkTest
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `destinations` | array of string | yes | Destinations it connected to, as `host:port` (with the IP when it was resolved from a name). |
+| `nodeid` | string | yes | The test. |
 
 ### ParallelEfficiency
 

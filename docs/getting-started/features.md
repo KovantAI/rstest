@@ -46,6 +46,7 @@ Everything pytest does (via a vendored pytest core), plus:
 | Project config | `[tool.rstest]` in pyproject | committed defaults for `-n`, `--dist`, `--reruns`, `--reruns-only-known-flaky`, `--worker-timeout`, `--collect`, output, monorepo `projects`, `order`, and the quarantine settings ([keys](../reference/cli.md#configuration-file)) |
 | Worker attribution | automatic | `[gwN]` on `-v` lines and failure headers |
 | Failures by cause | automatic | failures sharing an exception, message and project frame print as one cause above the summary; one CI annotation per cause; `failure_groups` in `--report-json` |
+| Network guard | `--block-network`, `@pytest.mark.network`, `[tool.rstest] network-allow` | fail tests that connect outside loopback, naming host and line; `--doctor` lists every test's connections |
 | JUnit XML | `--junitxml` | rendered from merged results; flaky tests flagged via property |
 | Machine-readable results | `--report-json` | per-test outcome snapshot |
 | HTML report | `--html` | self-contained merged report; works in parallel (replaces pytest-html) |

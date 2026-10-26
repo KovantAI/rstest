@@ -150,6 +150,7 @@ pub(super) fn execute_monorepo(
             reruns: cli.reruns,
             quarantine: cli.quarantine.as_deref(),
             auto_quarantine: cli.auto_quarantine,
+            block_network: cli.block_network,
             auto_quarantine_max: cli.auto_quarantine_max,
             only_rerun: &cli.only_rerun,
             worker_timeout: cli.worker_timeout,
@@ -359,6 +360,7 @@ struct ChildSpec<'a> {
     reruns: Option<u32>,
     quarantine: Option<&'a std::path::Path>,
     auto_quarantine: Option<u32>,
+    block_network: bool,
     auto_quarantine_max: Option<u32>,
     only_rerun: &'a [String],
     worker_timeout: Option<u64>,
@@ -421,6 +423,9 @@ fn build_child_args(spec: &ChildSpec) -> Vec<String> {
             "--quarantine",
             path_to_string(&std::fs::canonicalize(q).unwrap_or_else(|_| q.to_path_buf())),
         );
+    }
+    if spec.block_network {
+        a.push("--block-network".into());
     }
     if let Some(n) = spec.auto_quarantine {
         // `=` form: the optional-value flag never takes the next argv item.
@@ -720,6 +725,7 @@ mod tests {
             reruns: None,
             quarantine: None,
             auto_quarantine: None,
+            block_network: false,
             auto_quarantine_max: None,
             only_rerun,
             worker_timeout: None,
@@ -779,6 +785,7 @@ mod tests {
         spec.reruns = Some(2);
         spec.quarantine = Some(&quar);
         spec.auto_quarantine = Some(4);
+        spec.block_network = true;
         spec.auto_quarantine_max = Some(10);
         spec.worker_timeout = Some(30);
         spec.doctor = true;
@@ -814,6 +821,7 @@ mod tests {
             Some("/nope/quarantine.txt")
         );
         assert!(args.iter().any(|a| a == "--auto-quarantine=4"));
+        assert!(args.iter().any(|a| a == "--block-network"));
         assert_eq!(val_after(&args, "--auto-quarantine-max"), Some("10"));
         assert_eq!(val_after(&args, "--worker-timeout"), Some("30"));
         assert!(args.iter().any(|a| a == "--doctor"));
