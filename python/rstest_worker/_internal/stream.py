@@ -208,6 +208,39 @@ def _crashline(report: Any) -> str:
             return ""
 
 
+def cause_of(excinfo: Any, rootpath: Any) -> m.CauseInfo | None:
+    """What a failure raised and where, for grouping failures by cause: the
+    exception type, the first line of its message, and the deepest traceback
+    frame inside the rootdir and outside site-packages (`path:line`, 1-based,
+    rootdir-relative). A ConnectionRefusedError raised in socket.py is thus
+    attributed to the project's own db.py line that made the call. Read from
+    the exception itself, so it doesn't depend on --tb. Best-effort: None on
+    any surprise."""
+    try:
+        from pathlib import Path
+
+        root = Path(rootpath).resolve()
+        at = None
+        for entry in reversed(excinfo.traceback):
+            try:
+                path = Path(entry.path)
+                # Generated code (`<string>` from dataclasses, attrs) has no
+                # file: resolved against the cwd it would pass as the rootdir's.
+                if not path.is_file():
+                    continue
+                rel = path.resolve().relative_to(root)
+            except (TypeError, ValueError, OSError):
+                continue
+            if "site-packages" in rel.parts:
+                continue
+            at = f"{rel.as_posix()}:{entry.lineno + 1}"
+            break
+        message = str(excinfo.value).strip().split("\n", 1)[0]
+        return {"exc": excinfo.typename, "message": message[:300], "at": at}
+    except Exception:
+        return None
+
+
 def longrepr_text(report: Any, tbstyle: str = "auto") -> str | None:
     """A report's failure text exactly as pytest's terminal prints it.
 
@@ -712,6 +745,15 @@ class StreamPlugin:
         return cancel
 
     @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        # The exception is only reachable here; the report logged next carries
+        # its cause to pytest_runtest_logreport.
+        report = yield
+        if call.excinfo is not None and report.failed:
+            report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
+        return report
+
+    @pytest.hookimpl(wrapper=True)
     def pytest_runtest_call(self, item):
         # Layers two per-call-phase concerns: the --timeout interrupt (outer)
         # and doctor's cpu-vs-wall measurement (inner). wall >> cpu = the test
@@ -899,6 +941,9 @@ class StreamPlugin:
             start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
             for _, fspath, lineno, _ in _folded_skips(start, [report]):
                 payload["skip_location"] = [fspath, lineno]
+        cause = getattr(report, "_rstest_cause", None)
+        if cause is not None and not is_subtest_report(report):
+            payload["cause"] = cause
         self._conn.send("report", payload)
         if self._cpu_mark is not None:
             self._cpu_mark = _cpu_now()

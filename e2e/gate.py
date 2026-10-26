@@ -69,6 +69,7 @@ from gates.incremental import (
 from gates.misc import (
     gate_basics,
     gate_collection_error_semantics,
+    gate_failures_by_cause,
     gate_lone_surrogate_in_report,
     gate_worker_identity_fixtures,
 )
@@ -174,6 +175,7 @@ def main():
         gate_basics,
         gate_collection_error_semantics,
         gate_lone_surrogate_in_report,
+        gate_failures_by_cause,
         gate_worker_identity_fixtures,
         gate_output_styles,
         gate_multiprocessing_spawn_children,

@@ -946,6 +946,7 @@ pub(super) fn finalize_output(
         if let Some(note) = quarantine_note(outcome.run.counts()["quarantined"]) {
             sink.out_line(&palette.yellow(&note));
         }
+        outcome.run.print_failure_groups(sink);
     } else if !passthrough && mode == progress::Mode::Tap {
         // Pure TAP: close the stream with the trailing plan. Failure text
         // already rode along as `#` diagnostics; no human summary.
@@ -971,6 +972,8 @@ pub(super) fn finalize_output(
         if let Some((dn, dmin)) = durations {
             outcome.run.print_durations(dn, dmin, very_verbose, sink);
         }
+        // One line per shared cause, above pytest's short test summary.
+        outcome.run.print_failure_groups(sink);
         // pytest prints messages whole on CI and at -vv, else trimmed to the
         // terminal (compat.running_on_ci: CI or BUILD_NUMBER non-empty).
         let on_ci = ["CI", "BUILD_NUMBER"]
@@ -1298,6 +1301,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         };
@@ -1333,6 +1337,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         };
@@ -1588,6 +1593,7 @@ mod tests {
             fd_delta: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         };
@@ -1663,6 +1669,7 @@ mod tests {
             crash: None,
             xfail_reason: None,
             skip_location: None,
+            cause: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let ids = ["t.py::f1", "t.py::f2", "t.py::f3", "t.py::f4"];

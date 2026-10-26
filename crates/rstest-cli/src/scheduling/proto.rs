@@ -118,6 +118,22 @@ pub struct Report {
     /// skip marker pytest folds per file.
     #[serde(default)]
     pub skip_location: Option<(String, Option<u64>)>,
+    /// A failed report's exception and the project frame it went through,
+    /// for grouping failures by cause. Absent when the worker couldn't tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Cause>,
+}
+
+/// What a failure raised and where (see [`Report::cause`]).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Cause {
+    /// Exception type name, e.g. `ConnectionRefusedError`.
+    pub exc: String,
+    /// First line of the exception message.
+    pub message: String,
+    /// `path:line` (rootdir-relative, 1-based) of the deepest traceback frame
+    /// in project code, outside site-packages.
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -533,6 +549,7 @@ mod property {
                 skip_reason, cpu, thread_delta, fd_delta, sections, lineno,
                 subtest: false,
                 crash: None,
+                cause: None,
                 xfail_reason: None,
                 skip_location: None,
             }

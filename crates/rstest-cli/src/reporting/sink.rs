@@ -266,6 +266,7 @@ mod tests {
             lineno: Some(12),
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         }

@@ -1,5 +1,7 @@
 """e2e gate sections: misc."""
 
+import json
+
 from _harness import BASIC, check
 
 
@@ -104,3 +106,57 @@ def gate_lone_surrogate_in_report(g, args, binary):
                 "bad\\udcff.txt" in r.stdout,
                 r.stdout[-300:],
             )
+
+
+def gate_failures_by_cause(g, args, binary):
+    print("== failures by cause ==")
+    # Three tests fail through one shared helper with the same exception (the
+    # port differs: numbers are masked); one fails on its own assertion.
+    g.write(
+        "bycause/app/db.py",
+        "def connect(port):\n"
+        "    raise ConnectionRefusedError(111, f'Connection refused: port {port}')\n",
+    )
+    g.write("bycause/app/__init__.py", "")
+    g.write(
+        "bycause/test_db.py",
+        "from app.db import connect\n\n"
+        "def test_users(): connect(5432)\n\n"
+        "def test_orders(): connect(5433)\n\n"
+        "def test_items(): connect(5434)\n\n"
+        "def test_math(): assert 1 + 1 == 3\n",
+    )
+    bdir = g.tmp / "bycause"
+    rj = g.tmp / "bycause.json"
+    r = g.run(".", "-n", "2", "--report-json", str(rj), cwd=bdir)
+    out = r.stdout
+    check(
+        "failures by cause: one block naming the shared exception and frame",
+        r.returncode == 1
+        and "=========== failures by cause ===========" in out
+        and "3 tests: ConnectionRefusedError: [Errno 111] Connection refused: port" in out
+        and "  at app/db.py:2" in out
+        and "test_math" not in out.split("failures by cause")[1].split("short test summary")[0],
+        out[-700:],
+    )
+    doc = json.loads(rj.read_text(encoding="utf-8")) if rj.exists() else {}
+    groups = doc.get("failure_groups", [])
+    check(
+        "failures by cause: report-json failure_groups",
+        len(groups) == 1
+        and groups[0]["exception"] == "ConnectionRefusedError"
+        and groups[0]["at"] == "app/db.py:2"
+        and groups[0]["count"] == 3
+        and groups[0]["nodeids"]
+        == ["test_db.py::test_items", "test_db.py::test_orders", "test_db.py::test_users"],
+        str(groups)[:400],
+    )
+    r = g.run(".", "-n", "2", "--output", "github", cwd=bdir)
+    errors = [ln for ln in r.stdout.splitlines() if ln.startswith("::error ")]
+    check(
+        "failures by cause: github gets one grouped annotation plus the single",
+        len(errors) == 2
+        and errors[0].startswith("::error file=app/db.py,title=3 tests%2C one cause,line=2::")
+        and "test_db.py%3A%3Atest_math" in errors[1],
+        "\n".join(e[:160] for e in errors),
+    )

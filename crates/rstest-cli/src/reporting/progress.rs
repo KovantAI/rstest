@@ -639,6 +639,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         }
@@ -648,6 +649,7 @@ mod tests {
     fn only_failed_subtests_show_in_progress() {
         let sub = |outcome| Report {
             subtest: true,
+            crash: None,
             ..report("call", outcome)
         };
         assert!(outcome_kind(&sub("passed")).is_none());

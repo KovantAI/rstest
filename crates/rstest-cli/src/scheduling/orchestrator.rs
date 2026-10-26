@@ -215,6 +215,7 @@ pub(crate) fn fabricate_crash_report(
         lineno: None,
         subtest: false,
         crash: None,
+        cause: None,
         xfail_reason: None,
         skip_location: None,
     }
@@ -240,6 +241,7 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         lineno: None,
         subtest: false,
         crash: None,
+        cause: None,
         xfail_reason: None,
         skip_location: None,
     }
@@ -491,6 +493,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         }

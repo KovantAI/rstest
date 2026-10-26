@@ -9,8 +9,21 @@ The `--report-json` document (schema 5). Fields are declared alphabetically to m
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `collect_errors` | array of string | yes | Paths of collectors that failed to import/collect. |
+| `failure_groups` | array of FailureGroup | no | Failures that share a cause (same exception, message and project frame), largest group first. Only groups of two or more; absent when there are none. |
 | `meta` | SnapshotMeta | yes | Run metadata: argv, counts, exit status, schema version, shard. |
 | `tests` | object of TestEntry | yes | Per-test outcomes, keyed by node id. |
+
+### FailureGroup
+
+Failures with one cause: the same exception type, message (numbers and addresses masked) and deepest project frame.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `at` | string or null | yes | `path:line` of the deepest traceback frame in project code, or null when every frame was outside the project. |
+| `count` | integer | yes | Number of failed tests in the group. |
+| `exception` | string | yes | Exception type name. |
+| `message` | string | yes | The first member's exception message (first line). |
+| `nodeids` | array of string | yes | The failed tests, sorted. |
 
 ### ShardJson
 

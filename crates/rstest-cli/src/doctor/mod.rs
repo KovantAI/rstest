@@ -1087,6 +1087,7 @@ pub(crate) mod testutil {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         };
@@ -1117,6 +1118,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         };
@@ -1165,6 +1167,7 @@ mod tests {
                     lineno: None,
                     subtest: false,
                     crash: None,
+                    cause: None,
                     xfail_reason: None,
                     skip_location: None,
                 },
@@ -1532,6 +1535,7 @@ mod tests {
                     lineno: None,
                     subtest: false,
                     crash: None,
+                    cause: None,
                     xfail_reason: None,
                     skip_location: None,
                 },

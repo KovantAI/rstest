@@ -31,7 +31,8 @@ It is the compatibility anchor, and its output is byte-exact:
 
 - With no `--output` set, the terminal output is pytest's own, with
   rstest's extras (doctor report, coverage report, quarantined failures,
-  gate messages) appended after pytest's summary line. An explicit
+  [failures by cause](../guides/ci-output.md#failures-by-cause), gate
+  messages) appended after pytest's summary line. An explicit
   [`--output`](../reference/cli.md#output)
   switches back to rstest's renderer.
 - `--junitxml` is pytest's own document, plus rstest's `flaky` /

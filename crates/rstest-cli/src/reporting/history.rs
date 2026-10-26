@@ -735,6 +735,7 @@ mod tests {
                     crash: None,
                     xfail_reason: None,
                     skip_location: None,
+                    cause: None,
                 },
             );
         }

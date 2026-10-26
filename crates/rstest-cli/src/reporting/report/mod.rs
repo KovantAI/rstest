@@ -168,6 +168,11 @@ pub struct RunMeta {
 pub struct Snapshot<'a> {
     /// Paths of collectors that failed to import/collect.
     pub collect_errors: Vec<&'a String>,
+    /// Failures that share a cause (same exception, message and project
+    /// frame), largest group first. Only groups of two or more; absent when
+    /// there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_groups: Vec<FailureGroup>,
     /// Run metadata: argv, counts, exit status, schema version, shard.
     pub meta: SnapshotMeta<'a>,
     /// Per-test outcomes, keyed by node id.
@@ -201,6 +206,36 @@ pub struct SnapshotMeta<'a> {
     pub started_at_epoch: u64,
     /// Worker count for the run (`-n`).
     pub workers: usize,
+}
+
+/// Failures with one cause: the same exception type, message (numbers and
+/// addresses masked) and deepest project frame.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct FailureGroup {
+    /// Exception type name.
+    pub exception: String,
+    /// The first member's exception message (first line).
+    pub message: String,
+    /// `path:line` of the deepest traceback frame in project code, or null
+    /// when every frame was outside the project.
+    pub at: Option<String>,
+    /// Number of failed tests in the group.
+    pub count: usize,
+    /// The failed tests, sorted.
+    pub nodeids: Vec<String>,
+}
+
+/// A message with what varies between occurrences of one cause masked:
+/// hex addresses and runs of digits (ports, ids, counts, timestamps).
+fn cause_key(msg: &str) -> String {
+    use std::sync::OnceLock;
+    static HEX: OnceLock<regex::Regex> = OnceLock::new();
+    static NUM: OnceLock<regex::Regex> = OnceLock::new();
+    let hex = HEX.get_or_init(|| regex::Regex::new(r"0x[0-9a-fA-F]+").unwrap());
+    let num = NUM.get_or_init(|| regex::Regex::new(r"[0-9]+").unwrap());
+    num.replace_all(&hex.replace_all(msg, "<addr>"), "N")
+        .into_owned()
 }
 
 /// Sharding identity block (only under `--shard`).
@@ -369,6 +404,9 @@ pub struct Run {
     pub interruption: Option<Interruption>,
     /// Set when a test called `pytest.exit()`, which stops the whole run.
     pub session_exit: Option<SessionExit>,
+    /// Each failed test's exception and project frame, from its failing
+    /// report (for [`Run::failure_groups`]).
+    causes: std::collections::HashMap<String, proto::Cause>,
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
     /// included); empty when it was off or over its cap.
     pub auto_quarantined: std::collections::BTreeSet<String>,
@@ -417,6 +455,14 @@ impl Interruption {
 
 impl Run {
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
+        // The cause comes from the same report as the test's failure text (its
+        // first failed one), so a group's example traceback shows that cause;
+        // a later teardown error or rerun doesn't regroup the test.
+        if r.outcome == "failed" && !self.failure_by_id.contains_key(&r.nodeid) {
+            if let Some(c) = r.cause.as_ref().filter(|_| !r.subtest) {
+                self.causes.insert(r.nodeid.clone(), c.clone());
+            }
+        }
         if self.track_phase_durations {
             self.phase_durations
                 .push((r.duration, r.when.clone(), r.nodeid.clone()));
@@ -698,6 +744,40 @@ impl Run {
     }
 
     /// (nodeid, longrepr) pairs for failed tests (junit rendering).
+    /// Failed tests that share a cause, largest group first: same exception
+    /// type, same message once numbers and addresses are masked, and same
+    /// deepest project frame. Only groups of two or more; quarantined and
+    /// recovered (flaky) tests don't count.
+    pub fn failure_groups(&self) -> Vec<FailureGroup> {
+        let mut groups: BTreeMap<(String, String, Option<String>), FailureGroup> = BTreeMap::new();
+        for (id, e) in &self.tests {
+            if !e.any_phase_failed() || e.quarantined || e.flaky {
+                continue;
+            }
+            let Some(c) = self.causes.get(id) else {
+                continue;
+            };
+            let g = groups
+                .entry((c.exc.clone(), cause_key(&c.message), c.at.clone()))
+                .or_insert_with(|| FailureGroup {
+                    exception: c.exc.clone(),
+                    message: c.message.clone(),
+                    at: c.at.clone(),
+                    count: 0,
+                    nodeids: Vec::new(),
+                });
+            g.count += 1;
+            g.nodeids.push(id.clone());
+        }
+        let mut out: Vec<FailureGroup> = groups.into_values().filter(|g| g.count > 1).collect();
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.nodeids.cmp(&b.nodeids))
+        });
+        out
+    }
+
     pub fn failure_text(&self, nodeid: &str) -> Option<&str> {
         let idx = *self.failure_by_id.get(nodeid)?;
         Some(self.failures[idx].longrepr.as_str())
@@ -817,6 +897,7 @@ impl Run {
     fn snapshot<'a>(&'a self, run_meta: &'a RunMeta) -> Snapshot<'a> {
         Snapshot {
             collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
+            failure_groups: self.failure_groups(),
             meta: SnapshotMeta {
                 argv: &run_meta.argv,
                 counts: self.counts(),
@@ -1012,6 +1093,7 @@ mod tests {
             lineno: None,
             subtest: false,
             crash: None,
+            cause: None,
             xfail_reason: None,
             skip_location: None,
         }
@@ -1021,6 +1103,150 @@ mod tests {
         run.record(None, report(nodeid, "setup", "passed"));
         run.record(None, report(nodeid, "call", outcome));
         run.record(None, report(nodeid, "teardown", "passed"));
+    }
+
+    /// A test whose call failed with `exc: message`, raised through `at`.
+    fn crashed(run: &mut Run, nodeid: &str, exc: &str, message: &str, at: Option<&str>) {
+        run.record(None, report(nodeid, "setup", "passed"));
+        let mut r = report(nodeid, "call", "failed");
+        r.cause = Some(proto::Cause {
+            exc: exc.into(),
+            message: message.into(),
+            at: at.map(String::from),
+        });
+        run.record(None, r);
+        run.record(None, report(nodeid, "teardown", "passed"));
+    }
+
+    #[test]
+    fn cause_key_masks_numbers_and_addresses() {
+        assert_eq!(
+            cause_key("[Errno 111] Connection refused: 127.0.0.1:5432"),
+            "[Errno N] Connection refused: N.N.N.N:N"
+        );
+        assert_eq!(
+            cause_key("<Session object at 0x7f3a2b1c> is closed"),
+            "<Session object at <addr>> is closed"
+        );
+    }
+
+    #[test]
+    fn failure_groups_share_exception_message_and_frame() {
+        let mut run = Run::default();
+        let refused = |port: u32| format!("[Errno 111] Connection refused: port {port}");
+        for (i, id) in ["t/a.py::x", "t/b.py::y", "t/c.py::z"].iter().enumerate() {
+            crashed(
+                &mut run,
+                id,
+                "ConnectionRefusedError",
+                &refused(5432 + i as u32),
+                Some("app/db.py:12"),
+            );
+        }
+        // Same exception, other frame: its own cause.
+        crashed(
+            &mut run,
+            "t/d.py::w",
+            "ConnectionRefusedError",
+            &refused(1),
+            Some("app/cache.py:3"),
+        );
+        crashed(
+            &mut run,
+            "t/e.py::v",
+            "ConnectionRefusedError",
+            &refused(2),
+            Some("app/cache.py:3"),
+        );
+        // Unique assertion in a test body: no group of one.
+        crashed(
+            &mut run,
+            "t/f.py::u",
+            "AssertionError",
+            "assert 1 == 2",
+            Some("t/f.py:7"),
+        );
+        // Quarantined and flaky members don't count.
+        crashed(
+            &mut run,
+            "t/g.py::q",
+            "ConnectionRefusedError",
+            &refused(9),
+            Some("app/db.py:12"),
+        );
+        run.quarantine(|id| id == "t/g.py::q");
+        // A failure with no crash info (an old worker) is never grouped.
+        full(&mut run, "t/h.py::old", "failed");
+
+        let groups = run.failure_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].count, 3);
+        assert_eq!(groups[0].at.as_deref(), Some("app/db.py:12"));
+        assert_eq!(groups[0].nodeids, ["t/a.py::x", "t/b.py::y", "t/c.py::z"]);
+        assert_eq!(groups[0].message, refused(5432));
+        assert_eq!(groups[1].nodeids, ["t/d.py::w", "t/e.py::v"]);
+
+        // report-json carries them, and leaves the key out when there are none.
+        let meta = RunMeta {
+            exitstatus: 1,
+            duration_seconds: 1.0,
+            started_at_epoch: 0,
+            workers: 2,
+            argv: Vec::new(),
+            shard: None,
+        };
+        let v = run.snapshot_value(&meta);
+        assert_eq!(
+            v["failure_groups"][0]["exception"],
+            "ConnectionRefusedError"
+        );
+        assert_eq!(v["failure_groups"][0]["count"], 3);
+        let mut quiet = Run::default();
+        full(&mut quiet, "t/a.py::x", "failed");
+        assert!(quiet.snapshot_value(&meta).get("failure_groups").is_none());
+    }
+
+    #[test]
+    fn failure_group_cause_matches_failure_text() {
+        let mut run = Run::default();
+        let refused = |r: &mut proto::Report| {
+            r.cause = Some(proto::Cause {
+                exc: "ConnectionRefusedError".into(),
+                message: "[Errno 111] Connection refused".into(),
+                at: Some("app/db.py:12".into()),
+            });
+        };
+        for id in ["t/a.py::x", "t/b.py::y"] {
+            run.record(None, report(id, "setup", "passed"));
+            let mut call = report(id, "call", "failed");
+            refused(&mut call);
+            run.record(None, call);
+        }
+        // Its own assertion first, then the shared teardown error: it keeps
+        // the assertion as its cause, matching its failure text.
+        run.record(None, report("t/c.py::z", "setup", "passed"));
+        let mut call = report("t/c.py::z", "call", "failed");
+        call.longrepr = Some("assert 1 == 2".into());
+        call.cause = Some(proto::Cause {
+            exc: "AssertionError".into(),
+            message: "assert 1 == 2".into(),
+            at: Some("t/c.py:7".into()),
+        });
+        run.record(None, call);
+        let mut teardown = report("t/c.py::z", "teardown", "failed");
+        refused(&mut teardown);
+        run.record(None, teardown);
+        // A first failure without a cause (a crash report) isn't grouped by a
+        // later attempt's cause either.
+        run.record(None, report("t/d.py::w", "call", "failed"));
+        let mut rerun = report("t/d.py::w", "call", "failed");
+        refused(&mut rerun);
+        run.record(None, rerun);
+
+        let groups = run.failure_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].nodeids, ["t/a.py::x", "t/b.py::y"]);
+        assert_eq!(run.failure_text("t/c.py::z"), Some("assert 1 == 2"));
     }
 
     #[test]
@@ -1210,6 +1436,7 @@ mod tests {
     fn subtest(nodeid: &str, outcome: &str) -> proto::Report {
         proto::Report {
             subtest: true,
+            crash: None,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1456,6 +1683,7 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                cause: None,
                 xfail_reason: None,
                 skip_location: None,
             },
@@ -1479,6 +1707,7 @@ mod tests {
                 lineno: None,
                 subtest: false,
                 crash: None,
+                cause: None,
                 xfail_reason: None,
                 skip_location: None,
             },

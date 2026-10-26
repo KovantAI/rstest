@@ -1276,3 +1276,66 @@ def test_no_phase_cpu_when_not_measured():
     p.pytest_runtest_logreport(mk_report("setup", "passed"))
     p.pytest_runtest_logreport(mk_report("teardown", "passed"))
     assert all("cpu" not in pl for kind, pl in p._conn.sent if kind == "report")
+
+
+def _load(path, name):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cause_of_names_the_project_frame_not_site_packages(tmp_path):
+    from rstest_worker._internal.stream import cause_of
+
+    # A library in the venv raises; the project's own db.py made the call.
+    lib = tmp_path / ".venv" / "lib" / "site-packages" / "netlib.py"
+    lib.parent.mkdir(parents=True)
+    lib.write_text("def dial(port):\n    raise ConnectionRefusedError(111, f'refused {port}')\n")
+    db = tmp_path / "app" / "db.py"
+    db.parent.mkdir()
+    db.write_text("def connect(dial):\n    return dial(5432)\n")
+    netlib = _load(lib, "netlib_fake")
+    app_db = _load(db, "app_db_fake")
+    with pytest.raises(ConnectionRefusedError) as excinfo:
+        app_db.connect(netlib.dial)
+    cause = cause_of(excinfo, tmp_path)
+    assert cause == {
+        "exc": "ConnectionRefusedError",
+        "message": "[Errno 111] refused 5432",
+        "at": "app/db.py:2",
+    }
+
+
+def test_cause_of_skips_generated_code_frames(tmp_path, monkeypatch):
+    import dataclasses
+
+    from rstest_worker._internal.stream import cause_of
+
+    # A frozen dataclass raises from its generated `<string>` __setattr__,
+    # which resolves inside the rootdir when the cwd is there.
+    monkeypatch.chdir(tmp_path)
+    model = tmp_path / "app" / "model.py"
+    model.parent.mkdir()
+    model.write_text("def rename(obj):\n    obj.name = 'b'\n")
+    app_model = _load(model, "app_model_fake")
+    Frozen = dataclasses.make_dataclass("Frozen", ["name"], frozen=True)
+    with pytest.raises(dataclasses.FrozenInstanceError) as excinfo:
+        app_model.rename(Frozen("a"))
+    cause = cause_of(excinfo, tmp_path)
+    assert cause is not None
+    assert cause["at"] == "app/model.py:2"
+
+
+def test_cause_of_without_a_project_frame_and_on_surprises(tmp_path):
+    from rstest_worker._internal.stream import cause_of
+
+    with pytest.raises(ValueError) as excinfo:
+        raise ValueError("bad\nsecond line")
+    # Raised from this test file, which is outside tmp_path: no project frame.
+    assert cause_of(excinfo, tmp_path) == {"exc": "ValueError", "message": "bad", "at": None}
+    # Anything unexpected is no cause, never an exception in the worker.
+    assert cause_of(object(), tmp_path) is None

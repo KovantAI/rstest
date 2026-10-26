@@ -441,7 +441,8 @@ same way.
 
 ## Azure Pipelines
 
-`--output azure` emits an `##vso[task.logissue]` per failing test, which
+`--output azure` emits an `##vso[task.logissue]` per failing test (one per
+group when several [share a cause](ci-output.md#failures-by-cause)), which
 Azure surfaces as an inline issue on the file in the PR. Publish the
 JUnit with the
 [`PublishTestResults`](https://learn.microsoft.com/azure/devops/pipelines/tasks/reference/publish-test-results-v2)
