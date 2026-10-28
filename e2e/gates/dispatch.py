@@ -427,6 +427,19 @@ def gate_fork_pool(g, args, binary):
         cr.returncode != 0 and "test_boom" in cr.stdout,
         cr.stdout[-200:],
     )
+    # A startup error every forked worker hits prints once, as in the plain
+    # pool (R1): each forked worker has its own stderr pipe, deduped.
+    g.write("fpconf/conftest.py", "import conftest_missing_mod\n")
+    for i in range(3):
+        g.write(f"fpconf/test_{i}.py", "def test_x():\n    pass\n")
+    for label, extra in (("plain pool", ()), ("fork-pool", ("--fork-pool",))):
+        r = g.run(".", "-n", "3", *extra, cwd=g.tmp / "fpconf")
+        out = r.stdout + r.stderr
+        check(
+            f"{label}: startup error printed once",
+            out.count("ImportError while loading conftest") == 1,
+            f"count={out.count('ImportError while loading conftest')}",
+        )
     # Doctor JSON records whether fork-prewarm was used.
     dj = g.tmp / "fp-doctor.json"
     g.run("fp/test_fp.py", "-n", "4", "--fork-pool", "--doctor-json", str(dj))

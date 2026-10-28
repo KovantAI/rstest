@@ -27,6 +27,8 @@ class WarningEntry(TypedDict):
     filename: str
     lineno: int
     count: int
+    location: str  # pytest's summary location line: the nodeid, else relpath:line
+    text: str  # the warning as pytest prints it, source line included
 
 
 class FixtureStat(TypedDict):
@@ -75,6 +77,7 @@ class ReportPayload(_ReportRequired, total=False):
     cause: CauseInfo  # failed reports: what raised and where (grouping by cause)
     network: list[str]  # teardown: outbound destinations ("host:port") the test reached
     no_rerun: bool  # failed: the flaky mark's only_rerun / rerun_except rule out a rerun
+    subtest_desc: str  # subtest: its description as pytest prints it ("(i=1)")
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------

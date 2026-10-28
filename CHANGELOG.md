@@ -166,6 +166,25 @@ between 0.x releases and are listed here.
   its own are reported as not run (`not run: its worker's session ended
   ...`), not silently dropped with exit 0.
 
+- **`--fork-pool` prints a startup error once**, not once per worker. A
+  broken `conftest.py` printed its `ImportError` from every forked worker,
+  which shared the zygote's stderr; each now has its own stderr pipe, deduped
+  as in the plain pool, and a forked worker that dies names its last stderr
+  lines as a spawned one does.
+
+- **`audit` and `migrate-check` no longer call a race an order dependency.**
+  A test alone in its file that passes under `--dist loadfile` has no in-file
+  order for loadfile to keep: it won a race against another file's test for
+  a shared resource. It is now a CONCURRENT RACE (`audit` lists it with the
+  `@pytest.mark.serial` fixes) instead of ORDER DEPENDENCY with
+  `--dist loadfile` advice.
+
+- **The parallel warnings summary and short summary print as pytest's.** Each
+  warning is listed under the tests that raised it (or the file and line, for
+  one outside a test; per-file counts from 10 tests on) with its source line,
+  where it showed only `path:line: Category` and the message. A failed subtest
+  reads `SUBFAILED(i=1) nodeid - message` in the short summary, not `FAILED`.
+
 ## 0.9.0 (2026-10-06)
 
 ### Features

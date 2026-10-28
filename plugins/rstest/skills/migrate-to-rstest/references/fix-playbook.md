@@ -11,6 +11,7 @@ touch the test now. The deeper background for each class is in the project's
 - NOT PARALLEL-SPECIFIC
 - INTRINSIC FLAKE
 - ORDER DEPENDENCY
+- CONCURRENT RACE
 - WALL-CLOCK / LOAD-SENSITIVE
 - ISOLATION / CO-LOCATION
 - Fixed network port / OS resource
@@ -92,6 +93,23 @@ its own state / the polluter clean up after itself (autouse fixture).
 
 **Stopgap.** Run the suite with `--dist loadfile` (keeps each file's tests on one
 worker, preserving in-file order); set it in `[tool.rstest]`.
+
+---
+
+## CONCURRENT RACE
+
+**Cause.** Passes serial and under `--dist loadfile`, fails under `--dist load`,
+and is the **only test in its file**. `loadfile` can't change a lone test's
+order, so it passed there only because the race went its way: the test
+contends with a test in another file for a shared resource (a fixed file path,
+a port, a database) while both run at once.
+
+**Upstream fix.** Give each worker its own copy of the resource: `tmp_path`
+instead of a fixed path, a port from the OS (bind to port 0), a database or
+schema named after `worker_id`.
+
+**Stopgap.** `@pytest.mark.serial` (audit puts it in the paste-ready block).
+`--dist loadfile` does not help.
 
 ---
 

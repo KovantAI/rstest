@@ -637,6 +637,7 @@ mod tests {
                     skip_location: None,
                     network: Vec::new(),
                     no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }
@@ -672,6 +673,7 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
         }
     }
 

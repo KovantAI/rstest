@@ -264,6 +264,8 @@ struct Failure {
     sections: Vec<(String, String)>,
     /// The short test summary's message (see [`proto::Report::crash`]).
     crash: Option<String>,
+    /// A failed subtest's description (see [`proto::Report::subtest_desc`]).
+    subtest_desc: Option<String>,
 }
 
 /// Byte cap on any failure/collection-error text we persist. junit/html embed
@@ -495,6 +497,7 @@ impl Run {
                 longrepr: repr.clone(),
                 sections: r.sections.clone(),
                 crash: r.crash.clone(),
+                subtest_desc: r.subtest_desc.clone(),
             });
             r.longrepr.as_ref().map(|_| repr)
         } else {
@@ -1110,6 +1113,7 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -1463,6 +1467,7 @@ mod tests {
             crash: None,
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1714,6 +1719,7 @@ mod tests {
                 skip_location: None,
                 network: Vec::new(),
                 no_rerun: false,
+                subtest_desc: None,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1740,6 +1746,7 @@ mod tests {
                 skip_location: None,
                 network: Vec::new(),
                 no_rerun: false,
+                subtest_desc: None,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

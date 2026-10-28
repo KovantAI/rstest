@@ -130,6 +130,10 @@ pub struct Report {
     /// `rerun_except` rule out a rerun for this failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_rerun: bool,
+    /// A subtest's description as pytest prints it after `SUBFAILED`
+    /// (`(i=1)`, `[msg] (i=1)`); absent on any other report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtest_desc: Option<String>,
 }
 
 /// What a failure raised and where (see [`Report::cause`]).
@@ -155,6 +159,14 @@ pub struct WarningEntry {
     pub filename: String,
     pub lineno: u64,
     pub count: u64,
+    /// pytest's location line for the warnings summary: the test's nodeid,
+    /// else `path:line` relative to the invocation directory.
+    #[serde(default)]
+    pub location: String,
+    /// The warning as pytest prints it: `path:line: Category: message` and
+    /// the source line. Empty from a worker that predates it.
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -456,6 +468,7 @@ mod tests {
         let json = serde_json::to_value(Report {
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
             ..r
         })
         .unwrap();
@@ -587,6 +600,7 @@ mod property {
                 skip_location: None,
                 network: Vec::new(),
                 no_rerun: false,
+                subtest_desc: None,
             }
         }
     }
@@ -607,8 +621,9 @@ mod property {
         fn arb_warning()(
             when in small_str(), category in small_str(), message in small_str(),
             filename in small_str(), lineno in any::<u64>(), count in any::<u64>(),
+            location in small_str(), text in small_str(),
         ) -> WarningEntry {
-            WarningEntry { when, category, message, filename, lineno, count }
+            WarningEntry { when, category, message, filename, lineno, count, location, text }
         }
     }
 

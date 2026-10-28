@@ -220,6 +220,7 @@ pub(crate) fn fabricate_crash_report(
         skip_location: None,
         network: Vec::new(),
         no_rerun: false,
+        subtest_desc: None,
     }
 }
 
@@ -248,6 +249,7 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         skip_location: None,
         network: Vec::new(),
         no_rerun: false,
+        subtest_desc: None,
     }
 }
 
@@ -512,6 +514,7 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
         }
     }
 

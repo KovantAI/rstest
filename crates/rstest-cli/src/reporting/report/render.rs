@@ -315,7 +315,14 @@ impl Run {
                         }
                     }
                     for f in failures.iter().filter(|f| (f.when == "call") == (c == 'f')) {
-                        let word = if c == 'f' { "FAILED" } else { "ERROR" };
+                        // pytest's word for a failed subtest carries its
+                        // description: `SUBFAILED(i=1)`.
+                        let word = match (&f.subtest_desc, c) {
+                            (Some(d), 'f') => format!("SUBFAILED{d}"),
+                            (_, 'f') => "FAILED".to_string(),
+                            _ => "ERROR".to_string(),
+                        };
+                        let word = word.as_str();
                         let msg = f
                             .crash
                             .as_deref()
@@ -453,6 +460,7 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -890,6 +898,28 @@ mod tests {
              ERROR t.py::pass_td - RuntimeError: teardown boom\n\
              ERROR t.py::fail_td - RuntimeError: teardown boom\n\
              ERROR t.py::setup_err - ValueError: setup boom\n"
+        );
+    }
+
+    #[test]
+    fn short_summary_names_a_failed_subtest_as_pytest_does() {
+        let mut run = Run::default();
+        run.record(Some(0), report("t.py::test_sub", "setup", "passed"));
+        let mut sub = report("t.py::test_sub", "call", "failed");
+        sub.subtest = true;
+        sub.subtest_desc = Some("(i=1)".into());
+        sub.crash = Some("assert 1 != 1".into());
+        run.record(Some(0), sub);
+        let mut parent = report("t.py::test_sub", "call", "failed");
+        parent.crash = Some("contains 1 failed subtest".into());
+        run.record(Some(0), parent);
+        let out = summary(&run, "fE", None);
+        assert!(
+            out.contains(
+                "SUBFAILED(i=1) t.py::test_sub - assert 1 != 1\n\
+                 FAILED t.py::test_sub - contains 1 failed subtest\n"
+            ),
+            "{out}"
         );
     }
 
