@@ -23,11 +23,12 @@ flagged in JUnit (`flaky` property) and `--report-json`. See
 
 Coming from pytest-rerunfailures? rstest's retry reads `--reruns`,
 `--only-rerun` and the mark's budget (`reruns=` or positional, as in
-`flaky(3)`) and `condition=`. It does not carry over:
-
-- the mark's `reruns_delay`, `only_rerun` and `rerun_except` keywords: ignored
-- `--reruns-delay` and `--rerun-except`: forwarded to pytest, where they do
-  nothing with the plugin installed and are a usage error (exit 4) without it
+`flaky(3)`), `condition=`, `only_rerun`, `rerun_except` and `reruns_delay`,
+as the plugin reads them. In a pool, a worker waits `reruns_delay` after each
+failed attempt that may be retried, the last one included. It does not carry
+over `--reruns-delay` and `--rerun-except`: they are forwarded to pytest, where
+they do nothing with the plugin installed and are a usage error (exit 4)
+without it.
 
 A marked test is retried at every worker count, `-n 0` included, with or
 without `--reruns`.

@@ -107,10 +107,6 @@ retries on the replacement. Where each side's reruns apply:
 Not carried over from pytest-rerunfailures when rstest owns the retry (the
 pool, or any run with rstest's own `--reruns`):
 
-- **Mark keywords `reruns_delay`, `only_rerun`, `rerun_except`**: ignored. A
-  test with a non-matching `only_rerun` is still retried. Use the global
-  `--only-rerun` to filter by error. (The budget, `reruns=` or positional
-  `flaky(3)`, and `condition=` are read as the plugin reads them.)
 - **`--reruns-delay` and `--rerun-except`**: not rstest flags, so they are
   forwarded to pytest. With pytest-rerunfailures installed they parse and do
   nothing (no delay, no exception filter); without it they are a pytest usage

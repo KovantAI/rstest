@@ -270,6 +270,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 

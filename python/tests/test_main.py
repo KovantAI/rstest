@@ -148,7 +148,7 @@ def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
 
     def record_close(fd):
         closed.append(fd)
-        # The fake worker fds (10,20,30,40) aren't real; only close the real one.
+        # The fake worker fds (10..60) aren't real; only close the real one.
         if fd == report_w:
             real_close(fd)
 
@@ -157,8 +157,8 @@ def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
         worker_main.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
     )
 
-    # count=2, report_fd, release_fd, then cmd0 evt0 cmd1 evt1
-    argv = ["2", str(report_w), str(release_r), "10", "20", "30", "40"]
+    # count=2, report_fd, release_fd, then cmd0 evt0 err0 cmd1 evt1 err1
+    argv = ["2", str(report_w), str(release_r), "10", "20", "30", "40", "50", "60"]
     with pytest.raises(SystemExit) as exc:
         worker_main._fork_pool(argv)
     assert exc.value.code == 0
@@ -167,8 +167,8 @@ def test_fork_pool_parent_reports_pids_and_exits(monkeypatch):
     real_close(report_r)
     real_close(release_r)
     assert pids.split() == ["111", "222"]
-    # All four inherited worker fds were closed in the parent before exit.
-    assert {10, 20, 30, 40} <= set(closed)
+    # All six inherited worker fds were closed in the parent before exit.
+    assert {10, 20, 30, 40, 50, 60} <= set(closed)
 
 
 def test_fork_pool_child_exits_normally_after_serve(monkeypatch):
@@ -177,6 +177,8 @@ def test_fork_pool_child_exits_normally_after_serve(monkeypatch):
     # spawned worker), never os._exit.
     monkeypatch.setattr(worker_main.os, "fork", lambda: 0)
     monkeypatch.setattr(worker_main.os, "close", lambda fd: None)
+    dup2 = []
+    monkeypatch.setattr(worker_main.os, "dup2", lambda fd, to: dup2.append((fd, to)))
     monkeypatch.setattr(worker_main.protocol, "Connection", lambda c, e: (c, e))
     served = []
     monkeypatch.setattr(worker_main, "_serve", served.append)
@@ -186,9 +188,11 @@ def test_fork_pool_child_exits_normally_after_serve(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "")
 
     with pytest.raises(SystemExit) as exc:
-        worker_main._fork_pool(["1", "9", "8", "10", "20"])
+        worker_main._fork_pool(["1", "9", "8", "10", "20", "30"])
     assert exc.value.code == 0
     assert served == [(10, 20)]
+    # Its own stderr pipe replaces the zygote's (deduped by the orchestrator).
+    assert dup2 == [(30, 2)]
     assert os.environ["RSTEST_WORKER_ID"] == "gw0"
     assert os.environ["RSTEST_SEND_IDS"] == "1"
 
@@ -198,6 +202,7 @@ def test_fork_pool_child_swallows_broken_pipe(monkeypatch):
     # same as the spawned worker's BrokenPipeError path, never a traceback.
     monkeypatch.setattr(worker_main.os, "fork", lambda: 0)
     monkeypatch.setattr(worker_main.os, "close", lambda fd: None)
+    monkeypatch.setattr(worker_main.os, "dup2", lambda fd, to: None)
     monkeypatch.setattr(worker_main.protocol, "Connection", lambda c, e: object())
 
     def raise_broken(conn):
@@ -213,7 +218,7 @@ def test_fork_pool_child_swallows_broken_pipe(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "")
 
     with pytest.raises(SystemExit) as exc:
-        worker_main._fork_pool(["1", "9", "8", "10", "20"])
+        worker_main._fork_pool(["1", "9", "8", "10", "20", "30"])
     assert exc.value.code == ("os._exit", 0)
 
 
