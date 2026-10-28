@@ -1627,6 +1627,11 @@ fn dispatch_run(
                     },
                 };
                 if let proto::Event::Report(r) = &event {
+                    if r.when == "setup" {
+                        if let Some(i) = &interrupts {
+                            i.saw_setup();
+                        }
+                    }
                     if r.outcome == "rerun" {
                         // A retried attempt: pytest's own terminal shows it
                         // (`R`, `N rerun`); the run record keeps the final one.
@@ -1788,9 +1793,13 @@ fn interpreter_hint(
 /// While installed, the signal is only recorded (see
 /// [`crate::scheduling::interrupt`]); the orchestrator keeps reading the
 /// session, which ends with pytest's own INTERRUPTED (2), then writes the
-/// reports as usual. SIGINT is not forwarded: Ctrl-C and a CI runner's cancel
-/// signal the whole process group, so pytest already has it, and a second
-/// SIGINT would abort pytest's teardown and summary. SIGTERM is forwarded to
+/// reports as usual. SIGINT is forwarded only once the session shows it never
+/// got it: Ctrl-C and a CI runner's cancel signal the whole process group, so
+/// pytest already has it, and a second SIGINT would abort pytest's teardown
+/// and summary. But a pytest that got it re-raises KeyboardInterrupt without
+/// reporting and never sets up another test, so a test set up after the
+/// signal (past [`SIGINT_IN_FLIGHT`], for reports already on their way) means
+/// it went to our pid alone (`kill -INT PID`): pass it on. SIGTERM is forwarded to
 /// the session as SIGINT: `kill PID` and job timeouts often target only our
 /// pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
 /// too, the child is already gone and the caller winds down from what it
@@ -1798,20 +1807,45 @@ fn interpreter_hint(
 struct SingleWorkerInterrupts {
     _guard: crate::scheduling::interrupt::Guard,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Setup reports the session has sent (see [`Self::saw_setup`]).
+    setups: std::sync::Arc<std::sync::atomic::AtomicU64>,
     forwarder: Option<std::thread::JoinHandle<()>>,
 }
+
+/// How long after a SIGINT a setup report may still be one the session sent
+/// before it: reports read that soon don't prove it missed the signal.
+const SIGINT_IN_FLIGHT: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl SingleWorkerInterrupts {
     fn install(child: Option<u32>) -> Self {
         use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicU64;
         let guard = crate::scheduling::interrupt::Guard::install();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let setups = std::sync::Arc::new(AtomicU64::new(0));
         #[cfg(unix)]
         let forwarder = child.map(|pid| {
             let stop = std::sync::Arc::clone(&stop);
+            let setups = std::sync::Arc::clone(&setups);
             std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    if crate::scheduling::interrupt::requested() == Some(libc::SIGTERM) {
+                use std::sync::atomic::Ordering::SeqCst;
+                // (when the SIGINT was seen, setups counted by then + the
+                // in-flight window); None until one arrives.
+                let mut sigint: Option<(std::time::Instant, Option<u64>)> = None;
+                while !stop.load(SeqCst) {
+                    let forward = match crate::scheduling::interrupt::requested() {
+                        Some(libc::SIGTERM) => true,
+                        Some(libc::SIGINT) => {
+                            let (at, baseline) =
+                                sigint.get_or_insert((std::time::Instant::now(), None));
+                            if baseline.is_none() && at.elapsed() >= SIGINT_IN_FLIGHT {
+                                *baseline = Some(setups.load(SeqCst));
+                            }
+                            baseline.is_some_and(|b| setups.load(SeqCst) > b)
+                        }
+                        _ => false,
+                    };
+                    if forward {
                         // SAFETY: sending a signal touches no memory. The pid
                         // is our unreaped child (the caller drops this guard,
                         // joining the thread, before reaping it), so it cannot
@@ -1831,8 +1865,16 @@ impl SingleWorkerInterrupts {
         Self {
             _guard: guard,
             stop,
+            setups,
             forwarder,
         }
+    }
+
+    /// The session sent a setup report: a test started (or finished setting
+    /// up), which a pytest that got SIGINT never does.
+    fn saw_setup(&self) {
+        self.setups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
