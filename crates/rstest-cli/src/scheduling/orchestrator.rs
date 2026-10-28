@@ -219,6 +219,7 @@ pub(crate) fn fabricate_crash_report(
         xfail_reason: None,
         skip_location: None,
         network: Vec::new(),
+        marker_timeout: None,
     }
 }
 
@@ -246,6 +247,7 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         xfail_reason: None,
         skip_location: None,
         network: Vec::new(),
+        marker_timeout: None,
     }
 }
 
@@ -499,6 +501,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         }
     }
 

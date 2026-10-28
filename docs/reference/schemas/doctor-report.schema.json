@@ -485,6 +485,12 @@
       "description": "Timeouts that catch a hang without killing a slow-but-healthy test. Each\ntest's own limit is the larger of 3x its slowest recorded passing run and\nthat run plus 1s, rounded up to whole seconds.",
       "type": "object",
       "properties": {
+        "marker_covered": {
+          "description": "Tests that would need one but already carry a `@pytest.mark.timeout`\nat least as high; not in `override_count`.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
         "override_count": {
           "description": "Judged tests whose own limit is above `suite_timeout`: they need a\nper-test `@pytest.mark.timeout`.",
           "type": "integer",
@@ -515,12 +521,21 @@
         "suite_timeout",
         "tests_judged",
         "override_count",
+        "marker_covered",
         "overrides"
       ]
     },
     "TimeoutOverride": {
       "type": "object",
       "properties": {
+        "current": {
+          "description": "Its current `@pytest.mark.timeout`, below the suggestion; absent when\nit has none.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "nodeid": {
           "description": "The test.",
           "type": "string"

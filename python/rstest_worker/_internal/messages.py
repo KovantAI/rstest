@@ -74,6 +74,7 @@ class ReportPayload(_ReportRequired, total=False):
     skip_location: list[str | int | None]  # skip: [relpath, lineno|None] as pytest folds it
     cause: CauseInfo  # failed reports: what raised and where (grouping by cause)
     network: list[str]  # teardown: outbound destinations ("host:port") the test reached
+    marker_timeout: float  # call: the test's @pytest.mark.timeout in seconds, when it has one
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------

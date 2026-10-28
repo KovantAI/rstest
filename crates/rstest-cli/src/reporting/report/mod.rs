@@ -73,6 +73,10 @@ pub struct TestEntry {
     pub setup_cpu: Option<f64>,
     #[serde(skip)]
     pub teardown_cpu: Option<f64>,
+    /// The test's `@pytest.mark.timeout` in seconds, when it has one.
+    /// Doctor-internal; not serialized.
+    #[serde(skip)]
+    pub marker_timeout: Option<f64>,
     /// Passed only after one or more reruns (--reruns or @pytest.mark.flaky).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -551,6 +555,7 @@ impl Run {
                 }
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
+                entry.marker_timeout = r.marker_timeout;
             }
         }
         entry.wasxfail |= r.wasxfail;
@@ -1109,6 +1114,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         }
     }
 
@@ -1461,6 +1467,7 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            marker_timeout: None,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1711,6 +1718,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1736,6 +1744,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

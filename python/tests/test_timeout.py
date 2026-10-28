@@ -363,3 +363,37 @@ def test_configure_worker_overrides_inherited_xdist_env(monkeypatch, tmp_path):
 
     assert os.environ["PYTEST_XDIST_WORKER"] == "gw2"
     assert os.environ["PYTEST_XDIST_WORKER_COUNT"] == "4"
+
+
+# --- marker_timeout on the call report (doctor TIMEOUTS) --------------------
+
+
+def _report_through(plugin, item, when):
+    """Run a report for `item` through the makereport wrapper and logreport;
+    return the payload sent."""
+    report = SimpleNamespace(
+        nodeid=item.nodeid,
+        when=when,
+        outcome="passed",
+        duration=0.1,
+        location=("t.py", 1, "test_x"),
+        failed=False,
+        skipped=False,
+        sections=[],
+        longrepr=None,
+    )
+    gen = plugin.pytest_runtest_makereport(item, SimpleNamespace(excinfo=None))
+    next(gen)
+    with pytest.raises(StopIteration):
+        gen.send(report)
+    plugin.pytest_runtest_logreport(report)
+    return plugin._conn.sent[-1][1]
+
+
+def test_call_report_carries_the_marker_timeout(monkeypatch):
+    p = _plugin(monkeypatch, timeout=5)
+    marked = _item("t.py::test_x", SimpleNamespace(args=(30,), kwargs={}))
+    assert _report_through(p, marked, "call")["marker_timeout"] == 30.0
+    # Only the call phase, and only a marker: the global --timeout is not one.
+    assert "marker_timeout" not in _report_through(p, marked, "setup")
+    assert "marker_timeout" not in _report_through(p, _item("t.py::test_y"), "call")

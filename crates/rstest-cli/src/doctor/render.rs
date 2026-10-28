@@ -2,7 +2,7 @@
 //! job summary, and the CI summary sinks (GitHub step summary, Buildkite
 //! annotation). All read-only over a `DoctorReport`.
 
-use super::{DoctorReport, FixtureEntry};
+use super::{DoctorReport, FixtureEntry, TimeoutAdvice, TimeoutOverride};
 use crate::reporting::sink::Sink;
 
 /// The tuning hint a fixture hotspot warrants, from its scope + run profile.
@@ -220,18 +220,23 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         let _ = writeln!(
             md,
             "### Timeouts\n\n> `--timeout {}` covers {} of the {} test(s) with 5+ recorded \
-             passing runs (a test's limit: 3x its slowest run, at least +1s).\n",
+             passing runs{} (a test's limit: 3x its slowest run, at least +1s).\n",
             t.suite_timeout,
-            t.tests_judged - t.override_count,
-            t.tests_judged
+            t.tests_judged - t.override_count - t.marker_covered,
+            t.tests_judged,
+            marker_covered_note(t)
         );
         if !t.overrides.is_empty() {
             md.push_str("| Timeout | Slowest | Runs | Test |\n|---:|---:|---:|---|\n");
             for o in &t.overrides {
                 let _ = writeln!(
                     md,
-                    "| `@pytest.mark.timeout({})` | {:.2}s | {} | `{}` |",
-                    o.timeout, o.slowest_seconds, o.runs, o.nodeid
+                    "| `@pytest.mark.timeout({})`{} | {:.2}s | {} | `{}` |",
+                    o.timeout,
+                    current_note(o),
+                    o.slowest_seconds,
+                    o.runs,
+                    o.nodeid
                 );
             }
             md.push('\n');
@@ -523,17 +528,23 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
     if let Some(t) = &r.timeouts {
         sink.out_line(&format!(
             "\nTIMEOUTS (a test's limit: 3x its slowest recorded passing run, at least +1s):\n  \
-             --timeout {} covers {} of the {} test(s) with 5+ recorded runs",
+             --timeout {} covers {} of the {} test(s) with 5+ recorded runs{}",
             t.suite_timeout,
-            t.tests_judged - t.override_count,
-            t.tests_judged
+            t.tests_judged - t.override_count - t.marker_covered,
+            t.tests_judged,
+            marker_covered_note(t)
         ));
         if !t.overrides.is_empty() {
             sink.out_line("  these need their own limit:");
             for o in &t.overrides {
                 sink.out_line(&format!(
-                    "  {:4}s  slowest {:.2}s of {} runs  {}  <- @pytest.mark.timeout({})",
-                    o.timeout, o.slowest_seconds, o.runs, o.nodeid, o.timeout
+                    "  {:4}s  slowest {:.2}s of {} runs  {}  <- @pytest.mark.timeout({}){}",
+                    o.timeout,
+                    o.slowest_seconds,
+                    o.runs,
+                    o.nodeid,
+                    o.timeout,
+                    current_note(o)
                 ));
             }
             if t.override_count > t.overrides.len() {
@@ -623,6 +634,22 @@ pub(crate) fn leak_delta(l: &super::Leak) -> String {
 }
 
 /// "1 worker" for a single-worker run (`-n 0` / `-n 1`), else "N workers".
+/// `; N more by their own @pytest.mark.timeout`, when any test is.
+fn marker_covered_note(t: &TimeoutAdvice) -> String {
+    if t.marker_covered == 0 {
+        return String::new();
+    }
+    format!(
+        "; {} more by their own @pytest.mark.timeout",
+        t.marker_covered
+    )
+}
+
+/// ` (now N)` for a test whose current marker is below the suggestion.
+fn current_note(o: &TimeoutOverride) -> String {
+    o.current.map_or(String::new(), |c| format!(" (now {c})"))
+}
+
 fn workers_label(n: usize) -> String {
     if n <= 1 {
         "1 worker".to_string()
@@ -822,6 +849,30 @@ mod tests {
         );
         let md = render_markdown(&r);
         assert!(md.contains("### Timeouts"), "{md}");
+        // A marker-covered test and a low current marker are both said.
+        let mut marked = report(12);
+        let t = marked.timeouts.as_mut().unwrap();
+        t.marker_covered = 2;
+        t.overrides[0].current = Some(10.0);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &marked);
+        let marked_out = cap.out();
+        assert!(
+            marked_out.contains(
+                "  --timeout 3 covers 37 of the 40 test(s) with 5+ recorded runs; \
+                 2 more by their own @pytest.mark.timeout"
+            ),
+            "{marked_out}"
+        );
+        assert!(
+            marked_out.contains("<- @pytest.mark.timeout(26) (now 10)"),
+            "{marked_out}"
+        );
+        let marked_md = render_markdown(&marked);
+        assert!(
+            marked_md.contains("| `@pytest.mark.timeout(26)` (now 10) | 8.40s |"),
+            "{marked_md}"
+        );
         assert!(
             md.contains(
                 "| `@pytest.mark.timeout(26)` | 8.40s | 12 | `tests/test_a.py::test_long` |"

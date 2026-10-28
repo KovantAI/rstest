@@ -649,6 +649,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         }
     }
 
@@ -667,6 +668,7 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            marker_timeout: None,
             ..report("call", outcome)
         };
         assert!(outcome_kind(&sub("passed")).is_none());

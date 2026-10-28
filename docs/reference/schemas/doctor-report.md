@@ -134,6 +134,7 @@ Timeouts that catch a hang without killing a slow-but-healthy test. Each test's 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `marker_covered` | integer | yes | Tests that would need one but already carry a `@pytest.mark.timeout` at least as high; not in `override_count`. |
 | `override_count` | integer | yes | Judged tests whose own limit is above `suite_timeout`: they need a per-test `@pytest.mark.timeout`. |
 | `overrides` | array of TimeoutOverride | yes | The highest of those, worst first (top 20). |
 | `suite_timeout` | integer | yes | Suggested suite-wide `--timeout`, in seconds: the limit that covers 95% of the judged tests. |
@@ -143,6 +144,7 @@ Timeouts that catch a hang without killing a slow-but-healthy test. Each test's 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `current` | number or null | no | Its current `@pytest.mark.timeout`, below the suggestion; absent when it has none. |
 | `nodeid` | string | yes | The test. |
 | `runs` | integer | yes | Passing runs that slowest time comes from. |
 | `slowest_seconds` | number | yes | Its slowest recorded passing call-phase time, in seconds (the phase `--timeout` limits; fixture setup/teardown not included). |

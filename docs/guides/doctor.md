@@ -298,6 +298,10 @@ tests above it are listed slowest first (top 20) with a marker to paste onto
 them, since one global value would either kill them or be too loose to catch
 a hang anywhere else.
 
+A test that already carries a `@pytest.mark.timeout` at or above its limit is
+left off the list (the summary line counts it as covered by its own marker);
+one whose marker is lower is listed with it, as `(now 10)`.
+
 Only tests in this run with at least 5 passing runs in the history count
 (failed runs never set the limit), so the section appears once the history
 has built up. This run's own times aren't included yet.

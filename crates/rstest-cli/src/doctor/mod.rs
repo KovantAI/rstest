@@ -148,6 +148,9 @@ struct TimeoutAdvice {
     /// Judged tests whose own limit is above `suite_timeout`: they need a
     /// per-test `@pytest.mark.timeout`.
     override_count: usize,
+    /// Tests that would need one but already carry a `@pytest.mark.timeout`
+    /// at least as high; not in `override_count`.
+    marker_covered: usize,
     /// The highest of those, worst first (top 20).
     overrides: Vec<TimeoutOverride>,
 }
@@ -164,6 +167,10 @@ struct TimeoutOverride {
     runs: usize,
     /// Its suggested `@pytest.mark.timeout`, in seconds.
     timeout: u64,
+    /// Its current `@pytest.mark.timeout`, below the suggestion; absent when
+    /// it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current: Option<f64>,
 }
 
 /// Slow creep: a test whose median call time rose from the older third of
@@ -315,13 +322,14 @@ fn timeout_advice(
     run: &Run,
     history: &crate::reporting::history::History,
 ) -> Option<TimeoutAdvice> {
-    let mut judged: Vec<(String, f64, usize, u64)> = run
+    let mut judged: Vec<(String, f64, usize, u64, Option<f64>)> = run
         .tests()
-        .keys()
-        .filter_map(|id| {
+        .iter()
+        .filter_map(|(id, e)| {
             let calls = crate::scheduling::durations::passing_calls(history, id)?;
             let slowest = calls.iter().copied().fold(0.0, f64::max);
-            Some((id.clone(), slowest, calls.len(), timeout_for(slowest)))
+            let limit = timeout_for(slowest);
+            Some((id.clone(), slowest, calls.len(), limit, e.marker_timeout))
         })
         .collect();
     if judged.is_empty() {
@@ -333,6 +341,10 @@ fn timeout_advice(
     let suite_timeout = limits[(limits.len() * 95).div_ceil(100) - 1];
     let tests_judged = judged.len();
     judged.retain(|t| t.3 > suite_timeout);
+    let needing = judged.len();
+    // A marker at or above the suggestion already does the job.
+    judged.retain(|t| t.4.is_none_or(|m| m < t.3 as f64));
+    let marker_covered = needing - judged.len();
     judged.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     let override_count = judged.len();
     judged.truncate(TIMEOUT_OVERRIDES_SHOWN);
@@ -340,14 +352,18 @@ fn timeout_advice(
         suite_timeout,
         tests_judged,
         override_count,
+        marker_covered,
         overrides: judged
             .into_iter()
-            .map(|(nodeid, slowest, runs, timeout)| TimeoutOverride {
-                nodeid,
-                slowest_seconds: (slowest * 1e4).round() / 1e4,
-                runs,
-                timeout,
-            })
+            .map(
+                |(nodeid, slowest, runs, timeout, current)| TimeoutOverride {
+                    nodeid,
+                    slowest_seconds: (slowest * 1e4).round() / 1e4,
+                    runs,
+                    timeout,
+                    current,
+                },
+            )
             .collect(),
     })
 }
@@ -1003,6 +1019,63 @@ mod timeout_tests {
         let t = timeout_advice(&run, &h).unwrap();
         assert_eq!((t.suite_timeout, t.override_count), (15, 0));
     }
+
+    #[test]
+    fn a_timeout_marker_that_covers_the_suggestion_is_not_an_override() {
+        let mut tests: Vec<(String, f32, usize)> = (0..38)
+            .map(|i| (format!("t.py::fast{i}"), 0.1, 5))
+            .collect();
+        tests.push(("t.py::marked_enough".into(), 5.0, 6)); // needs 15
+        tests.push(("t.py::marked_low".into(), 8.4, 12)); // needs 26
+        let refs: Vec<(&str, f32, usize)> = tests
+            .iter()
+            .map(|(id, s, n)| (id.as_str(), *s, *n))
+            .collect();
+        let h = history(&refs);
+        let mut run = Run::default();
+        for (id, ..) in &tests[..38] {
+            record_test(&mut run, id, 0, 0.1);
+        }
+        record_marked(&mut run, "t.py::marked_enough", 20.0);
+        record_marked(&mut run, "t.py::marked_low", 10.0);
+        let t = timeout_advice(&run, &h).unwrap();
+        assert_eq!(t.tests_judged, 40);
+        assert_eq!(t.suite_timeout, 2);
+        assert_eq!((t.override_count, t.marker_covered), (1, 1));
+        let o = &t.overrides[0];
+        assert_eq!(
+            (o.nodeid.as_str(), o.timeout, o.current),
+            ("t.py::marked_low", 26, Some(10.0))
+        );
+    }
+
+    /// A passing test whose call report carries a `@pytest.mark.timeout`.
+    fn record_marked(run: &mut Run, nodeid: &str, marker: f64) {
+        run.record(
+            Some(0),
+            crate::scheduling::proto::Report {
+                nodeid: nodeid.into(),
+                when: "call".into(),
+                outcome: "passed".into(),
+                duration: 0.1,
+                longrepr: None,
+                wasxfail: false,
+                skip_reason: None,
+                cpu: None,
+                thread_delta: None,
+                fd_delta: None,
+                sections: Vec::new(),
+                lineno: None,
+                subtest: false,
+                crash: None,
+                cause: None,
+                xfail_reason: None,
+                skip_location: None,
+                network: Vec::new(),
+                marker_timeout: Some(marker),
+            },
+        );
+    }
 }
 
 /// Report builders shared by the `analyze`/`gate`/`render` test modules. A
@@ -1098,11 +1171,13 @@ pub(crate) mod testutil {
                 suite_timeout: 3,
                 tests_judged: 40,
                 override_count: 1,
+                marker_covered: 0,
                 overrides: vec![TimeoutOverride {
                     nodeid: "tests/test_a.py::test_long".into(),
                     slowest_seconds: 8.4,
                     runs: 12,
                     timeout: 26,
+                    current: None,
                 }],
             }),
             drift: Some(Drift {
@@ -1148,6 +1223,7 @@ pub(crate) mod testutil {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1180,6 +1256,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1249,6 +1326,7 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    marker_timeout: None,
                 },
             );
         }
@@ -1618,6 +1696,7 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    marker_timeout: None,
                 },
             );
         }

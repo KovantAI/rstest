@@ -1327,6 +1327,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1364,6 +1365,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1621,6 +1623,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
@@ -1695,6 +1698,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
             cause: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];

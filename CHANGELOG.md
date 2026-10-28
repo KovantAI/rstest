@@ -75,7 +75,10 @@ between 0.x releases and are listed here.
   slowest recorded passing run from the run history, suggests a suite
   `--timeout` that covers 95% of the tests, and lists the slower tests with a
   `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
-  least +1s). Appears once tests have 5 passing runs in the history.
+  least +1s). A test whose own marker already covers its limit is not listed,
+  and one whose marker is lower shows it (`(now 10)`; `--doctor-json`:
+  `current`, plus `marker_covered`). Appears once tests have 5 passing runs in
+  the history.
 
 - **A red run says what changed since the last green one.** Every whole-suite
   run that exits 0 on a clean tree (no `-k`, sub-path, nodeid, `--lf`,
@@ -94,6 +97,8 @@ between 0.x releases and are listed here.
   and flaky tests per run, test call time per run, the flaky ranking, the
   slowest tests, duration drift and the runs table. Written to
   `.rstest_cache/report.html` (or `--out PATH`); opens from disk, no server.
+  Runs older than what `RSTEST_HISTORY_RUNS` kept for every test are left
+  out (with a note saying how many), so trimmed runs never chart as a drop.
 
 - **Failures are grouped by cause.** Failed tests that raised the same
   exception, with the same message (numbers and addresses masked), through

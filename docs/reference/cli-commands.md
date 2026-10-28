@@ -755,8 +755,9 @@ JavaScript off (dates then read "3h ago"). It reads only
 run), needs no interpreter, and exits `0`; with no history yet it says so and
 writes nothing. On CI, run it after `--cache-pull` (or on a restored
 `.rstest_cache`) and upload the file as an artifact to see every shard's and
-runner's runs. The oldest runs can be partial: each test keeps only its newest
-`RSTEST_HISTORY_RUNS` runs.
+runner's runs. Each test keeps only its newest `RSTEST_HISTORY_RUNS` runs, so
+runs older than a test's oldest kept entry would undercount; the page leaves
+them out and says how many.
 
 ### `since-green`
 
