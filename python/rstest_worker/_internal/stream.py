@@ -962,6 +962,8 @@ class StreamPlugin:
             start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
             for _, fspath, lineno, _ in _folded_skips(start, [report]):
                 payload["skip_location"] = [fspath, lineno]
+        if getattr(report, "_rstest_no_rerun", False):
+            payload["no_rerun"] = True
         cause = getattr(report, "_rstest_cause", None)
         if cause is not None and not is_subtest_report(report):
             payload["cause"] = cause

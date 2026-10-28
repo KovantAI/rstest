@@ -219,6 +219,7 @@ pub(crate) fn fabricate_crash_report(
         xfail_reason: None,
         skip_location: None,
         network: Vec::new(),
+        no_rerun: false,
     }
 }
 
@@ -246,12 +247,18 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         xfail_reason: None,
         skip_location: None,
         network: Vec::new(),
+        no_rerun: false,
     }
 }
 
 /// Why a swept-up test never ran, for [`fabricate_lost_report`].
 pub(crate) const LOST_NO_WORKER: &str =
     "every worker that could run it crashed and the restart budget was spent";
+
+/// Why a swept-up test never ran when its worker's session ended on its own
+/// (no crash) with no live worker left to take it.
+pub(crate) const LOST_SESSION_ENDED: &str =
+    "its worker's session ended before running it and no worker was left to take it";
 
 /// Record an orchestrator-fabricated report (a crash or a lost test) as final:
 /// render, emit, record, and flag the entry as crash-fabricated.
@@ -269,11 +276,16 @@ pub(crate) fn record_fabricated(
     run.mark_crashed(&nodeid);
 }
 
-/// Whether a finished item's failed attempt is retry-eligible under
-/// `--only-rerun`: an empty pattern list always allows; otherwise at least one
-/// buffered report must be a failure whose `longrepr` matches a pattern. (The
-/// rerun-budget and known-flaky gates are applied separately at the call site.)
+/// Whether a finished item's failed attempt is retry-eligible: never when
+/// its flaky mark's `only_rerun` / `rerun_except` ruled a failure out
+/// (`no_rerun`); under `--only-rerun`, an empty pattern list always allows,
+/// otherwise at least one buffered report must be a failure whose `longrepr`
+/// matches a pattern. (The rerun-budget and known-flaky gates are applied
+/// separately at the call site.)
 pub(crate) fn rerun_allowed(only_rerun: &[regex::Regex], attempt: &[proto::Report]) -> bool {
+    if attempt.iter().any(|r| r.no_rerun) {
+        return false;
+    }
     only_rerun.is_empty()
         || attempt.iter().any(|r| {
             r.outcome == "failed"
@@ -499,6 +511,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
         }
     }
 
@@ -725,6 +738,15 @@ mod tests {
     #[test]
     fn rerun_allowed_empty_pattern_always_true() {
         assert!(rerun_allowed(&[], &[rep("passed", None)]));
+    }
+
+    #[test]
+    fn rerun_allowed_never_when_the_mark_ruled_it_out() {
+        let mut ruled_out = rep("failed", Some("Connection reset by peer"));
+        ruled_out.no_rerun = true;
+        assert!(!rerun_allowed(&[], std::slice::from_ref(&ruled_out)));
+        let pat = vec![regex::Regex::new("Connection reset").unwrap()];
+        assert!(!rerun_allowed(&pat, &[ruled_out]));
     }
 
     #[test]

@@ -7,8 +7,13 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from rstest_worker._internal import runner_pytest
-from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions, flaky_reruns
+from rstest_worker._internal import retry, runner_pytest
+from rstest_worker._internal.retry import (
+    FlakyReruns,
+    MaxfailExemptions,
+    PoolMarkReruns,
+    flaky_reruns,
+)
 
 
 def _item(*args, **kwargs):
@@ -339,3 +344,82 @@ def test_rerun_teststatus():
     plugin = FlakyReruns()
     assert plugin.pytest_report_teststatus(SimpleNamespace(outcome="rerun"))[1] == "R"
     assert plugin.pytest_report_teststatus(SimpleNamespace(outcome="passed")) is None
+
+
+# The mark's only_rerun / rerun_except / reruns_delay, as rerunfailures reads
+# them: filters match `Type: message` of each exception in the chain, or an
+# exception class by isinstance.
+FILTER_SRC = (
+    "import pytest\n"
+    "@pytest.mark.flaky(reruns=2, only_rerun=['ValueError'])\n"
+    "def test_a_only_nomatch():\n    assert False\n"
+    "@pytest.mark.flaky(reruns=2, only_rerun='ValueError')\n"
+    "def test_b_only_match():\n    raise ValueError('boom')\n"
+    "@pytest.mark.flaky(reruns=2, rerun_except=['AssertionError'])\n"
+    "def test_c_except_match():\n    assert False\n"
+    "@pytest.mark.flaky(reruns=2, only_rerun=ConnectionError)\n"
+    "def test_d_only_class():\n    raise ConnectionResetError('reset')\n"
+    "@pytest.mark.flaky(reruns=2, only_rerun=['KeyError'])\n"
+    "def test_e_only_chained():\n"
+    "    try:\n        {}['k']\n"
+    "    except KeyError as e:\n        raise RuntimeError('wrapped') from e\n"
+    "@pytest.mark.flaky(reruns=2, only_rerun='Runtime', rerun_except='wrapped')\n"
+    "def test_f_both():\n    raise RuntimeError('wrapped')\n"
+)
+
+# Call attempts per test under FILTER_SRC, as pytest-rerunfailures 16.7 runs them.
+FILTER_ATTEMPTS = {
+    "test_a_only_nomatch": 1,
+    "test_b_only_match": 3,
+    "test_c_except_match": 1,
+    "test_d_only_class": 3,
+    "test_e_only_chained": 3,
+    "test_f_both": 1,
+}
+
+
+def test_session_honors_the_marks_rerun_filters(tmp_path, monkeypatch):
+    _, seen = _session(tmp_path, monkeypatch, FILTER_SRC, plugins=lambda: [FlakyReruns()])
+    attempts: dict[str, int] = {}
+    for n, w, _ in seen:
+        if w == "call":
+            attempts[n] = attempts.get(n, 0) + 1
+    assert attempts == FILTER_ATTEMPTS
+
+
+def test_pool_tags_failures_the_mark_rules_out(tmp_path, monkeypatch):
+    tagged: dict[str, bool] = {}
+
+    class Tags:
+        def pytest_runtest_logreport(self, report):
+            if report.when == "call":
+                tagged[report.nodeid.split("::", 1)[1]] = getattr(report, "_rstest_no_rerun", False)
+
+    _session(tmp_path, monkeypatch, FILTER_SRC, plugins=lambda: [PoolMarkReruns(), Tags()])
+    # Ruled out exactly where rerunfailures runs the test once.
+    assert tagged == {n: count == 1 for n, count in FILTER_ATTEMPTS.items()}
+
+
+DELAY_SRC = (
+    "import pytest\n"
+    "@pytest.mark.flaky(reruns=1, reruns_delay=2.5)\n"
+    "def test_a_delayed():\n    assert False\n"
+    "@pytest.mark.flaky(reruns=1, reruns_delay=2.5, only_rerun='ValueError')\n"
+    "def test_b_ruled_out():\n    assert False\n"
+    "@pytest.mark.flaky(reruns=1, reruns_delay=2.5)\n"
+    "def test_c_passes():\n    pass\n"
+)
+
+
+def test_reruns_delay_waits_before_a_rerun_only(tmp_path, monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(retry.time, "sleep", slept.append)
+    monkeypatch.delenv("RSTEST_RERUNS", raising=False)
+    # Single session: once, before test_a's one rerun.
+    _session(tmp_path, monkeypatch, DELAY_SRC, plugins=lambda: [FlakyReruns()])
+    assert slept == [2.5]
+    # Pool: after each failed attempt the orchestrator may retry (it owns the
+    # budget); never after a pass or a ruled-out failure.
+    slept.clear()
+    _session(tmp_path, monkeypatch, DELAY_SRC, plugins=lambda: [PoolMarkReruns()])
+    assert slept == [2.5]

@@ -1109,6 +1109,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
         }
     }
 
@@ -1461,6 +1462,7 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            no_rerun: false,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1711,6 +1713,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                no_rerun: false,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1736,6 +1739,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                no_rerun: false,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

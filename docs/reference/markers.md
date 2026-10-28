@@ -47,10 +47,12 @@ The marker name matches pytest-rerunfailures, and rstest reads the budget
 the same way: the `reruns=` keyword, else the first positional argument
 (`flaky(3)`), else 1. `condition=` is honored too: a false condition (a bool,
 or a string evaluated like the plugin does) means no reruns. A string
-condition that fails to evaluate keeps the reruns. The plugin's other options
-(`reruns_delay`, `only_rerun`, `rerun_except`) are ignored by rstest's own
-retry; use the global [`--only-rerun`](cli.md#-only-rerun-regex) to filter by
-error.
+condition that fails to evaluate keeps the reruns. `only_rerun` and
+`rerun_except` (a regex or an exception class, or a list) filter by error as
+the plugin does: each exception in the raised one's chain is matched as
+`Type: message`. `reruns_delay` waits that many seconds before a rerun (in a
+pool, after every failed attempt that may be retried, the last one included).
+The global [`--only-rerun`](cli.md#-only-rerun-regex) applies on top.
 
 The mark works **with or without** a global `--reruns`, at any worker count:
 

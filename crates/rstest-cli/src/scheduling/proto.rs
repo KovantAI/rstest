@@ -126,6 +126,10 @@ pub struct Report {
     /// (`host:port`, with the IP when resolved from a name) the test reached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network: Vec<String>,
+    /// Failed report: the test's `@pytest.mark.flaky` `only_rerun` /
+    /// `rerun_except` rule out a rerun for this failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_rerun: bool,
 }
 
 /// What a failure raised and where (see [`Report::cause`]).
@@ -451,6 +455,7 @@ mod tests {
         // Replay journals stay lean: an empty list isn't written.
         let json = serde_json::to_value(Report {
             network: Vec::new(),
+            no_rerun: false,
             ..r
         })
         .unwrap();
@@ -581,6 +586,7 @@ mod property {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                no_rerun: false,
             }
         }
     }

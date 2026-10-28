@@ -148,6 +148,24 @@ between 0.x releases and are listed here.
   line and the summary counted an error. Any phase but setup and teardown
   now counts as the test itself, as in pytest.
 
+- **`@pytest.mark.flaky`'s `only_rerun`, `rerun_except` and `reruns_delay`
+  are honored.** They were ignored, so a failure the mark excluded was still
+  retried. They now filter and delay as pytest-rerunfailures does (each
+  exception in the chain matched as `Type: message`, or an exception class),
+  at every worker count. In a pool the worker waits `reruns_delay` after every
+  failed attempt that may be retried, the last one included.
+
+- **`--collect lazy` collects a file named on the command line whatever its
+  name**, as pytest does. A file outside `python_files` (`check_x.py`) was
+  dropped from the run.
+
+- **A lazy-collection run no longer aborts on a send to a dead worker.** A
+  worker that died between two dispatches made the run exit with
+  `Error: Broken pipe`; its tests are now requeued as they are on any worker
+  crash. And tests still handed to the last worker when its session ended on
+  its own are reported as not run (`not run: its worker's session ended
+  ...`), not silently dropped with exit 0.
+
 ## 0.9.0 (2026-10-06)
 
 ### Features

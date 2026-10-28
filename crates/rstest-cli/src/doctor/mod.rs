@@ -1148,6 +1148,7 @@ pub(crate) mod testutil {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1180,6 +1181,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1249,6 +1251,7 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    no_rerun: false,
                 },
             );
         }
@@ -1618,6 +1621,7 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    no_rerun: false,
                 },
             );
         }

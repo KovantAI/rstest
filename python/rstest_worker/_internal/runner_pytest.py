@@ -26,7 +26,7 @@ from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
 )
-from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions
+from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions, PoolMarkReruns
 from rstest_worker._internal.stream import StreamPlugin
 
 fixturecompat.install()
@@ -146,7 +146,7 @@ def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    plugins = [ItemDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    plugins = [ItemDispatchPlugin(conn), MaxfailExemptions(pool=True), PoolMarkReruns()]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
@@ -154,7 +154,7 @@ def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    plugins = [LazyDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    plugins = [LazyDispatchPlugin(conn), MaxfailExemptions(pool=True), PoolMarkReruns()]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
