@@ -106,7 +106,12 @@ Worker count. Default `auto`.
   single-worker mode. With a warm duration cache, at most the cached test
   count (`--dist load` splits a file across workers) and one worker per ~2 s
   of cached time. On Linux the core count honors the CPU affinity mask and
-  cgroup quota, so a CPU-limited container sees its allocation.
+  cgroup quota, so a CPU-limited container sees its allocation. Memory caps
+  it last: once a run has recorded the workers' peak RSS (in
+  `.rstest_cache/memory.json`), `auto` runs no more workers than fit in 80%
+  of the memory limit (the cgroup limit on Linux, else physical RAM), and
+  says so on stderr: `-n auto capped at 3 workers by memory (peak worker RSS
+  2.1 GiB recorded, 8.0 GiB available)`. Not on Windows yet.
 - `-n 4`: four workers.
 - `-n 0` or `-n 1`: **single-worker mode**, one pytest session with
   byte-exact pytest semantics and no worker identity; `-n auto` runs this

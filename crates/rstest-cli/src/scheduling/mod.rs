@@ -8,6 +8,7 @@
 pub mod durations;
 pub(crate) mod interrupt;
 pub mod lazy;
+pub mod memory;
 pub(crate) mod orchestrator;
 pub mod pool;
 pub mod proto;

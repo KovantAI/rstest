@@ -7,6 +7,16 @@ between 0.x releases and are listed here.
 
 ### Features
 
+- **`-n auto` sizes the pool by memory too.** Every worker reports its peak
+  RSS when its session ends, and rstest keeps the largest of each of the last
+  5 runs in `.rstest_cache/memory.json`. The next `-n auto` runs no more
+  workers than fit in 80% of the memory limit (the cgroup limit on Linux, so a
+  container's, else physical RAM) and says so: `rstest: -n auto capped at 3
+  workers by memory (peak worker RSS 2.1 GiB recorded, 8.0 GiB available)`.
+  An explicit `-n` is never capped. A worker killed by a SIGKILL rstest didn't
+  send now reads `killed by signal 9 (SIGKILL: likely the out-of-memory
+  killer; ...)` instead of a bare crash. Not on Windows yet.
+
 - **Per-test run history, shown by `rstest explain`.** rstest now keeps each
   test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
   setup time, commit). `rstest explain`
