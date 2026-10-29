@@ -1814,6 +1814,7 @@ struct SingleWorkerInterrupts {
 
 /// How long after a SIGINT a setup report may still be one the session sent
 /// before it: reports read that soon don't prove it missed the signal.
+#[cfg(unix)]
 const SIGINT_IN_FLIGHT: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl SingleWorkerInterrupts {
