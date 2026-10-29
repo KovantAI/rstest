@@ -148,6 +148,17 @@ between 0.x releases and are listed here.
   line and the summary counted an error. Any phase but setup and teardown
   now counts as the test itself, as in pytest.
 
+- **The GitHub Action's `rerun-on` takes a regex with a comma.** Entries are
+  split on commas, so `timeout{1,3}` became two broken patterns. Write a comma
+  inside a regex as `\,` (`timeout{1\,3}`); it reaches `--only-rerun` as a
+  plain comma.
+
+- **At `-n 0`, a SIGINT sent to rstest's pid alone stops the session.**
+  `kill -INT <pid>` was recorded but never reached pytest, which ran every
+  remaining test. rstest now passes it on as soon as the session sets up
+  another test (proof it never got the signal); a Ctrl-C or CI cancel, which
+  reaches the whole process group, is still never sent twice.
+
 - **`@pytest.mark.flaky`'s `only_rerun`, `rerun_except` and `reruns_delay`
   are honored.** They were ignored, so a failure the mark excluded was still
   retried. They now filter and delay as pytest-rerunfailures does (each

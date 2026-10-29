@@ -299,7 +299,7 @@ covers GCS / Azure / HTTP.
 | `changed` | `false` | `false` / `true` / `strict`. With no usable base the full suite runs with a warning (see [PR change-based selection](#pr-change-based-selection-strict-gate)) |
 | `base-ref` | `""` | base ref for `--changed`; fetched if shallow. Empty on a PR = inferred from `$GITHUB_BASE_REF` (`origin/<base>`); empty on a push = the commit before the push |
 | `reruns` | `""` | `--reruns N` |
-| `rerun-on` | `""` | comma-separated preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex, passed verbatim after trimming surrounding whitespace) |
+| `rerun-on` | `""` | comma-separated preset(s) → `--only-rerun` (`http-5xx`, `timeouts`, or raw regex, passed verbatim after trimming surrounding whitespace; write a comma inside a regex as `\,`, e.g. `timeout{1\,3}`) |
 | `worker-timeout` | `""` | `--worker-timeout SECS` (hang / container-boot backstop) |
 | `durations-regress` | `""` | `--durations-regress RATIO` (cold cache warns; see `require-baseline`) |
 | `require-baseline` | `false` | strict: fail if no baseline. Default only warns: the first run legitimately has none and seeds it |

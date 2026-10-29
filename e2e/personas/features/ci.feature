@@ -728,6 +728,15 @@ Feature: CI / platform engineer
         | can't connect      |
         | say "hi"           |
 
+    Scenario: CI-10 rerun-on: an escaped comma stays inside its regex
+      Given the action step environment:
+        """
+        IN_RERUN_ON=timeout{1\,3}, http-5xx
+        """
+      When I run the action step
+      Then the run succeeds
+      And rstest received "--only-rerun" values "timeout{1,3}|429|500|502|503|504|Too Many Requests|ServerBusy"
+
   Rule: CI logs are non-interactive and honour the color switches (CI-12)
 
     Background:

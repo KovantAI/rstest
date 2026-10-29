@@ -144,7 +144,7 @@ inputs:
     required: false
     default: ""
   rerun-on:
-    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; 'timeouts' => Timeout|TimeoutError|APITimeoutError|APIConnectionError; comma-joinable (e.g. 'http-5xx,timeouts'); any other entry is used as a raw regex. Raw regex via args still works."
+    description: "Preset name(s) -> --only-rerun regex. 'http-5xx' => 429|500|502|503|504|Too Many Requests|ServerBusy; 'timeouts' => Timeout|TimeoutError|APITimeoutError|APIConnectionError; comma-joinable (e.g. 'http-5xx,timeouts'); any other entry is used as a raw regex, with a comma inside it written as \\, (e.g. 'timeout{1\\,3}'). Raw regex via args still works."
     required: false
     default: ""
   worker-timeout:
@@ -610,9 +610,13 @@ runs:
         preset_regex=""
         # Split on commas (and newlines), then trim surrounding whitespace with
         # parameter expansion only: each entry reaches rstest verbatim, so
-        # backslashes and quotes in a raw regex survive.
-        IFS=',' read -ra presets <<< "${IN_RERUN_ON//$'\n'/,}"
+        # backslashes and quotes in a raw regex survive. `\,` is a comma inside
+        # a regex (`timeout{1\,3}`): held as \x1f across the split, restored
+        # as a plain comma (the same match either way).
+        rerun_on="${IN_RERUN_ON//\\,/$'\x1f'}"
+        IFS=',' read -ra presets <<< "${rerun_on//$'\n'/,}"
         for p in ${presets[@]+"${presets[@]}"}; do
+          p="${p//$'\x1f'/,}"
           p="${p#"${p%%[![:space:]]*}"}"
           p="${p%"${p##*[![:space:]]}"}"
           case "$p" in
