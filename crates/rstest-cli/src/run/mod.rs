@@ -4010,6 +4010,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -4093,6 +4095,8 @@ mod tests {
                     filename: "t.py".into(),
                     lineno: 1,
                     count: 1,
+                    location: String::new(),
+                    text: String::new(),
                 }]
             }),
             None

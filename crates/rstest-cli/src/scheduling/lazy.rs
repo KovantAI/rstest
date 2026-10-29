@@ -596,8 +596,10 @@ pub fn run_lazy_pool(
                 if s.uncollected_files.is_empty() && s.outstanding.len() <= chunk {
                     if let Some(f) = file_queue.pop_front() {
                         s.uncollected_files.push(f.clone());
-                        s.worker
-                            .send(&proto::Command::RunFiles { paths: vec![f] })?;
+                        // Best-effort, as in the eager pool: a worker that died
+                        // (EPIPE) is handled by its reader's error, which puts
+                        // the file back on the queue.
+                        let _ = s.worker.send(&proto::Command::RunFiles { paths: vec![f] });
                         s.finishing = false;
                     }
                 }
@@ -654,7 +656,9 @@ pub fn run_lazy_pool(
                     }
                     let s = &mut states[i];
                     s.outstanding.extend(ids.iter().cloned());
-                    s.worker.send(&proto::Command::RunIds { ids })?;
+                    // Best-effort: a dead worker's `outstanding` is requeued
+                    // when its reader reports the death.
+                    let _ = s.worker.send(&proto::Command::RunIds { ids });
                     s.finishing = false;
                 }
             }
@@ -679,7 +683,8 @@ pub fn run_lazy_pool(
             let ids: Vec<String> = serial.drain(..).collect();
             let s = &mut states[designate];
             s.outstanding.extend(ids.iter().cloned());
-            s.worker.send(&proto::Command::RunIds { ids })?;
+            // Best-effort, as above.
+            let _ = s.worker.send(&proto::Command::RunIds { ids });
             s.finishing = false;
         }
 
@@ -727,18 +732,26 @@ pub fn run_lazy_pool(
         }
     }
 
-    // Every worker able to run the rest died for good: report what never ran
-    // instead of dropping it from the artifacts. Ids are known for collected
-    // files; a file nobody collected can only be named as a collection error.
-    // Not after a -x/--maxfail or collection-error stop, where unrun is expected.
-    if lost_worker && !stopping {
+    // Work left after the last worker ended (every worker able to run it died
+    // for good, or a session ended on its own with ids still handed to it):
+    // report what never ran instead of dropping it from the artifacts. Ids
+    // are known for collected files; a file nobody collected can only be
+    // named as a collection error. Not after a -x/--maxfail or
+    // collection-error stop, where unrun is expected. On a clean finish
+    // every queue is empty and this records nothing.
+    if !stopping {
+        let reason = if lost_worker {
+            orchestrator::LOST_NO_WORKER
+        } else {
+            orchestrator::LOST_SESSION_ENDED
+        };
         let unrun: Vec<String> = requeued
             .drain(..)
             .chain(states.iter_mut().flat_map(|s| s.own_queue.drain(..)))
             .chain(serial.drain(..))
             .collect();
         for id in unrun {
-            let fab = orchestrator::fabricate_lost_report(id, orchestrator::LOST_NO_WORKER);
+            let fab = orchestrator::fabricate_lost_report(id, reason);
             orchestrator::record_fabricated(sink, &mut run, &mut prog, None, fab);
         }
         let uncollected: Vec<String> = file_queue
@@ -751,10 +764,7 @@ pub fn run_lazy_pool(
             )
             .collect();
         for f in uncollected {
-            run.collect_error(
-                f,
-                format!("not collected: {}", orchestrator::LOST_NO_WORKER),
-            );
+            run.collect_error(f, format!("not collected: {reason}"));
         }
     }
     // Files left uncollected (-x/--maxfail or a collection error stopped the

@@ -216,6 +216,35 @@ fn parallel_only_failure_gets_a_serial_fix_list() {
         .contains("test_iso_2.py::test_needs_serial"));
 }
 
+/// One test per file, all contending on one lock file: the winner of the
+/// race passes under loadfile too, which must not read as an order
+/// dependency (a lone test has no in-file order for loadfile to keep).
+const LOCK_HOLDER: &str = "import os, time\n\n\
+     LOCK = os.path.join(os.path.dirname(__file__), 'shared.lock')\n\n\
+     def test_lock():\n    \
+     fd = os.open(LOCK, os.O_CREAT | os.O_EXCL)\n    \
+     try:\n        \
+     time.sleep(0.3)\n    \
+     finally:\n        \
+     os.close(fd)\n        \
+     os.remove(LOCK)\n";
+
+#[test]
+fn lone_test_race_is_a_race_not_an_order_dependency() {
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("lockrace");
+    for i in 0..4 {
+        std::fs::write(dir.join(format!("test_l{i}.py")), LOCK_HOLDER).unwrap();
+    }
+    let (_, out) = run(&venv, &dir, &["audit"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    if !out.contains("fail in parallel") {
+        return; // a box that can't run two workers never races
+    }
+    assert!(!out.contains("ORDER DEPENDENCY"), "{out}");
+    assert!(!out.contains("--dist loadfile, or fix"), "{out}");
+}
+
 #[test]
 fn warm_duration_cache_still_audits_on_two_workers() {
     // A9: audit used `-n auto`, which caps by the duration cache (~1 worker

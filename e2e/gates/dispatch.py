@@ -53,6 +53,28 @@ def test_b(pkg_setups, request):
     assert "pkg_auto" in request.fixturenames
 """
 
+# R32: a test swaps its worker's command pipe for one at EOF, so the
+# orchestrator's next send to it gets EPIPE. DIES: the worker then dies
+# hard when it reads its next command (a crashed worker); otherwise it ends
+# its session cleanly with ids still handed to it.
+LAZY_DEAD_PIPE = """
+import gc
+import os
+
+from rstest_worker._internal.protocol import Connection
+
+
+def test_close_cmd_pipe():
+    r, w = os.pipe()
+    os.close(w)
+    for o in gc.get_objects():
+        if isinstance(o, Connection):
+            os.dup2(r, o._cmd_fd)
+            if os.environ.get("DIES"):
+                o.recv_one = lambda: os._exit(1)
+    os.close(r)
+""" + "".join(f"\ndef test_x{i}():\n    pass\n" for i in range(40))
+
 
 def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
@@ -70,6 +92,24 @@ def gate_lazy_collection(g, args, binary):
     r = g.run("crash", "-n", "2", "--collect", "lazy")
     check("lazy: crash completes", "1 failed, 5 passed" in r.stdout, r.stdout[-200:])
     check("lazy: crash attributed", "crashed while running" in r.stdout, r.stdout[-300:])
+    # R32: a send to a dead worker is not fatal; its ids are requeued and
+    # run on the respawned worker.
+    if not WINDOWS:
+        g.write("deadpipe/test_pipe.py", LAZY_DEAD_PIPE)
+        r = g.run("deadpipe", "-n", "2", "--collect", "lazy", env_extra={"DIES": "1"})
+        check(
+            "lazy: send to a dead worker requeues its ids",
+            r.returncode == 0 and "41 passed" in r.stdout,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+        )
+        # A worker whose session ended with ids still handed to it, and no
+        # worker left: they are reported as not run, never silently dropped.
+        r = g.run("deadpipe", "-n", "2", "--collect", "lazy")
+        check(
+            "lazy: ids left at the last worker's end are reported",
+            r.returncode == 1 and "1 passed, 40 errors" in r.stdout,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+        )
     r = g.run(".", "-n", "2", "--collect", "lazy", cwd=g.tmp / "broken")
     check(
         "lazy: collect error aborts",
@@ -387,6 +427,19 @@ def gate_fork_pool(g, args, binary):
         cr.returncode != 0 and "test_boom" in cr.stdout,
         cr.stdout[-200:],
     )
+    # A startup error every forked worker hits prints once, as in the plain
+    # pool (R1): each forked worker has its own stderr pipe, deduped.
+    g.write("fpconf/conftest.py", "import conftest_missing_mod\n")
+    for i in range(3):
+        g.write(f"fpconf/test_{i}.py", "def test_x():\n    pass\n")
+    for label, extra in (("plain pool", ()), ("fork-pool", ("--fork-pool",))):
+        r = g.run(".", "-n", "3", *extra, cwd=g.tmp / "fpconf")
+        out = r.stdout + r.stderr
+        check(
+            f"{label}: startup error printed once",
+            out.count("ImportError while loading conftest") == 1,
+            f"count={out.count('ImportError while loading conftest')}",
+        )
     # Doctor JSON records whether fork-prewarm was used.
     dj = g.tmp / "fp-doctor.json"
     g.run("fp/test_fp.py", "-n", "4", "--fork-pool", "--doctor-json", str(dj))

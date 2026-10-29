@@ -649,6 +649,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -667,6 +669,8 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
             ..report("call", outcome)
         };
         assert!(outcome_kind(&sub("passed")).is_none());

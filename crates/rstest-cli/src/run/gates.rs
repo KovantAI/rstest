@@ -1104,11 +1104,11 @@ fn merge_fixtures(all: Vec<proto::FixtureStat>) -> Vec<proto::FixtureStat> {
     merged.into_values().collect()
 }
 
-/// pytest-style warnings summary: grouped by location, deduped, counted.
-/// Writes to `w` (stdout at the call site) so the merge/plural formatting is
-/// unit-testable.
-/// The summary line's warnings segment, worded as pytest does
-/// (`1 warning`, `2 warnings`); empty without warnings.
+/// pytest's warnings summary (`TerminalReporter.summary_warnings`): one
+/// block per distinct warning text, headed by the locations that raised it
+/// (each test's nodeid, or per-file counts from 10 locations on), the text
+/// indented under them. Writes to `w` (stdout at the call site) so the
+/// grouping is unit-testable.
 fn print_warnings_summary(
     w: &mut dyn Write,
     warnings: &[proto::WarningEntry],
@@ -1117,33 +1117,49 @@ fn print_warnings_summary(
     if warnings.is_empty() {
         return;
     }
-    use std::collections::BTreeMap;
-    let mut merged: BTreeMap<(&str, u64, &str, &str), u64> = BTreeMap::new();
-    for entry in warnings {
-        *merged
-            .entry((
-                &entry.filename,
-                entry.lineno,
-                &entry.category,
-                &entry.message,
-            ))
-            .or_default() += entry.count;
+    // Text -> locations, one per occurrence as pytest keeps one report each.
+    let mut groups: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+    for e in warnings {
+        let text = if e.text.is_empty() {
+            format!("{}:{}: {}: {}", e.filename, e.lineno, e.category, e.message)
+        } else {
+            e.text.clone()
+        };
+        let locations = groups.entry(text).or_default();
+        if !e.location.is_empty() {
+            locations.extend(std::iter::repeat_n(e.location.as_str(), e.count as usize));
+        }
     }
     let _ = writeln!(
         w,
         "\n{}",
         palette.yellow("=========== warnings summary ===========")
     );
-    for ((filename, lineno, category, message), count) in &merged {
-        let times = if *count > 1 {
-            format!("  ({count} occurrences)")
+    for (text, locations) in &groups {
+        if locations.is_empty() {
+            let _ = writeln!(w, "{}", text.trim_end());
         } else {
-            String::new()
-        };
-        let _ = writeln!(w, "{filename}:{lineno}: {category}{times}");
-        for line in message.lines().take(3) {
-            let _ = writeln!(w, "  {line}");
+            if locations.len() < 10 {
+                for l in locations {
+                    let _ = writeln!(w, "{l}");
+                }
+            } else {
+                let mut per_file: Vec<(&str, usize)> = Vec::new();
+                for l in locations {
+                    let file = l.split("::").next().unwrap_or(l);
+                    match per_file.iter_mut().find(|(f, _)| *f == file) {
+                        Some((_, n)) => *n += 1,
+                        None => per_file.push((file, 1)),
+                    }
+                }
+                for (file, n) in per_file {
+                    let _ = writeln!(w, "{file}: {n} warning{}", if n > 1 { "s" } else { "" });
+                }
+            }
+            let indented: Vec<String> = text.lines().map(|l| format!("  {l}")).collect();
+            let _ = writeln!(w, "{}", indented.join("\n").trim_end());
         }
+        let _ = writeln!(w);
     }
     let _ = writeln!(
         w,
@@ -1327,6 +1343,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1364,6 +1382,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1621,6 +1641,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
@@ -1695,6 +1717,8 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            no_rerun: false,
+            subtest_desc: None,
             cause: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
@@ -2314,38 +2338,58 @@ mod tests {
     }
 
     #[test]
-    fn print_warnings_summary_merges_and_pluralizes() {
-        let warn = |message: &str, count| WarningEntry {
+    fn print_warnings_summary_matches_pytest() {
+        let warn = |location: &str, text: &str, count| WarningEntry {
             when: "runtest".into(),
-            category: "DeprecationWarning".into(),
-            message: message.into(),
-            filename: "t.py".into(),
-            lineno: 12,
+            category: "UserWarning".into(),
+            message: "careful".into(),
+            filename: "/abs/t.py".into(),
+            lineno: 3,
             count,
+            location: location.into(),
+            text: text.into(),
         };
+        let careful = "/abs/t.py:3: UserWarning: careful\n  warnings.warn(\"careful\")\n";
         let mut buf = Vec::new();
-        // Two entries at the same (file,line,category,message) => merged to 3
-        // occurrences; a distinct one prints without the count suffix.
+        // Two workers reporting the same warning from different tests: one
+        // block, each test's nodeid above the indented text and source line.
         print_warnings_summary(
             &mut buf,
-            &[warn("old api", 2), warn("old api", 1), warn("other", 1)],
+            &[
+                warn("t.py::test_a", careful, 1),
+                warn("t.py::test_b", careful, 1),
+            ],
+            &plain_palette(),
+        );
+        assert_eq!(
+            utf8(buf),
+            "\n=========== warnings summary ===========\n\
+             t.py::test_a\n\
+             t.py::test_b\n  \
+             /abs/t.py:3: UserWarning: careful\n    \
+             warnings.warn(\"careful\")\n\
+             \n\
+             -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n"
+        );
+        // 10+ locations collapse to per-file counts, as pytest does.
+        let mut buf = Vec::new();
+        print_warnings_summary(
+            &mut buf,
+            &[
+                warn("t.py::test_a", careful, 9),
+                warn("u.py::test_c", careful, 1),
+            ],
             &plain_palette(),
         );
         let out = utf8(buf);
-        assert!(out.contains("warnings summary"), "got {out}");
         assert!(
-            out.contains("t.py:12: DeprecationWarning  (3 occurrences)"),
-            "got {out}"
+            out.contains("t.py: 9 warnings\nu.py: 1 warning\n  /abs/t.py:3"),
+            "{out}"
         );
-        // The single-occurrence entry has no "(N occurrences)" suffix.
-        assert!(
-            out.lines().any(|l| l == "t.py:12: DeprecationWarning"),
-            "got {out}"
-        );
-        assert!(
-            out.contains("-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html"),
-            "got {out}"
-        );
+        // A warning with no location prints its text unindented.
+        let mut buf = Vec::new();
+        print_warnings_summary(&mut buf, &[warn("", careful, 1)], &plain_palette());
+        assert!(utf8(buf).contains("summary ===========\n/abs/t.py:3: UserWarning"));
 
         // Empty input => nothing at all.
         let mut buf = Vec::new();
