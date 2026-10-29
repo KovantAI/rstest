@@ -1141,3 +1141,57 @@ def gate_crash_after_restart_budget(g, args, binary):
             "6 failed" in r.stdout and "90 passed" in r.stdout and r.returncode == 3,
             f"rc={r.returncode} " + r.stdout[-200:],
         )
+
+
+ISOLATED = """
+import os
+import threading
+import time
+
+import pytest
+
+STATE = {"polluted": False}
+
+
+@pytest.mark.isolated
+def test_a_polluter():
+    STATE["polluted"] = True
+    os.environ["RSTEST_ISO_POLLUTED"] = "1"
+
+
+def test_b_victim():
+    assert not STATE["polluted"]
+    assert "RSTEST_ISO_POLLUTED" not in os.environ
+
+
+@pytest.mark.isolated
+def test_c_leaks_a_thread():
+    threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+
+
+@pytest.mark.isolated
+def test_d_crash():
+    os._exit(3)
+"""
+
+
+def gate_isolated_mark(g, args, binary):
+    print("== @pytest.mark.isolated ==")
+    if WINDOWS:
+        check("isolated: skipped on Windows (no fork)", True)
+        return
+    g.write("isolated/test_iso.py", ISOLATED)
+    for mode in (("-n", "0"), ("-n", "2"), ("-n", "2", "--collect", "lazy")):
+        label = " ".join(mode)
+        r = g.run("isolated", *mode, "-p", "no:randomly", "--fail-on-leak", "--dist", "loadfile")
+        out = r.stdout + r.stderr
+        # The polluter's state never reaches the victim, the leaked thread
+        # dies with its child (no leak to gate on), and the crash is one
+        # failed test, not a dead worker.
+        check(
+            f"isolated ({label}): state contained, crash reported",
+            "1 failed, 3 passed" in out
+            and "isolated test crashed" in out
+            and "leaked threads/fds" not in out,
+            out[-400:],
+        )

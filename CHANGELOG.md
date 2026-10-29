@@ -7,6 +7,16 @@ between 0.x releases and are listed here.
 
 ### Features
 
+- **`@pytest.mark.isolated` runs a test in a forked process.** What the test
+  changes in its worker (module globals, `os.environ`, `sys.modules`, a
+  monkeypatch it never undid, a thread it left running) dies with the fork,
+  so a known polluter stays in the parallel run without breaking the tests
+  after it. Fixtures stay balanced: the worker keeps what it had set up, and
+  the fork tears down only what it added. A fork that dies is one failed
+  test, not a crashed worker. Works at any `-n` and with `--collect lazy`;
+  Unix only (Windows runs the test in its worker, with a warning). `rstest
+  bisect`, the doctor's leak section and `--fail-on-leak` now suggest it.
+
 - **Per-test run history, shown by `rstest explain`.** rstest now keeps each
   test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
   setup time, commit). `rstest explain`
