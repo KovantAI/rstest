@@ -895,7 +895,9 @@ pub(super) fn run_post_gates(
                 }
             }
             sink.warn(&format!(
-                "rstest: --fail-on-leak: {} test(s) leaked threads/fds",
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds; close them in \
+                 teardown, or contain one with @pytest.mark.isolated (runs it in a \
+                 forked process)",
                 leaks.len()
             ));
             if exitstatus == 0 {

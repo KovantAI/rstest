@@ -25,6 +25,12 @@ databases released. The marker is registered automatically (no
 Use it for: tests binding fixed ports, tests asserting on global process
 state, tests measuring wall-clock timing tightly.
 
+A test that *changes* global process state (and breaks the tests after it)
+needs something else: serial still runs it in a shared worker, just later.
+[`@pytest.mark.isolated`](../reference/markers.md#pytestmarkisolated) runs it
+in a forked child instead, so its changes die with it and it stays in the
+parallel run.
+
 Serial tests run in the **designated worker's own session**, not a fresh one:
 they reuse the session-scoped fixtures that worker already built during its
 parallel phase (one instance, on that worker, not a merge of all workers'
@@ -382,7 +388,10 @@ to a fix:
   depends on timing, so for an exact repro of a failed run use
   [`rstest replay`](../reference/cli-commands.md#replay).
 - [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid) finds
-  the test that pollutes a victim and prints a minimal repro command.
+  the test that pollutes a victim and prints a minimal repro command. Until
+  the polluter is fixed,
+  [`@pytest.mark.isolated`](../reference/markers.md#pytestmarkisolated) on it
+  contains what it leaks.
 - [`rstest audit`](../reference/cli-commands.md#audit) runs the suite in
   parallel against a serial baseline and classifies each parallel-only
   failure. The ones serial fixes (isolation, wall-clock) come out as a
