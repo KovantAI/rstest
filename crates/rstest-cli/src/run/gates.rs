@@ -717,6 +717,10 @@ pub(super) fn run_post_gates(
         // real elapsed cost here, so weighting by call time alone starves it
         // to one worker on the warm run. See `mono::project_cost`.
         durations::save_wall(start.elapsed().as_secs_f64());
+        // The workers' peak RSS, for the next memory-aware `-n auto`.
+        if let Some(peak) = outcome.peak_rss {
+            crate::scheduling::memory::record(peak);
+        }
         // Flake history rides the same cadence (and the same [gwN]-key
         // poisoning concern rules out each-mode).
         flakes::record(&outcome.run);
@@ -2302,6 +2306,7 @@ mod tests {
             collection_size: 0,
             startup_seconds: 0.0,
             fork_prewarmed: false,
+            peak_rss: None,
             sources: Default::default(),
         };
         let (mut sink, _cap) = Sink::captured();

@@ -17,6 +17,10 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   mtime, and ignores line endings, a cache restored onto a fresh checkout (for
   example with CI's cache action) still matches. Safe to delete
   at any time; the next run rebuilds it (and is scheduled in collection order).
+- `memory.json`: the largest worker peak RSS of each of the last 5 parallel
+  runs (and of single-worker runs `-n auto` chose), which caps the next
+  `-n auto` by memory ([`-n`](../reference/cli.md#-n-numprocesses-nauto)).
+  Safe to delete; `-n auto` is then CPU-sized until the next run records it.
 - `wall.json`: the whole suite's last wall-clock time for this project
   (fixture setup and teardown included), used by the monorepo planner to weight
   a fixture-bound project by its real cost. It carries no per-test source to

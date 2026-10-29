@@ -127,8 +127,12 @@ class LazyReadyPayload(TypedDict, total=False):
     maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
 
 
-class DonePayload(TypedDict):
+class _DoneRequired(TypedDict):
     exitstatus: int
+
+
+class DonePayload(_DoneRequired, total=False):
+    peak_rss: int  # the worker's peak RSS in bytes (memory-aware -n auto)
 
 
 class ItemStartPayload(TypedDict):
