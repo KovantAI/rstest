@@ -630,6 +630,8 @@ fn forward_stderr(
 /// Render [`Worker::death_detail`]: an indented exit line and stderr tail.
 fn format_death_detail(status: Option<ExitStatus>, tail: &[String], killed_by_us: bool) -> String {
     use std::fmt::Write as _;
+    #[cfg(not(unix))]
+    let _ = killed_by_us;
     let mut s = String::new();
     if let Some(status) = status {
         match status.code() {
