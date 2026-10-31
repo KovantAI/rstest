@@ -199,6 +199,19 @@ pub struct FixtureStat {
     pub fingerprint: Option<String>,
 }
 
+/// Setup seconds of one module's or class's module/class-scoped fixtures
+/// over one worker session.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
+pub struct ScopeCost {
+    /// The module's or class's nodeid (`tests/test_db.py`,
+    /// `tests/test_db.py::TestUsers`).
+    pub key: String,
+    pub total: f64,
+    /// Times the scope was set up in the session.
+    pub count: u64,
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Serialize))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
@@ -217,6 +230,11 @@ pub enum Event {
     /// Doctor mode: per-fixture setup timing, sent at session finish.
     DoctorFixtures {
         fixtures: Vec<FixtureStat>,
+    },
+    /// Module/class fixture setup cost per scope, sent at session finish
+    /// (always, not only under the doctor) for fixture-cost-aware dispatch.
+    ScopeCosts {
+        costs: Vec<ScopeCost>,
     },
     /// Aggregated warnings, sent at session finish.
     Warnings {
@@ -698,6 +716,12 @@ mod property {
             small_str().prop_map(|path| Event::CollectSkip { path }),
             prop::collection::vec(arb_fixture(), 0..4)
                 .prop_map(|fixtures| Event::DoctorFixtures { fixtures }),
+            prop::collection::vec(
+                (small_str(), finite_f64(), any::<u64>())
+                    .prop_map(|(key, total, count)| ScopeCost { key, total, count }),
+                0..4
+            )
+            .prop_map(|costs| Event::ScopeCosts { costs }),
             prop::collection::vec(arb_warning(), 0..4)
                 .prop_map(|entries| Event::Warnings { entries }),
             arb_collection_done(),

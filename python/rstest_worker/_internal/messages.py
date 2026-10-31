@@ -177,6 +177,16 @@ class DoctorFixturesPayload(TypedDict):
     fixtures: list[FixtureStat]
 
 
+class ScopeCost(TypedDict):
+    key: str  # nodeid of the module or class the fixtures were set up for
+    total: float  # setup seconds of its module/class-scoped fixtures
+    count: int  # times that scope was set up in this session
+
+
+class ScopeCostsPayload(TypedDict):
+    costs: list[ScopeCost]
+
+
 class CollectErrorPayload(TypedDict):
     path: str
     longrepr: str
@@ -208,6 +218,7 @@ EventKind = Literal[
     "collect_error",
     "collect_skip",
     "doctor_fixtures",
+    "scope_costs",
     "warnings",
     "collection_done",
     "lazy_ready",

@@ -2791,6 +2791,10 @@ fn fold_run_event(
             fixtures.extend(fx);
             None
         }
+        proto::Event::ScopeCosts { costs } => {
+            run.add_scope_costs(costs);
+            None
+        }
         proto::Event::Warnings { entries } => {
             warnings.extend(entries);
             None

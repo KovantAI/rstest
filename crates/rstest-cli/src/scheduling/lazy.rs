@@ -301,6 +301,7 @@ pub fn run_lazy_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
             Ok(Event::JunitSuite {
                 name,

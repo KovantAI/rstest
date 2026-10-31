@@ -356,6 +356,7 @@ pub fn run_pool(
     // explicit done_workers break, not channel disconnect.
 
     let duration_cache = crate::scheduling::durations::load();
+    let scope_costs = crate::scheduling::durations::load_scope_costs();
     // Flake history feeds fail-fast ordering; empty (and untouched) under the
     // throughput default so a cold cache costs nothing.
     let flake_history = if order == Order::FailFast {
@@ -563,6 +564,7 @@ pub fn run_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
             Ok(Event::JunitSuite {
                 name,
@@ -774,6 +776,8 @@ pub fn run_pool(
                             groups.unwrap_or_default(),
                             &duration_cache,
                             &flake_history,
+                            &scope_costs,
+                            states.len(),
                             dist,
                             order,
                             shuffle,
@@ -1145,6 +1149,7 @@ pub fn run_pool(
             dispatch = Some(Dispatch {
                 order: (0..total_items as u64).collect(),
                 slow_count: 0,
+                lead_ends: Vec::new(),
                 cursor: 0,
                 group_ends: None,
                 requeued: VecDeque::new(),
@@ -1611,6 +1616,7 @@ mod tests {
         Dispatch {
             order: (0..len).collect(),
             slow_count,
+            lead_ends: Vec::new(),
             cursor,
             group_ends: groups.then(|| vec![2, len as usize]),
             requeued: VecDeque::new(),

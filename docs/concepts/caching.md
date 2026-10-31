@@ -17,6 +17,11 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   mtime, and ignores line endings, a cache restored onto a fresh checkout (for
   example with CI's cache action) still matches. Safe to delete
   at any time; the next run rebuilds it (and is scheduled in collection order).
+- `scope_costs.json`: the setup time of each module's and class's module-
+  and class-scoped fixtures, merged over runs. Lets `--dist load` keep a
+  costly module on one worker
+  ([Scheduling](scheduling.md#costly-modules-and-classes-stay-on-one-worker)).
+  Safe to delete; the next run records it again.
 - `memory.json`: the largest worker peak RSS of each of the last 5 parallel
   runs (and of single-worker runs `-n auto` chose), which caps the next
   `-n auto` by memory ([`-n`](../reference/cli.md#-n-numprocesses-nauto)).
