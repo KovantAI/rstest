@@ -385,6 +385,9 @@ pub struct Run {
     /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
     /// in the summary line only, as pytest does.
     pub deselected: u64,
+    /// Collectors the previous lastfailed recorded as failed that collected
+    /// now, with the nodeids they yielded (pytest swaps the key for these).
+    pub lf_recollected: BTreeMap<String, Vec<String>>,
     /// nodeids that passed only after rerun(s), with attempt counts.
     pub flaky: Vec<(String, u32)>,
     /// Record (duration, phase, nodeid) for every phase report - only when

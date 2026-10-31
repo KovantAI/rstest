@@ -115,10 +115,7 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     let mut known: Vec<(String, f64)> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for f in files {
-        let rel = f
-            .strip_prefix(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| f.to_string_lossy().into_owned());
+        let rel = crate::scheduling::durations::file_key(&f, cwd);
         match totals.get(&rel) {
             Some(&t) => known.push((rel, t)),
             None => unknown.push(rel),
@@ -325,6 +322,9 @@ pub fn run_lazy_pool(
                 // Each skipped collector is seen by exactly one worker.
                 run.collect_skips += 1;
             }
+            Ok(Event::LfRecollected { path, ids }) => {
+                run.lf_recollected.insert(path, ids);
+            }
             Ok(Event::LazyReady {
                 cache_dir: cd,
                 rootdir,
@@ -499,7 +499,9 @@ pub fn run_lazy_pool(
             | Ok(Event::NodeInput { .. })
             | Ok(Event::ItemStart { .. })
             | Ok(Event::ItemDone { .. })
-            | Ok(Event::Stopped { .. }) => {}
+            | Ok(Event::Stopped { .. })
+            // Single-session only.
+            | Ok(Event::Interrupted {}) => {}
             Err(e) => {
                 // Name the cause (exit status, stderr tail) before anything below
                 // reaps the worker, which kills first and would hide it.
@@ -897,6 +899,22 @@ mod tests {
         ]);
         let ordered = order_files(files, &cache, cwd);
         assert_eq!(ordered, vec!["test_b.py", "test_a.py", "test_c.py"]);
+    }
+
+    #[test]
+    fn order_files_matches_backslash_paths_to_slash_cache_keys() {
+        // Windows paths carry `\`, cached nodeids `/`: they must still match.
+        let cwd = Path::new("/proj");
+        let files = vec![
+            PathBuf::from("/proj/tests\\test_a.py"),
+            PathBuf::from("/proj/tests\\test_b.py"),
+        ];
+        let cache = HashMap::from([
+            ("tests/test_a.py::t".to_string(), 1.0),
+            ("tests/test_b.py::t".to_string(), 5.0),
+        ]);
+        let ordered = order_files(files, &cache, cwd);
+        assert_eq!(ordered, vec!["tests/test_b.py", "tests/test_a.py"]);
     }
 
     #[test]

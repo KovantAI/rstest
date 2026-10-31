@@ -65,9 +65,9 @@ fn write_run_reports(
 /// it: a test that failed in any phase is added, one whose call passed or that
 /// was skipped is removed, and every other entry is kept, so a subset run
 /// leaves the failures of tests it did not run alone. A collection error adds
-/// its collector id; a previously failing collector that now produced tests is
-/// removed. A test an interrupt stopped mid-run has no real outcome and
-/// changes nothing.
+/// its collector id; a previously failing collector that now collects is
+/// replaced by the nodeids it yielded. A test an interrupt stopped mid-run has
+/// no real outcome and changes nothing.
 fn merged_lastfailed(
     mut prev: std::collections::BTreeMap<String, serde_json::Value>,
     run: &report::Run,
@@ -93,13 +93,16 @@ fn merged_lastfailed(
             cleared.insert(plain(id));
         }
     }
-    // A collector that failed last time and yielded tests now collected fine.
-    let collected_files: std::collections::BTreeSet<&str> = run
-        .tests()
-        .keys()
-        .filter_map(|id| id.split_once("::").map(|(f, _)| f))
-        .collect();
-    prev.retain(|k, _| k.contains("::") || !collected_files.contains(k.as_str()));
+    // A collector that failed last time and collected now: pytest swaps its
+    // key for the nodeids it yielded, so children this run never ran
+    // (deselected, cut by -x) stay recorded as failed.
+    for (path, ids) in &run.lf_recollected {
+        prev.remove(path);
+        prev.extend(
+            ids.iter()
+                .map(|id| (id.clone(), serde_json::Value::Bool(true))),
+        );
+    }
     for id in cleared {
         prev.remove(&id);
     }
@@ -1394,7 +1397,7 @@ mod tests {
             "t.py::fixed",           // passes now: removed
             "t.py::skipped_now",     // skipped now: removed
             "t.py::stopped",         // interrupted mid-run: kept
-            "broken.py",             // collects fine now: removed
+            "broken.py",             // collects fine now: swapped for its tests
             "gone.py",               // collector not seen this run: kept
         ]
         .into_iter()
@@ -1405,6 +1408,11 @@ mod tests {
         run.record(Some(0), rep("t.py::skipped_now", "setup", "skipped"));
         run.record(Some(0), rep("t.py::new_failure", "call", "failed"));
         run.record(Some(1), rep("broken.py::test_x", "call", "passed"));
+        // test_y was collected but never ran (deselected / cut by -x).
+        run.lf_recollected.insert(
+            "broken.py".into(),
+            vec!["broken.py::test_x".into(), "broken.py::test_y".into()],
+        );
         run.record(Some(1), rep("t.py::stopped", "call", "failed"));
         run.mark_interrupted("t.py::stopped");
         run.record(Some(1), rep("t.py::running", "call", "failed"));
@@ -1418,6 +1426,7 @@ mod tests {
             keys,
             vec![
                 "bad.py",
+                "broken.py::test_y",
                 "gone.py",
                 "other.py::old_failure",
                 "t.py::new_failure",

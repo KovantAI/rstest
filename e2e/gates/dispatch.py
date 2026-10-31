@@ -249,6 +249,23 @@ def gate_lf(g, args, binary):
         "1 failed" in r.stdout and "passed" not in r.stdout,
         r.stdout[-200:],
     )
+    # A collector lastfailed recorded as broken collects now: pytest swaps its
+    # key for its children, so the ones this run deselected stay failed. -n 0
+    # is pytest's own cacheprovider; the pool's merged write must match it.
+    rec = g.tmp / "lf_recollect"
+    g.write("lf_recollect/test_a.py", "def test_1(): pass\ndef test_2(): pass\n")
+    for mode in (["-n", "0"], ["-n", "2"], ["-n", "2", "--collect", "lazy"]):
+        cache = rec / ".pytest_cache" / "v" / "cache"
+        shutil.rmtree(rec / ".pytest_cache", ignore_errors=True)
+        cache.mkdir(parents=True)
+        (cache / "lastfailed").write_text(json.dumps({"test_a.py": True}), encoding="utf-8")
+        g.run("test_a.py", *mode, "-k", "test_1", cwd=rec)
+        got = json.loads((cache / "lastfailed").read_text(encoding="utf-8"))
+        check(
+            f"lastfailed keeps a recollected file's deselected tests ({' '.join(mode)})",
+            got == {"test_a.py::test_2": True},
+            got,
+        )
 
 
 def gate_shard_k_n(g, args, binary):

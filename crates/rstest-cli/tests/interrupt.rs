@@ -133,16 +133,20 @@ fn sigterm_stops_the_lazy_pool_and_keeps_the_artifacts() {
 
 /// `-n 0` (the byte-exact single session): the orchestrator must outlive the
 /// signal so pytest prints its KeyboardInterrupt summary and the reports are
-/// written with pytest's INTERRUPTED (2). `group` sends SIGINT to the whole
-/// process group (Ctrl-C, a CI cancel); otherwise SIGTERM goes to rstest's
-/// pid alone and must be passed on to the session.
-fn signal_stops_the_single_session(tag: &str, group: bool) {
+/// written with pytest's INTERRUPTED (2). `group` sends `sig` to the whole
+/// process group (Ctrl-C, a CI cancel); otherwise it goes to rstest's pid
+/// alone and must be passed on to the session, even while a test hangs. The
+/// hung test's slow teardown must finish either way: the session gets exactly
+/// one SIGINT, and a second would cut it short.
+fn signal_stops_the_single_session(tag: &str, sig: &str, group: bool) {
     use std::os::unix::process::CommandExt;
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir(tag);
     std::fs::write(
         dir.join("test_hang.py"),
-        "import os, time\n\ndef test_ok():\n    pass\n\ndef test_hang():\n    \
+        "import os, time, pytest\n\n@pytest.fixture\ndef slow_teardown():\n    \
+         yield\n    time.sleep(1.5)\n    open('torn_down', 'w').close()\n\n\
+         def test_ok():\n    pass\n\ndef test_hang(slow_teardown):\n    \
          open('hang.pid', 'w').write(str(os.getpid()))\n    time.sleep(300)\n",
     )
     .unwrap();
@@ -168,17 +172,15 @@ fn signal_stops_the_single_session(tag: &str, group: bool) {
         panic!("the hanging test never started");
     }
     let worker_pid = std::fs::read_to_string(&pidfile).unwrap();
-    if group {
-        Command::new("kill")
-            .args(["-INT", "--", &pgid])
-            .status()
-            .unwrap();
+    let target = if group {
+        pgid.clone()
     } else {
-        Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
-            .status()
-            .unwrap();
-    }
+        child.id().to_string()
+    };
+    Command::new("kill")
+        .args([sig, "--", &target])
+        .status()
+        .unwrap();
     let exited = wait_for(Duration::from_secs(20), || {
         child.try_wait().is_ok_and(|s| s.is_some())
     });
@@ -198,11 +200,13 @@ fn signal_stops_the_single_session(tag: &str, group: bool) {
     }
     let junit = std::fs::read_to_string(dir.join("j.xml")).unwrap_or_default();
     let report = std::fs::read_to_string(dir.join("r.json")).unwrap_or_default();
+    let torn_down = dir.join("torn_down").is_file();
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(out.status.code(), Some(2), "{text}");
     assert!(text.contains("KeyboardInterrupt"), "{text}");
     assert!(worker_gone, "worker {worker_pid} outlived rstest\n{text}");
+    assert!(torn_down, "a second SIGINT cut the teardown short\n{text}");
     assert!(junit.contains("test_ok"), "{junit}");
     let report: serde_json::Value = serde_json::from_str(&report).expect("--report-json");
     assert_eq!(report["meta"]["exitstatus"], 2, "{report}");
@@ -210,76 +214,17 @@ fn signal_stops_the_single_session(tag: &str, group: bool) {
 
 #[test]
 fn sigint_to_the_group_lets_the_single_session_finish_and_report() {
-    signal_stops_the_single_session("n0-sigint", true);
+    signal_stops_the_single_session("n0-sigint", "-INT", true);
 }
 
 #[test]
 fn sigterm_to_rstest_is_passed_on_to_the_single_session() {
-    signal_stops_the_single_session("n0-sigterm", false);
+    signal_stops_the_single_session("n0-sigterm", "-TERM", false);
 }
 
-/// `-n 0`, SIGINT to rstest's pid alone (`kill -INT PID`): the session never
-/// got it, so the next test it sets up proves that and the signal is passed
-/// on; the run stops as INTERRUPTED (2) instead of running every test.
+/// `-n 0`, SIGINT to rstest's pid alone (`kill -INT PID`) while a test hangs:
+/// the session never reports a SIGINT of its own, so it is passed on.
 #[test]
-fn sigint_to_rstest_alone_reaches_the_single_session() {
-    use std::os::unix::process::CommandExt;
-    let Some(venv) = pytest_env() else { return };
-    let dir = fresh_dir("n0-sigint-pid");
-    std::fs::write(
-        dir.join("test_seq.py"),
-        "import os, time\n\ndef test_first():\n    \
-         open('first.pid', 'w').write(str(os.getpid()))\n    time.sleep(1.5)\n\n\
-         def test_hang():\n    time.sleep(300)\n",
-    )
-    .unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rstest"));
-    cmd.args(["-n", "0", "--report-json", "r.json"])
-        .current_dir(&dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(v) = &venv {
-        let path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("VIRTUAL_ENV", v)
-            .env("PATH", format!("{}:{path}", v.join("bin").display()));
-    }
-    let mut child = cmd.spawn().expect("spawn rstest");
-    let pgid = format!("-{}", child.id());
-    let pidfile = dir.join("first.pid");
-    let started = wait_for(Duration::from_secs(60), || {
-        std::fs::read_to_string(&pidfile).is_ok_and(|s| !s.is_empty())
-    });
-    if !started {
-        let _ = Command::new("kill").args(["-9", "--", &pgid]).status();
-        panic!("the first test never started");
-    }
-    Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .unwrap();
-    let exited = wait_for(Duration::from_secs(20), || {
-        child.try_wait().is_ok_and(|s| s.is_some())
-    });
-    if !exited {
-        let _ = Command::new("kill").args(["-9", "--", &pgid]).status();
-        panic!("rstest kept running after a SIGINT to its pid");
-    }
-    let out = child.wait_with_output().unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let report = std::fs::read_to_string(dir.join("r.json")).unwrap_or_default();
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(out.status.code(), Some(2), "{text}");
-    assert!(text.contains("KeyboardInterrupt"), "{text}");
-    let report: serde_json::Value = serde_json::from_str(&report).expect("--report-json");
-    assert_eq!(report["meta"]["exitstatus"], 2, "{report}");
-    // The first test ran to its end: the signal waited for proof.
-    assert_eq!(
-        report["tests"]["test_seq.py::test_first"]["call"], "passed",
-        "{report}"
-    );
+fn sigint_to_rstest_alone_stops_a_hung_single_session() {
+    signal_stops_the_single_session("n0-sigint-pid-hang", "-INT", false);
 }
