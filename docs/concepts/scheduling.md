@@ -52,6 +52,10 @@ it repeats, for example a module of long tests that would otherwise leave
 the rest of the pool idle. Units lead the queue together with the slow tests,
 biggest first; the rest follows in chunks as above.
 
+The costs ride the shared cache (`--cache-push` / `--cache-pull`), so a fresh
+CI runner groups from its first run. `--doctor` lists what was grouped and the
+setup time it saved ([FIXTURE GROUPING](../guides/doctor.md#fixture-grouping)).
+
 This applies to the default `--dist load --order throughput` on a full
 collection. It is off under `--shuffle` and `--order fail-fast` (their order
 wins) and with one worker. [Lazy collection](lazy-collection.md) already

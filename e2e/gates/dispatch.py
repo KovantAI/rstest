@@ -1178,3 +1178,49 @@ def gate_fixture_cost_dispatch(g, args, binary):
     )
     setups = log.read_text().split()
     check("fixture-cost warm: costly module fixture set up once", len(setups) == 1, str(setups))
+
+    # The doctor names the module it kept together and the setup time saved.
+    r = g.run(
+        "-n", "4", "--collect", "full", "--doctor", cwd=proj, env_extra={"SETUP_LOG": str(log)}
+    )
+    check(
+        "fixture-cost doctor: grouping section with the time saved",
+        "FIXTURE GROUPING (~" in r.stdout and "set up 1x" in r.stdout and "test_db.py" in r.stdout,
+        r.stdout[-800:],
+    )
+
+    # A run that pushes to the shared cache lets a fresh checkout (no local
+    # .rstest_cache) group the module on its very first run.
+    remote = g.tmp / "fixcost_remote"
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-push",
+        cwd=proj,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    check("fixture-cost push: suite passes", "240 passed" in r.stdout, r.stdout[-300:])
+    fresh = g.tmp / "fixcost_fresh"
+    shutil.copytree(proj, fresh, ignore=shutil.ignore_patterns(".rstest_cache", ".pytest_cache"))
+    log.write_text("")
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-pull",
+        cwd=fresh,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    setups = log.read_text().split()
+    check(
+        "fixture-cost pull: a fresh checkout sets the module fixture up once",
+        "240 passed" in r.stdout and len(setups) == 1,
+        f"{setups} " + r.stdout[-300:],
+    )

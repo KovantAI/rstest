@@ -461,6 +461,14 @@ impl Interruption {
 }
 
 impl Run {
+    /// One setup's mean seconds per module/class scope this run set up.
+    pub fn scope_cost_means(&self) -> impl Iterator<Item = (&String, f64)> {
+        self.scope_costs
+            .iter()
+            .filter(|(_, &(_, setups))| setups > 0)
+            .map(|(k, &(secs, setups))| (k, secs / setups as f64))
+    }
+
     /// Fold one worker session's module/class fixture setup costs in.
     pub fn add_scope_costs(&mut self, costs: Vec<proto::ScopeCost>) {
         for c in costs {

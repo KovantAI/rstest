@@ -1668,6 +1668,7 @@ fn dispatch_run(
                 w.shutdown()?;
             }
             pool::PoolOutcome {
+                fixture_groups: Vec::new(),
                 run,
                 prog,
                 fixtures,
@@ -3576,6 +3577,7 @@ mod tests {
 
     fn compact_segment(id: &str, generated_at: u64) -> remote::Segment {
         remote::Segment {
+            scope_costs: Default::default(),
             schema: 1,
             id: id.into(),
             generated_at,

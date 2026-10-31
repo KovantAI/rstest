@@ -14,6 +14,8 @@
 //! - **coverage index**: hash-aware union per line.
 //! - **run history**: each segment carries its run's [`RunSlice`]; runs are
 //!   unioned by run id and replayed oldest first, newest N per test kept.
+//! - **fixture scope costs**: last value wins per module/class nodeid, as
+//!   durations.
 //!
 //! This module is pure data + merge logic; transport (Phase 2) and CLI wiring
 //! (Phase 3) live above it. Kept unit-testable with no IO.
@@ -64,6 +66,10 @@ pub struct Segment {
     /// suite or one whole shard (see [`GreenPart`]); `None` otherwise.
     #[serde(default)]
     pub green: Option<GreenPart>,
+    /// This run's module/class fixture setup seconds per scope nodeid (one
+    /// setup's mean), for fixture-cost-aware dispatch.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scope_costs: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,6 +124,9 @@ pub struct Base {
     /// Segment ids already accumulated into this base.
     #[serde(default)]
     pub absorbed: HashSet<String>,
+    /// Module/class fixture setup seconds per scope nodeid.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scope_costs: HashMap<String, f64>,
 }
 
 /// The merged result written into the local `.rstest_cache` on pull.
@@ -131,6 +140,7 @@ pub struct Merged {
     pub green: Option<Snapshot>,
     /// Green shards still waiting for the rest of their run.
     pub green_parts: Vec<GreenPart>,
+    pub scope_costs: HashMap<String, f64>,
 }
 
 /// Merge a base (optional) and a set of segments into the local cache shape.
@@ -150,6 +160,7 @@ pub fn merge(base: Option<Base>, segments: Vec<Segment>) -> Merged {
 fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<String, u64>) {
     let base = base.unwrap_or_default();
     let mut durations = base.durations;
+    let mut scope_costs = base.scope_costs;
     let mut flakes = base.flakes;
     let mut cov = base.cov_index;
     let mut cov_ts = base.cov_ts;
@@ -183,6 +194,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
         for (nodeid, secs) in seg.durations {
             durations.insert(nodeid, secs); // oldest→newest order => newest wins
         }
+        scope_costs.extend(seg.scope_costs); // newest wins, as durations
         for ev in seg.flake_events {
             let e = flakes.entry(ev.nodeid).or_default();
             match ev.kind {
@@ -210,6 +222,7 @@ fn merge_inner(base: Option<Base>, segments: Vec<Segment>) -> (Merged, HashMap<S
             history: History::merged(runs, history::cap()),
             green: newest.0,
             green_parts: newest.1,
+            scope_costs,
         },
         cov_ts,
     )
@@ -286,6 +299,7 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
             history,
             green,
             green_parts,
+            scope_costs,
         },
         cov_ts,
     ) = merge_inner(base, segments);
@@ -301,6 +315,7 @@ pub fn compact(base: Option<Base>, segments: Vec<Segment>) -> Base {
         green,
         green_parts,
         absorbed,
+        scope_costs,
     }
 }
 
@@ -393,6 +408,10 @@ pub fn segment_from_run(
         cov_index,
         history,
         green,
+        scope_costs: run
+            .scope_cost_means()
+            .map(|(k, v)| (k.clone(), v))
+            .collect(),
     }
 }
 
@@ -432,6 +451,12 @@ fn write_local_in(dir: &Path, merged: &Merged) {
             // Tags each pulled entry with the local source fingerprint as it
             // lands, overlaying onto (and pruning) the existing local cache.
             durations::overlay_remote_in(&dir.join(durations::FILE), &merged.durations);
+        }
+        if !merged.scope_costs.is_empty() {
+            durations::overlay_scope_costs_in(
+                &dir.join(durations::SCOPE_FILE),
+                merged.scope_costs.iter().map(|(k, &v)| (k.clone(), v)),
+            );
         }
         if !merged.flakes.is_empty() {
             let path = dir.join(flakes::FILE);
@@ -1321,6 +1346,7 @@ mod tests {
 
     fn seg(id: &str, at: u64, durs: &[(&str, f64)], events: &[(&str, FlakeKind)]) -> Segment {
         Segment {
+            scope_costs: Default::default(),
             schema: SEGMENT_SCHEMA,
             id: id.into(),
             generated_at: at,
@@ -1361,6 +1387,7 @@ mod tests {
             );
         }
         Segment {
+            scope_costs: Default::default(),
             schema: SEGMENT_SCHEMA,
             id: id.into(),
             generated_at: at,
@@ -1411,6 +1438,7 @@ mod tests {
         .unwrap();
 
         let merged = Merged {
+            scope_costs: Default::default(),
             durations: HashMap::from([("shared".to_string(), 9.0), ("remote".to_string(), 3.0)]),
             flakes: HashMap::from([
                 ("shared".to_string(), stats(5, 5)),
@@ -1447,6 +1475,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let cov = cov_seg("s", 1, &[("a.py", "h", &[(3, &["t::x"])])]).cov_index;
         let merged = Merged {
+            scope_costs: Default::default(),
             durations: HashMap::new(),
             flakes: HashMap::new(),
             cov_index: cov.clone(),
@@ -3088,5 +3117,66 @@ mod tests {
         // A connection failure (no auth => with_auth None branch) is an Err.
         let bad = RealHttpClient::from_env().get("http://127.0.0.1:1/x");
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn scope_costs_ride_segments_and_the_base_newest_wins() {
+        let mut a = seg("a", 1, &[], &[]);
+        a.scope_costs = HashMap::from([("db.py".into(), 2.0), ("old.py".into(), 1.0)]);
+        let mut b = seg("b", 2, &[], &[]);
+        b.scope_costs = HashMap::from([("db.py".into(), 3.0)]);
+        let merged = merge(None, vec![b.clone(), a.clone()]);
+        assert_eq!(merged.scope_costs["db.py"], 3.0, "newest segment wins");
+        assert_eq!(merged.scope_costs["old.py"], 1.0);
+        // Folded into a base and pulled again: still there.
+        let base = compact(None, vec![a, b]);
+        assert_eq!(merge(Some(base), vec![]).scope_costs["db.py"], 3.0);
+        // A segment with none writes no field, and an older one without it reads.
+        let json = serde_json::to_string(&seg("c", 3, &[], &[])).unwrap();
+        assert!(!json.contains("scope_costs"), "{json}");
+        let read: Segment = serde_json::from_str(&json).unwrap();
+        assert!(read.scope_costs.is_empty());
+    }
+
+    #[test]
+    fn segment_from_run_carries_scope_cost_means() {
+        let mut run = Run::default();
+        run.add_scope_costs(vec![
+            crate::scheduling::proto::ScopeCost {
+                key: "db.py".into(),
+                total: 3.0,
+                count: 2,
+            },
+            crate::scheduling::proto::ScopeCost {
+                key: "db.py".into(),
+                total: 1.0,
+                count: 2,
+            },
+        ]);
+        let s = segment_from_run("x".into(), 1, &run, CoverageIndex::default(), None, None);
+        assert_eq!(s.scope_costs, HashMap::from([("db.py".to_string(), 1.0)]));
+    }
+
+    #[test]
+    fn write_local_overlays_pulled_scope_costs() {
+        use crate::scheduling::durations;
+        let dir =
+            std::env::temp_dir().join(format!("rstest-write-local-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(durations::SCOPE_FILE);
+        std::fs::write(&path, r#"{"local.py": 1.0, "db.py": 0.1}"#).unwrap();
+        let merged = Merged {
+            scope_costs: HashMap::from([("db.py".to_string(), 4.0)]),
+            ..Merged::default()
+        };
+        write_local_in(&dir, &merged);
+        let got: HashMap<String, f64> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            got,
+            HashMap::from([("local.py".into(), 1.0), ("db.py".into(), 4.0)])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

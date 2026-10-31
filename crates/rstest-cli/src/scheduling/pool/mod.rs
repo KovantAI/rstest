@@ -21,6 +21,7 @@
 //! guard); its outstanding items requeue; a capped-budget respawn reuses gwN.
 
 mod dispatch;
+pub use dispatch::FixtureGroup;
 mod io;
 mod state;
 
@@ -163,6 +164,9 @@ pub struct PoolOutcome {
     pub prog: Progress,
     /// Per-fixture setup timings (doctor mode), aggregated across workers.
     pub fixtures: Vec<proto::FixtureStat>,
+    /// Modules/classes `--dist load` kept on one worker for their fixture
+    /// cost (empty on paths that never group).
+    pub fixture_groups: Vec<dispatch::FixtureGroup>,
     /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
     /// pytest's cache dir (from the designate worker), where the merged
@@ -1150,6 +1154,7 @@ pub fn run_pool(
                 order: (0..total_items as u64).collect(),
                 slow_count: 0,
                 lead_ends: Vec::new(),
+                fixture_groups: Vec::new(),
                 cursor: 0,
                 group_ends: None,
                 requeued: VecDeque::new(),
@@ -1514,10 +1519,15 @@ pub fn run_pool(
             std::mem::take(&mut recorder),
         ));
     }
+    let fixture_groups = dispatch
+        .as_mut()
+        .map(|d| std::mem::take(&mut d.fixture_groups))
+        .unwrap_or_default();
     Ok(PoolOutcome {
         run,
         prog,
         fixtures,
+        fixture_groups,
         warnings,
         cache_dir,
         exitstatus,
@@ -1617,6 +1627,7 @@ mod tests {
             order: (0..len).collect(),
             slow_count,
             lead_ends: Vec::new(),
+            fixture_groups: Vec::new(),
             cursor,
             group_ends: groups.then(|| vec![2, len as usize]),
             requeued: VecDeque::new(),

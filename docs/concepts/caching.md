@@ -21,7 +21,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   and class-scoped fixtures, merged over runs. Lets `--dist load` keep a
   costly module on one worker
   ([Scheduling](scheduling.md#costly-modules-and-classes-stay-on-one-worker)).
-  Safe to delete; the next run records it again.
+  Shared through `--cache-push` / `--cache-pull`. Safe to delete; the next run
+  records it again.
 - `memory.json`: the largest worker peak RSS of each of the last 5 parallel
   runs (and of single-worker runs `-n auto` chose), which caps the next
   `-n auto` by memory ([`-n`](../reference/cli.md#-n-numprocesses-nauto)).
@@ -154,6 +155,9 @@ clobber each other.
       slices **union into a full index**; if a file's content differs between
       segments the newer wins and `--changed` falls back to the import graph for
       that file: still correct, only coarser.
+    - *fixture scope costs*: newest value per module or class
+      (`scope_costs.json`), so a fresh runner keeps costly modules on one
+      worker from its first run;
     - *run history*: each segment carries its run (id, epoch, commit)
       and one entry per test. Runs are unioned by
       run id, so a run that arrives from the base, a segment and the local

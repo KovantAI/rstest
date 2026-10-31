@@ -351,17 +351,21 @@ pub fn save_scope_costs(run: &Run) {
         return;
     }
     cache::with_lock(|| {
-        let path = cache::file(SCOPE_FILE);
-        let mut map = load_scope_costs_from(&path);
-        for (key, &(secs, setups)) in &run.scope_costs {
-            if setups > 0 {
-                map.insert(key.clone(), secs / setups as f64);
-            }
-        }
-        if let Ok(bytes) = serde_json::to_vec(&map) {
-            let _ = cache::write_atomic(&path, &bytes);
-        }
+        overlay_scope_costs_in(
+            &cache::file(SCOPE_FILE),
+            run.scope_cost_means().map(|(k, v)| (k.clone(), v)),
+        )
     });
+}
+
+/// Write `costs` over the scope costs saved at `path` (new values win). Also
+/// lands a `--cache-pull`'s merged costs. The caller holds the cache lock.
+pub fn overlay_scope_costs_in(path: &Path, costs: impl IntoIterator<Item = (String, f64)>) {
+    let mut map = load_scope_costs_from(path);
+    map.extend(costs);
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        let _ = cache::write_atomic(path, &bytes);
+    }
 }
 
 /// The saved module/class fixture setup costs (empty when none or unreadable).

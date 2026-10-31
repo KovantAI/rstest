@@ -23,6 +23,8 @@ pub(super) struct Dispatch {
     /// (see [`fixture_lead`]): each dispatch takes one whole unit. Empty: one
     /// item per dispatch.
     pub(super) lead_ends: Vec<usize>,
+    /// What [`fixture_lead`] grouped, for the doctor.
+    pub(super) fixture_groups: Vec<FixtureGroup>,
     pub(super) cursor: usize,
     /// Group end-positions in `order` (loadfile mode): a dispatch never
     /// splits a group.
@@ -33,6 +35,21 @@ pub(super) struct Dispatch {
     /// after all other workers are Done.
     pub(super) serial: VecDeque<u64>,
     pub(super) serial_active: bool,
+}
+
+/// A module or class whose tests [`fixture_lead`] kept together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixtureGroup {
+    /// The module's or class's nodeid.
+    pub scope: String,
+    pub tests: usize,
+    /// Units it went out in (each set up once): 1 unless it was split.
+    pub pieces: usize,
+    /// One setup's recorded seconds.
+    pub setup_seconds: f64,
+    /// About how many workers plain chunked dispatch would have spread it
+    /// over, each setting it up again.
+    pub chunked_setups: usize,
 }
 
 pub(super) enum Take {
@@ -156,6 +173,7 @@ pub(super) fn build_dispatch(
     let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i) && kept(i));
 
     let mut lead_ends = Vec::new();
+    let mut fixture_groups = Vec::new();
     let (order, slow_count, group_ends) = match dist {
         // Each mode has no dispatch queue (each worker is seeded with the
         // full suite), so there is nothing to build.
@@ -165,9 +183,10 @@ pub(super) fn build_dispatch(
             super::Order::Throughput if shuffle.is_none() && workers > 1 => {
                 let parallel: Vec<u64> = parallel().collect();
                 match fixture_lead(ids, &parallel, cache, scope_costs, workers) {
-                    Some((order, ends)) => {
+                    Some((order, ends, groups)) => {
                         let slow_count = ends.last().copied().unwrap_or(0);
                         lead_ends = ends;
+                        fixture_groups = groups;
                         (order, slow_count, None)
                     }
                     None => throughput(ids, cache, &serial_set, &kept),
@@ -301,6 +320,7 @@ pub(super) fn build_dispatch(
         serial: serial.into(),
         serial_active: false,
         lead_ends,
+        fixture_groups,
     })
 }
 
@@ -338,15 +358,16 @@ pub(crate) const GROUP_MIN_SETUP_SECS: f64 = 0.5;
 /// least [`GROUP_MIN_SETUP_SECS`] form one unit sent to one worker, split only
 /// where a piece more saves more wall time than the setup it repeats. The units
 /// and the remaining long poles lead the queue, biggest first; the rest
-/// follows in collection order. Returns (order, unit ends), or `None` when no
-/// scope is costly enough (the plain throughput order then applies).
+/// follows in collection order. Returns (order, unit ends, what was grouped),
+/// or `None` when no scope is costly enough (the plain throughput order then
+/// applies).
 fn fixture_lead(
     ids: &[String],
     parallel: &[u64],
     cache: &std::collections::HashMap<String, f64>,
     scope_costs: &std::collections::HashMap<String, f64>,
     workers: usize,
-) -> Option<(Vec<u64>, Vec<usize>)> {
+) -> Option<(Vec<u64>, Vec<usize>, Vec<FixtureGroup>)> {
     use crate::scheduling::durations::SLOW_THRESHOLD_SECS;
     // The widest costly scope wins: a costly module groups its classes too.
     let scope_of = |id: &str| {
@@ -358,7 +379,7 @@ fn fixture_lead(
         })
     };
     let dur = |i: u64| cache.get(&ids[i as usize]).copied().unwrap_or(0.0);
-    let mut groups: Vec<(f64, Vec<u64>)> = Vec::new();
+    let mut groups: Vec<(f64, Vec<u64>, &str)> = Vec::new();
     let mut group_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut rest = Vec::new();
     for &i in parallel {
@@ -366,7 +387,7 @@ fn fixture_lead(
         match scope_of(id) {
             Some((pos, cost)) => {
                 let g = *group_of.entry(&id[..pos]).or_insert_with(|| {
-                    groups.push((cost, Vec::new()));
+                    groups.push((cost, Vec::new(), &id[..pos]));
                     groups.len() - 1
                 });
                 groups[g].1.push(i);
@@ -382,7 +403,9 @@ fn fixture_lead(
     let pool = workers as f64;
     // (expected seconds, items): fixture groups, then the ungrouped long poles.
     let mut units: Vec<(f64, Vec<u64>)> = Vec::new();
-    for (cost, members) in groups {
+    let mut grouped = Vec::new();
+    let chunk = chunk_size(parallel.len(), workers);
+    for (cost, members, scope) in groups {
         let calls: f64 = members.iter().map(|&i| dur(i)).sum();
         // Wall-time floor with the group in k pieces: its longest piece, or
         // the pool's average once each extra piece repeats the setup.
@@ -394,7 +417,15 @@ fn fixture_lead(
             pieces += 1;
         }
         // ponytail: pieces split by count; weight by duration if they come out uneven.
-        for piece in members.chunks(members.len().div_ceil(pieces)) {
+        let split = members.chunks(members.len().div_ceil(pieces));
+        grouped.push(FixtureGroup {
+            scope: scope.to_string(),
+            tests: members.len(),
+            pieces: split.len(),
+            setup_seconds: cost,
+            chunked_setups: members.len().div_ceil(chunk).min(workers),
+        });
+        for piece in split {
             units.push((
                 cost + piece.iter().map(|&i| dur(i)).sum::<f64>(),
                 piece.to_vec(),
@@ -418,7 +449,7 @@ fn fixture_lead(
         ends.push(order.len());
     }
     order.extend(tail);
-    Some((order, ends))
+    Some((order, ends, grouped))
 }
 
 #[cfg(test)]

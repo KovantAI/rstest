@@ -821,6 +821,7 @@ pub fn run_lazy_pool(
         ));
     }
     Ok(PoolOutcome {
+        fixture_groups: Vec::new(),
         run,
         prog,
         fixtures,
