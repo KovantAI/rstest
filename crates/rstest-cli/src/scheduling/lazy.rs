@@ -200,6 +200,7 @@ pub fn run_lazy_pool(
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
+    let mut peak_rss: Option<u64> = None;
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
@@ -466,8 +467,12 @@ pub fn run_lazy_pool(
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::Done { exitstatus }) => {
+            Ok(Event::Done {
+                exitstatus,
+                peak_rss: peak,
+            }) => {
                 statuses.push(exitstatus);
+                peak_rss = peak_rss.max(peak);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own never ran what reached it
@@ -828,6 +833,7 @@ pub fn run_lazy_pool(
         startup_seconds,
         fork_prewarmed,
         sources,
+        peak_rss,
     })
 }
 

@@ -19,6 +19,7 @@ if _vendor not in sys.path:
 # Absolute (not relative) imports: multiprocessing-spawn and anyio
 # to_process re-execute the parent's __main__ file via runpy without
 # package context, where relative imports raise ImportError.
+from rstest_worker._internal import messages as m
 from rstest_worker._internal import protocol, runner_pytest
 
 
@@ -124,20 +125,37 @@ def _fork_pool(argv: list[str]) -> None:
     os._exit(0)
 
 
+def _peak_rss() -> int | None:
+    """This process's peak resident set size in bytes, None where it can't be
+    read (no `resource` module on Windows). ru_maxrss is KiB on Linux, bytes
+    on macOS."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak if sys.platform == "darwin" else peak * 1024)
+
+
+def _done(conn, exitstatus: int) -> None:
+    payload: m.DonePayload = {"exitstatus": exitstatus}
+    peak = _peak_rss()
+    if peak is not None:
+        payload["peak_rss"] = peak
+    conn.send("done", payload)
+
+
 def _serve(conn) -> None:
     for cmd in conn.commands():
         kind = cmd["kind"]
         if kind == "shutdown":
             break
         if kind == "run_tests":
-            exitstatus = runner_pytest.run(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run(cmd["payload"]["args"], conn))
         elif kind == "run_items_session":
-            exitstatus = runner_pytest.run_session(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run_session(cmd["payload"]["args"], conn))
         elif kind == "run_lazy_session":
-            exitstatus = runner_pytest.run_lazy_session(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run_lazy_session(cmd["payload"]["args"], conn))
 
 
 # Guarded like multiprocessing requires: child runtimes (multiprocessing

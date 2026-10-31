@@ -1606,6 +1606,7 @@ fn dispatch_run(
             // Failed attempts of flaky-marked tests the session retried
             // (outcome `rerun`), per nodeid: see `mark_session_flaky`.
             let mut reruns_seen: Vec<String> = Vec::new();
+            let mut session_peak: Option<u64> = None;
             let exitstatus = loop {
                 let event = match w.recv() {
                     Ok(event) => event,
@@ -1626,6 +1627,12 @@ fn dispatch_run(
                         _ => return Err(e),
                     },
                 };
+                if let proto::Event::Done {
+                    peak_rss: Some(p), ..
+                } = &event
+                {
+                    session_peak = Some(*p);
+                }
                 if let proto::Event::Report(r) = &event {
                     if r.when == "setup" {
                         if let Some(i) = &interrupts {
@@ -1676,6 +1683,12 @@ fn dispatch_run(
                 // No worker pool spawned here (one passthrough worker).
                 startup_seconds: 0.0,
                 fork_prewarmed: false,
+                // Recorded only when `-n auto` chose this one session (as when
+                // memory capped it at 1): then it is the worker's peak, and a
+                // later run on more memory can size up from it. An explicit
+                // `-n 0` runs the whole suite in one process, a peak that
+                // would undersize the next parallel run.
+                peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
             }
         } else if path == RunPath::Lazy {
             // Auto-picked (neither --collect nor the setting present)? Say so once,
@@ -2303,7 +2316,22 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
 ///
 /// A walk with no Python file at all (an empty folder) means one worker,
 /// unless `args` name a path the walk didn't cover.
+///
+/// Memory caps it last: when the recorded peak worker RSS times the count
+/// would not fit the memory limit, fewer workers (said on stderr, where the
+/// sizing notes go).
 fn auto_workers(args: &[String]) -> usize {
+    let n = auto_workers_by_cpu(args);
+    match crate::scheduling::memory::cap(n) {
+        Some(cap) => {
+            eprintln!("{}", cap.note());
+            cap.workers
+        }
+        None => n,
+    }
+}
+
+fn auto_workers_by_cpu(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
@@ -2804,7 +2832,7 @@ fn fold_run_event(
                 .record_suite(name, timestamp, hostname, properties, extra);
             None
         }
-        proto::Event::Done { exitstatus } => Some(exitstatus),
+        proto::Event::Done { exitstatus, .. } => Some(exitstatus),
     }
 }
 
@@ -4111,7 +4139,13 @@ mod tests {
             None
         );
         // Done terminates with the exit status.
-        assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
+        assert_eq!(
+            fold(proto::Event::Done {
+                exitstatus: 1,
+                peak_rss: None
+            }),
+            Some(1)
+        );
 
         assert_eq!(run.collect_skips, 1);
         assert_eq!(warnings.len(), 1);

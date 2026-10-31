@@ -24,6 +24,7 @@ class _FakeConn:
 
 
 def test_serve_dispatches_run_tests(monkeypatch):
+    monkeypatch.setattr(worker_main, "_peak_rss", lambda: None)
     monkeypatch.setattr(runner_pytest, "run", lambda args, conn: 7)
     conn = _FakeConn([{"kind": "run_tests", "payload": {"args": ["-x"]}}])
     worker_main._serve(conn)
@@ -31,6 +32,7 @@ def test_serve_dispatches_run_tests(monkeypatch):
 
 
 def test_serve_dispatches_each_session_kind(monkeypatch):
+    monkeypatch.setattr(worker_main, "_peak_rss", lambda: 4096)
     monkeypatch.setattr(runner_pytest, "run_session", lambda args, conn: 1)
     monkeypatch.setattr(runner_pytest, "run_lazy_session", lambda args, conn: 2)
     conn = _FakeConn(
@@ -40,10 +42,21 @@ def test_serve_dispatches_each_session_kind(monkeypatch):
         ]
     )
     worker_main._serve(conn)
+    # Each session's end carries the worker's peak RSS (memory-aware -n auto).
     assert conn.sent == [
-        ("done", {"exitstatus": 1}),
-        ("done", {"exitstatus": 2}),
+        ("done", {"exitstatus": 1, "peak_rss": 4096}),
+        ("done", {"exitstatus": 2, "peak_rss": 4096}),
     ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="no resource module")
+def test_peak_rss_is_this_process_in_bytes():
+    import resource
+
+    peak = worker_main._peak_rss()
+    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # A real interpreter's peak is tens of MiB: KiB (Linux) scaled to bytes.
+    assert peak is not None and peak >= raw and peak > 10 * 1024 * 1024
 
 
 def test_serve_shutdown_breaks_loop():

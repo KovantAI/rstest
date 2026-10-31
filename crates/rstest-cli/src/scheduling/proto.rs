@@ -366,6 +366,10 @@ pub enum Event {
     },
     Done {
         exitstatus: i32,
+        /// The worker's peak RSS in bytes over its session (memory-aware
+        /// `-n auto`); absent where it can't be read (Windows).
+        #[serde(default)]
+        peak_rss: Option<u64>,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -532,7 +536,19 @@ mod tests {
         ));
         assert!(matches!(
             from_python(serde_json::json!({"kind": "done", "payload": {"exitstatus": 5}})),
-            Event::Done { exitstatus: 5 }
+            Event::Done {
+                exitstatus: 5,
+                peak_rss: None
+            }
+        ));
+        assert!(matches!(
+            from_python(
+                serde_json::json!({"kind": "done", "payload": {"exitstatus": 0, "peak_rss": 1024}})
+            ),
+            Event::Done {
+                exitstatus: 0,
+                peak_rss: Some(1024)
+            }
         ));
         assert!(matches!(
             from_python(serde_json::json!({"kind": "stopped", "payload": {"unrun": [1, 2]}})),
@@ -708,7 +724,12 @@ mod property {
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
             (small_str(), any::<i32>())
                 .prop_map(|(reason, returncode)| Event::SessionExit { reason, returncode }),
-            any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
+            (any::<i32>(), proptest::option::of(any::<u64>())).prop_map(
+                |(exitstatus, peak_rss)| Event::Done {
+                    exitstatus,
+                    peak_rss
+                }
+            ),
             (small_str(), small_strs())
                 .prop_map(|(nodeid, cases)| Event::JunitCase { nodeid, cases }),
             (

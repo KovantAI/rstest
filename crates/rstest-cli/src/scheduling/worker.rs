@@ -141,6 +141,9 @@ pub struct Worker {
     /// from here, so a wind-down that sends every Shutdown and then waits the
     /// workers one by one shares one deadline instead of stacking N of them.
     shutdown_sent: Option<std::time::Instant>,
+    /// Set by [`Worker::kill`]: a SIGKILL death is then ours (the hang
+    /// watchdog), not the out-of-memory killer.
+    killed: bool,
 }
 
 /// How a worker's OS process is owned. The plain spawn path makes the worker a
@@ -625,8 +628,10 @@ fn forward_stderr(
 }
 
 /// Render [`Worker::death_detail`]: an indented exit line and stderr tail.
-fn format_death_detail(status: Option<ExitStatus>, tail: &[String]) -> String {
+fn format_death_detail(status: Option<ExitStatus>, tail: &[String], killed_by_us: bool) -> String {
     use std::fmt::Write as _;
+    #[cfg(not(unix))]
+    let _ = killed_by_us;
     let mut s = String::new();
     if let Some(status) = status {
         match status.code() {
@@ -639,6 +644,14 @@ fn format_death_detail(status: Option<ExitStatus>, tail: &[String]) -> String {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(sig) = status.signal() {
                         let _ = write!(s, "\n  killed by signal {sig}");
+                        // Nobody here sent it: on Linux the OOM killer and on
+                        // macOS jetsam end a process that way.
+                        if sig == libc::SIGKILL && !killed_by_us {
+                            s.push_str(
+                                " (SIGKILL: likely the out-of-memory killer; lower -n, or \
+                                 let -n auto size the pool by memory)",
+                            );
+                        }
                     }
                 }
             }
@@ -725,6 +738,7 @@ impl Worker {
             reader: Some(reader),
             stderr,
             shutdown_sent: None,
+            killed: false,
         })
     }
 
@@ -848,7 +862,7 @@ impl Worker {
                 Duration::ZERO
             })
         });
-        format_death_detail(status, &tail)
+        format_death_detail(status, &tail, self.killed)
     }
 
     /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
@@ -861,6 +875,7 @@ impl Worker {
     /// Hard-kill the worker process (hang watchdog). The reader thread
     /// sees EOF and the normal crash machinery takes over.
     pub fn kill(&mut self) {
+        self.killed = true;
         self.proc.kill();
     }
 
@@ -1321,6 +1336,7 @@ impl Worker {
                 reader: Some(reader),
                 stderr: Some(stderr),
                 shutdown_sent: None,
+                killed: false,
             });
         }
         Ok(workers)
@@ -1851,19 +1867,20 @@ mod tests {
         // A collection_done rides even a "not found" usage error (pytest sends
         // it from a finally), and done ends every failed startup.
         assert!(!StartupStderr::ends_startup(&proto::Event::Done {
-            exitstatus: 4
+            exitstatus: 4,
+            peak_rss: None
         }));
     }
 
     #[test]
     fn format_death_detail_renders_status_and_tail() {
-        assert_eq!(format_death_detail(None, &[]), "");
+        assert_eq!(format_death_detail(None, &[], false), "");
         let tail = vec![
             "Traceback".to_string(),
             "ModuleNotFoundError: x".to_string(),
         ];
         assert_eq!(
-            format_death_detail(None, &tail),
+            format_death_detail(None, &tail, false),
             "\n  last lines of its stderr:\n    Traceback\n    ModuleNotFoundError: x"
         );
         #[cfg(unix)]
@@ -1873,13 +1890,25 @@ mod tests {
             // Raw wait statuses: exit code 2 is 2 << 8; signal 9 is 9.
             let exited = ExitStatus::from_raw(2 << 8);
             assert_eq!(
-                format_death_detail(Some(exited), &[]),
+                format_death_detail(Some(exited), &[], false),
                 "\n  exited with code 2"
             );
             let killed = ExitStatus::from_raw(9);
+            // A SIGKILL nobody here sent: name the likely OOM kill.
             assert_eq!(
-                format_death_detail(Some(killed), &[]),
+                format_death_detail(Some(killed), &[], false),
+                "\n  killed by signal 9 (SIGKILL: likely the out-of-memory killer; lower -n, \
+                 or let -n auto size the pool by memory)"
+            );
+            // The watchdog's own kill: no OOM guess.
+            assert_eq!(
+                format_death_detail(Some(killed), &[], true),
                 "\n  killed by signal 9"
+            );
+            // Another signal is never called an OOM kill.
+            assert_eq!(
+                format_death_detail(Some(ExitStatus::from_raw(15)), &[], false),
+                "\n  killed by signal 15"
             );
         }
     }

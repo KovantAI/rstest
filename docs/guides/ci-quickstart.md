@@ -336,12 +336,15 @@ refuses a monorepo root with an error that names the subprojects.
   `-n 2` or more ([Sharding](sharding.md)).
 - **Containers / Kubernetes.** A pod with a CPU *request* but no *limit* has
   no quota, so `auto` counts every core on the node: set `-n` to the CPU
-  request. Each worker is its own Python process, so budget roughly one
-  worker's peak memory × `-n` against the memory limit. An OOM-killed worker
-  is reported like any worker crash
-  ([Crash handling: budgets](../concepts/crash-handling.md#budgets)); a job
-  full of crash failures on a memory-limited runner usually means `-n` is too
-  high.
+  request. Each worker is its own Python process, so its peak memory × `-n`
+  must fit the memory limit. `-n auto` does that sum itself once the cache
+  holds a run's peak (restore `.rstest_cache` between jobs), and caps the
+  worker count to fit the pod's memory limit; an explicit `-n` is yours to
+  size. An OOM-killed worker is reported like any worker crash
+  ([Crash handling: budgets](../concepts/crash-handling.md#budgets)), with
+  `killed by signal 9 (SIGKILL: likely the out-of-memory killer ...)` when
+  rstest did not send the signal itself; a job full of those means `-n` is
+  too high.
 - **Timeouts.** A hung test otherwise runs until the CI job limit (6 hours
   on GitHub). Set a per-test [`--timeout SECS`](../reference/cli.md#-timeout-secs)
   and a job-level cap such as `timeout-minutes:`. When that cap cancels the
