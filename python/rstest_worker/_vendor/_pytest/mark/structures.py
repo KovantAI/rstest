@@ -14,6 +14,7 @@ import enum
 import inspect
 from typing import Any
 from typing import final
+from typing import Literal
 from typing import NamedTuple
 from typing import overload
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ import warnings
 from .._code import getfslineno
 from ..compat import NOTSET
 from ..compat import NotSetType
+from _pytest.compat import assert_never
 from _pytest.config import Config
 from _pytest.deprecated import check_ispytest
 from _pytest.deprecated import PARAMETRIZE_NON_COLLECTION_ITERABLE
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
 
 
 EMPTY_PARAMETERSET_OPTION = "empty_parameter_set_mark"
+_EmptyParameterSetMark = Literal["skip", "xfail", "fail_at_collect"]
 
 
 # Singleton type for HIDDEN_PARAM, as described in:
@@ -63,47 +66,51 @@ def get_empty_parameterset_mark(
 
     _fs, lineno = getfslineno(func)
     reason = f"got empty parameter set for ({argslisting})"
-    requested_mark = config.getini(EMPTY_PARAMETERSET_OPTION)
-    if requested_mark in ("", None, "skip"):
-        mark = MARK_GEN.skip(reason=reason)
-    elif requested_mark == "xfail":
-        mark = MARK_GEN.xfail(reason=reason, run=False)
-    elif requested_mark == "fail_at_collect":
-        raise Collector.CollectError(
-            f"Empty parameter set in '{func.__name__}' at line {lineno + 1}"
-        )
-    else:
-        raise LookupError(requested_mark)
-    return mark
+    requested_mark: _EmptyParameterSetMark = config.getini(EMPTY_PARAMETERSET_OPTION)
+    match requested_mark:
+        case "skip":
+            return MARK_GEN.skip(reason=reason)
+        case "xfail":
+            return MARK_GEN.xfail(reason=reason, run=False)
+        case "fail_at_collect":
+            raise Collector.CollectError(
+                f"Empty parameter set in '{func.__name__}' at line {lineno + 1}"
+            )
+        case unreachable:
+            assert_never(unreachable)
 
 
 class ParameterSet(NamedTuple):
-    """A set of values for a set of parameters along with associated marks and
+    """The return type of :func:`pytest.param`.
+
+    A set of values for a set of parameters along with associated marks and
     an optional ID for the set.
 
-    Examples::
-
-        pytest.param(1, 2, 3)
-        # ParameterSet(values=(1, 2, 3), marks=(), id=None)
-
-        pytest.param("hello", id="greeting")
-        # ParameterSet(values=("hello",), marks=(), id="greeting")
-
-        # Parameter set with marks
-        pytest.param(42, marks=pytest.mark.xfail)
-        # ParameterSet(values=(42,), marks=(MarkDecorator(...),), id=None)
-
-        # From parametrize mark (parameter names + list of parameter sets)
-        pytest.mark.parametrize(
-            ("a", "b", "expected"),
-            [
-                (1, 2, 3),
-                pytest.param(40, 2, 42, id="everything"),
-            ],
-        )
-        # ParameterSet(values=(1, 2, 3), marks=(), id=None)
-        # ParameterSet(values=(40, 2, 42), marks=(), id="everything")
+    .. versionadded:: 9.2
     """
+
+    # Examples:
+    #
+    #     pytest.param(1, 2, 3)
+    #     # ParameterSet(values=(1, 2, 3), marks=(), id=None)
+    #
+    #     pytest.param("hello", id="greeting")
+    #     # ParameterSet(values=("hello",), marks=(), id="greeting")
+    #
+    #     # Parameter set with marks
+    #     pytest.param(42, marks=pytest.mark.xfail)
+    #     # ParameterSet(values=(42,), marks=(MarkDecorator(...),), id=None)
+    #
+    #     # From parametrize mark (parameter names + list of parameter sets)
+    #     pytest.mark.parametrize(
+    #         ("a", "b", "expected"),
+    #         [
+    #             (1, 2, 3),
+    #             pytest.param(40, 2, 42, id="everything"),
+    #         ],
+    #     )
+    #     # ParameterSet(values=(1, 2, 3), marks=(), id=None)
+    #     # ParameterSet(values=(40, 2, 42), marks=(), id="everything")
 
     values: Sequence[object | NotSetType]
     marks: Collection[MarkDecorator | Mark]
@@ -116,6 +123,7 @@ class ParameterSet(NamedTuple):
         marks: MarkDecorator | Collection[MarkDecorator | Mark] = (),
         id: str | _HiddenParam | None = None,
     ) -> ParameterSet:
+        """:meta private:"""
         if isinstance(marks, MarkDecorator):
             marks = (marks,)
         else:
@@ -141,6 +149,8 @@ class ParameterSet(NamedTuple):
         force_tuple: bool = False,
     ) -> ParameterSet:
         """Extract from an object or objects.
+
+        :meta private:
 
         :param parameterset:
             A legacy style parameterset that may or may not be a tuple,
@@ -214,7 +224,20 @@ class ParameterSet(NamedTuple):
         if parameters:
             # Check all parameter sets have the correct number of values.
             for param in parameters:
-                if len(param.values) != len(argnames):
+                try:
+                    values_len = len(param.values)
+                except TypeError:
+                    values_len = None
+                if values_len is None:
+                    fail(
+                        f'{nodeid}: in "parametrize" expected a sequence of values, '
+                        "for a single value use a one-element tuple like "
+                        "('value',), "
+                        f"got {type(param.values).__name__}:\n"
+                        f"  {param.values}",
+                        pytrace=False,
+                    )
+                if values_len != len(argnames):
                     msg = (
                         '{nodeid}: in "parametrize" the number of names ({names_len}):\n'
                         "  {names}\n"
@@ -227,7 +250,7 @@ class ParameterSet(NamedTuple):
                             values=param.values,
                             names=argnames,
                             names_len=len(argnames),
-                            values_len=len(param.values),
+                            values_len=values_len,
                         ),
                         pytrace=False,
                     )
@@ -241,6 +264,10 @@ class ParameterSet(NamedTuple):
                 )
             )
         return argnames, parameters
+
+
+# mypy doesn't like `__module__` defined inline in the NamedTuple.
+ParameterSet.__module__ = "pytest"
 
 
 @final
@@ -528,10 +555,10 @@ if TYPE_CHECKING:
             *conditions: str | bool,
             reason: str = ...,
             run: bool = ...,
-            raises: None
-            | type[BaseException]
+            raises: type[BaseException]
             | tuple[type[BaseException], ...]
-            | AbstractRaises[BaseException] = ...,
+            | AbstractRaises[BaseException]
+            | None = ...,
             strict: bool = ...,
         ) -> MarkDecorator: ...
 
@@ -545,7 +572,7 @@ if TYPE_CHECKING:
             # argvalues: Collection[ParameterSet | Sequence[object] | object],
             *,
             indirect: bool | Sequence[str] = ...,
-            ids: Iterable[None | str | float | int | bool | _HiddenParam]
+            ids: Iterable[str | float | int | bool | _HiddenParam | None]
             | Callable[[Any], object | None]
             | None = ...,
             scope: ScopeName | None = ...,
@@ -601,12 +628,9 @@ class MarkGenerator:
             # name is in the set we definitely know it, but a mark may be known and
             # not in the set.  We therefore start by updating the set!
             if name not in self._markers:
-                for line in self._config.getini("markers"):
-                    # example lines: "skipif(condition): skip the given test if..."
-                    # or "hypothesis: tests which use Hypothesis", so to get the
-                    # marker name we split on both `:` and `(`.
-                    marker = line.split(":")[0].split("(")[0].strip()
-                    self._markers.add(marker)
+                self._markers.update(
+                    m.name for m in self._config._iter_registered_markers()
+                )
 
             # If the name is not in the set of known marks after updating,
             # then it really is time to issue a warning or an error.

@@ -475,7 +475,7 @@ build-backend = "setuptools.build_meta"
 def gate_pytest_pin_warning(g, args, binary):
     print("== plugin pinned to pytest<9 (inert pin warned once) ==")
     # A pytest11 plugin declaring `pytest<9` still runs against the vendored
-    # pytest 9.1.1; rstest says so once per run (the standalone session, or gw0
+    # pytest 9.2.0; rstest says so once per run (the standalone session, or gw0
     # in the pool), and the run itself is unaffected.
     src = Path(args.venv + "-oldpin-src").resolve()
     (src / "pytest_oldpin").mkdir(parents=True, exist_ok=True)
@@ -493,7 +493,7 @@ def gate_pytest_pin_warning(g, args, binary):
         )
         check(
             f"pin warning: printed exactly once at -n {n}",
-            r.stderr.count(needle) == 1 and "vendored pytest 9.1.1" in r.stderr,
+            r.stderr.count(needle) == 1 and "vendored pytest 9.2.0" in r.stderr,
             r.stderr[-400:],
         )
 

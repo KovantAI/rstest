@@ -33,7 +33,7 @@ Many of the most widely used pytest plugins import from `_pytest.*`, and
 plugins check class identity against the real `pluggy` library. Only the
 genuine code satisfies them.
 
-So rstest vendors pytest verbatim (currently 9.1.1) inside
+So rstest vendors pytest verbatim (currently 9.2.0) inside
 `rstest_worker._vendor`, shadows it onto `sys.path` inside worker
 processes (never touching a pytest installed in your environment) and
 depends on the real pluggy. Plugins load through normal `pytest11` entry

@@ -515,8 +515,10 @@ class _FakeDir(pytest.Directory):
 def _fake_dir(nodeid):
     # Bypass Node construction (needs a real parent/session); only the
     # nodeid and the Directory type matter here.
+    from _pytest.nodeid import NodeId
+
     d = object.__new__(_FakeDir)
-    d._nodeid = nodeid
+    d._id = NodeId.parse(nodeid)
     return d
 
 

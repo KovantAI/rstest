@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from _pytest.fixtures import is_visibility_more_specific
 from _pytest.terminal import _folded_skips
 
 from rstest_worker._internal import junit
@@ -374,25 +373,20 @@ class StreamPlugin:
         Both are global plugin fixtures, so the last one registered wins, and
         rstest's plugin is registered (via `pytest.main(plugins=...)`) before
         setuptools plugins such as xdist. trylast: the FixtureManager is built
-        by pytest's own sessionstart, which must run first. Re-inserting with
-        pytest's visibility ordering keeps a conftest or test module override
-        of these names winning over ours, as before."""
+        by pytest's own sessionstart, which must run first. pytest files plugin
+        fixtures under the node they belong to, newest first, and the newest
+        wins; moving ours to the front of their node's list makes them the
+        newest there, while a conftest or test module override (filed under a
+        deeper node) still wins over ours, as before."""
         fm = getattr(session, "_fixturemanager", None)
         if fm is None:
             return
         for name in _IDENTITY_FIXTURES:
-            defs = fm._arg2fixturedefs.get(name)
-            if not defs:
-                continue
-            ours = [fd for fd in defs if getattr(fd.func, "__self__", None) is self]
-            for fd in ours:
-                defs.remove(fd)
-                for i, existing in enumerate(defs):
-                    if is_visibility_more_specific(existing, fd):
-                        defs.insert(i, fd)
-                        break
-                else:
-                    defs.append(fd)
+            for defs in fm._arg2node2fixturedefs.get(name, {}).values():
+                ours = [fd for fd in defs if getattr(fd.func, "__self__", None) is self]
+                for fd in ours:
+                    defs.remove(fd)
+                defs[:0] = ours
 
     @pytest.hookimpl(wrapper=True)
     def pytest_cmdline_main(self, config):

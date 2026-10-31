@@ -146,7 +146,7 @@ Full methodology:
 | Watch mode | plugin (pytest-watch) | `--looponfail` (deprecated) | ✅ built-in |
 
 <!-- SOURCE OF TRUTH: docs/index.md "Highlights" (a persona test keeps them identical) -->
-- **Your tests, unchanged.** A vendored pytest 9.1.1 core runs your conftest
+- **Your tests, unchanged.** A vendored pytest 9.2.0 core runs your conftest
   hierarchies, fixtures, parametrize, marks, and installed plugins
   (pytest-django, pytest-asyncio, hypothesis, pytest-mock, ...) as pytest
   does. Most pytest flags (`-k`, `-m`, `-x`, `--lf`, plugin flags) forward

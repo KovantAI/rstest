@@ -169,14 +169,14 @@ jobs:
         run: uvx ruff@0.16.5 format --check python/rstest_worker python/tests
 
       - name: ty (type check worker)
-        run: uvx --with msgpack==1.2.3 --with pytest==9.1.1 --with coverage==7.16.2 ty@0.0.75 check python/rstest_worker
+        run: uvx --with msgpack==1.2.3 --with pytest==9.2.0 --with coverage==7.16.2 ty@0.0.75 check python/rstest_worker
 
       - name: worker unit tests (with coverage)
-        run: uvx --with msgpack==1.2.3 --with coverage==7.16.2 --with pytest-cov==7.1.0 pytest@9.1.1 python/tests --cov --cov-report=xml
+        run: uvx --with msgpack==1.2.3 --with coverage==7.16.2 --with pytest-cov==7.1.0 pytest@9.2.0 python/tests --cov --cov-report=xml
 
       # corpus gate-classification tests: pure logic, no venvs/network needed.
       - name: corpus bench unit tests
-        run: uvx --python 3.13 pytest@9.1.1 corpus/test_bench.py corpus/test_plugin_versions.py
+        run: uvx --python 3.13 pytest@9.2.0 corpus/test_bench.py corpus/test_plugin_versions.py
 
       - name: upload python coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
