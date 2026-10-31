@@ -216,6 +216,26 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         }
         md.push('\n');
     }
+    if let Some(g) = &r.fixture_grouping {
+        let _ = writeln!(
+            md,
+            "### Fixture grouping\n\n> ~{:.2}s of module/class fixture setup saved: `--dist load` \
+             kept each of these on one worker instead of spreading it over chunks.\n",
+            g.saved_seconds
+        );
+        md.push_str(
+            "| Saved | Setups | If chunked | Each | Tests | Scope |\n\
+             |---:|---:|---:|---:|---:|---|\n",
+        );
+        for e in &g.groups {
+            let _ = writeln!(
+                md,
+                "| ~{:.2}s | {} | ~{} | {:.2}s | {} | `{}` |",
+                e.saved_seconds, e.setups, e.chunked_setups, e.setup_seconds, e.tests, e.scope
+            );
+        }
+        md.push('\n');
+    }
     if let Some(t) = &r.timeouts {
         let _ = writeln!(
             md,
@@ -520,6 +540,23 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
+    if let Some(g) = &r.fixture_grouping {
+        sink.out_line(&format!(
+            "\nFIXTURE GROUPING (~{:.2}s of setup saved by keeping costly modules/classes \
+             on one worker):",
+            g.saved_seconds
+        ));
+        for e in g.groups.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  set up {}x, ~{}x if chunked ({:.2}s each)  {} tests  {}",
+                e.saved_seconds, e.setups, e.chunked_setups, e.setup_seconds, e.tests, e.scope
+            ));
+        }
+        if g.groups.len() > 8 {
+            sink.out_line(&format!("  ... and {} more", g.groups.len() - 8));
+        }
+    }
+
     if let Some(t) = &r.timeouts {
         sink.out_line(&format!(
             "\nTIMEOUTS (a test's limit: 3x its slowest recorded passing run, at least +1s):\n  \
@@ -690,6 +727,9 @@ mod tests {
         assert!(md.contains("### Scope-promotion candidates"));
         assert!(md.contains("| `settings` | 40 | ~0.90s |"));
         assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
+        assert!(md.contains("### Fixture grouping"));
+        assert!(md.contains("> ~1.80s of module/class fixture setup saved"));
+        assert!(md.contains("| ~1.80s | 1 | ~4 | 0.60s | 40 | `tests/test_db.py` |"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
         assert!(md.contains("### Coverage waste"));
@@ -764,6 +804,14 @@ mod tests {
             out.contains(
                 "40 line(s), all shared with 3 other test(s)  tests/test_a.py::test_redundant"
             ),
+            "{out}"
+        );
+        assert!(
+            out.contains("FIXTURE GROUPING (~1.80s of setup saved"),
+            "{out}"
+        );
+        assert!(
+            out.contains("~  1.80s saved  set up 1x, ~4x if chunked (0.60s each)  40 tests  tests/test_db.py"),
             "{out}"
         );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line

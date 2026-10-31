@@ -7,6 +7,18 @@ between 0.x releases and are listed here.
 
 ### Features
 
+- **`--dist load` keeps a module with costly fixtures on one worker.** Tests
+  went out in small chunks, so a long module was spread over several workers
+  and each set up its module- and class-scoped fixtures again. rstest now
+  times those fixtures on every run (`.rstest_cache/scope_costs.json`), and
+  from the next run sends the tests of a module or class whose setup takes
+  0.5s or more to one worker, ahead of the rest. It splits such a module only
+  when that saves more wall time than the setup it repeats. Off under
+  `--shuffle` and `--order fail-fast`; lazy collection already sends whole
+  files. The costs ride `--cache-push` / `--cache-pull`, so a fresh CI runner
+  groups from its first run, and `--doctor` gets a FIXTURE GROUPING section
+  (`fixture_grouping` in `--doctor-json`) with the setup time saved.
+
 - **`-n auto` sizes the pool by memory too.** Every worker reports its peak
   RSS when its session ends, and rstest keeps the largest of each of the last
   5 runs in `.rstest_cache/memory.json`. The next `-n auto` runs no more

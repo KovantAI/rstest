@@ -1141,3 +1141,86 @@ def gate_crash_after_restart_budget(g, args, binary):
             "6 failed" in r.stdout and "90 passed" in r.stdout and r.returncode == 3,
             f"rc={r.returncode} " + r.stdout[-200:],
         )
+
+
+FIXTURE_COST_DB = """
+import os, time, pytest
+
+@pytest.fixture(scope="module")
+def db():
+    time.sleep(0.6)
+    with open(os.environ["SETUP_LOG"], "a") as f:
+        f.write(f"{os.getpid()}\\n")
+    yield
+
+""" + "".join(f"def test_db{i}(db): pass\n" for i in range(40))
+
+
+def gate_fixture_cost_dispatch(g, args, binary):
+    # --dist load hands out small contiguous chunks, so a module used to be
+    # spread over several workers and each paid its module fixture again. Once
+    # a run has recorded the setup cost, the module's tests go to one worker.
+    print("== fixture-cost-aware dispatch ==")
+    g.write("fixcost/test_db.py", FIXTURE_COST_DB)
+    g.write("fixcost/test_cheap.py", "".join(f"def test_c{i}(): pass\n" for i in range(200)))
+    log = g.tmp / "fixcost_setups"
+    proj = g.tmp / "fixcost"
+    for run in ("cold", "warm"):
+        log.write_text("")
+        r = g.run("-n", "4", "--collect", "full", cwd=proj, env_extra={"SETUP_LOG": str(log)})
+        check(f"fixture-cost {run}: suite passes", "240 passed" in r.stdout, r.stdout[-300:])
+    saved = proj / ".rstest_cache" / "scope_costs.json"
+    costs = json.loads(saved.read_text()) if saved.exists() else {}
+    check(
+        "fixture-cost: the setup cost is recorded",
+        costs.get("test_db.py", 0) >= 0.5,
+        str(costs)[:200],
+    )
+    setups = log.read_text().split()
+    check("fixture-cost warm: costly module fixture set up once", len(setups) == 1, str(setups))
+
+    # The doctor names the module it kept together and the setup time saved.
+    r = g.run(
+        "-n", "4", "--collect", "full", "--doctor", cwd=proj, env_extra={"SETUP_LOG": str(log)}
+    )
+    check(
+        "fixture-cost doctor: grouping section with the time saved",
+        "FIXTURE GROUPING (~" in r.stdout and "set up 1x" in r.stdout and "test_db.py" in r.stdout,
+        r.stdout[-800:],
+    )
+
+    # A run that pushes to the shared cache lets a fresh checkout (no local
+    # .rstest_cache) group the module on its very first run.
+    remote = g.tmp / "fixcost_remote"
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-push",
+        cwd=proj,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    check("fixture-cost push: suite passes", "240 passed" in r.stdout, r.stdout[-300:])
+    fresh = g.tmp / "fixcost_fresh"
+    shutil.copytree(proj, fresh, ignore=shutil.ignore_patterns(".rstest_cache", ".pytest_cache"))
+    log.write_text("")
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-pull",
+        cwd=fresh,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    setups = log.read_text().split()
+    check(
+        "fixture-cost pull: a fresh checkout sets the module fixture up once",
+        "240 passed" in r.stdout and len(setups) == 1,
+        f"{setups} " + r.stdout[-300:],
+    )

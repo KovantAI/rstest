@@ -198,7 +198,7 @@ jobs:
 ```
 
 No refresh job, no `run_id`/`restore-keys` dance, no single writer: each shard
-contributes its segment (durations, flake events, its run history, **and**
+contributes its segment (durations, fixture setup costs, flake events, its run history, **and**
 its share of the coverage index). The `resolve` job and pull step above warm from the latest
 successful default-branch run, whose shard segments union into a whole
 `--changed` index (no dedicated unsharded job), so run this workflow on full

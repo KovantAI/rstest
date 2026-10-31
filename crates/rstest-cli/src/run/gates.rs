@@ -583,7 +583,8 @@ pub(super) fn run_post_gates(
             n,
             coverage_index.as_ref().zip(project.as_ref()),
         )
-        .with_history(&outcome.run, &history::load());
+        .with_history(&outcome.run, &history::load())
+        .with_fixture_groups(&outcome.run, &outcome.fixture_groups);
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
@@ -712,6 +713,7 @@ pub(super) fn run_post_gates(
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" && !replay {
         durations::save(&outcome.run, &outcome.sources);
+        durations::save_scope_costs(&outcome.run);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
         // fixture-bound project has near-zero call time in durations.json but
         // real elapsed cost here, so weighting by call time alone starves it
@@ -1980,6 +1982,7 @@ mod tests {
     fn segment(durations: usize, events: usize) -> crate::remote::Segment {
         use crate::remote::{FlakeEvent, FlakeKind, Segment};
         Segment {
+            scope_costs: Default::default(),
             schema: 1,
             id: "seg".into(),
             generated_at: 0,
@@ -2296,6 +2299,7 @@ mod tests {
         // even under a human output mode (here Dots), independent of the
         // stdout-facing --output json path.
         let mut outcome = pool::PoolOutcome {
+            fixture_groups: Vec::new(),
             run: Run::default(),
             prog: progress::Progress::default(),
             fixtures: vec![],

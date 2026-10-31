@@ -338,6 +338,48 @@ pub fn sum_secs_in(cache_dir: &Path) -> Option<f64> {
     Some(read_map(&bytes).values().map(|t| t.secs).sum())
 }
 
+/// Module/class fixture setup seconds per scope nodeid (one setup's mean),
+/// for fixture-cost-aware dispatch. See `pool::dispatch::fixture_lead`.
+pub const SCOPE_FILE: &str = "scope_costs.json";
+
+/// Merge this run's module/class fixture setup costs over the previous ones:
+/// a scope this run set up takes its new mean, the rest keep theirs (a `-k`
+/// run must not forget the suite).
+// ponytail: never pruned; a renamed module leaves a dead key that matches nothing.
+pub fn save_scope_costs(run: &Run) {
+    if run.scope_costs.is_empty() {
+        return;
+    }
+    cache::with_lock(|| {
+        overlay_scope_costs_in(
+            &cache::file(SCOPE_FILE),
+            run.scope_cost_means().map(|(k, v)| (k.clone(), v)),
+        )
+    });
+}
+
+/// Write `costs` over the scope costs saved at `path` (new values win). Also
+/// lands a `--cache-pull`'s merged costs. The caller holds the cache lock.
+pub fn overlay_scope_costs_in(path: &Path, costs: impl IntoIterator<Item = (String, f64)>) {
+    let mut map = load_scope_costs_from(path);
+    map.extend(costs);
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        let _ = cache::write_atomic(path, &bytes);
+    }
+}
+
+/// The saved module/class fixture setup costs (empty when none or unreadable).
+pub fn load_scope_costs() -> HashMap<String, f64> {
+    load_scope_costs_from(&cache::file(SCOPE_FILE))
+}
+
+fn load_scope_costs_from(path: &Path) -> HashMap<String, f64> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
 /// Load the duration cache for scheduling: nodeid -> call seconds, with stale
 /// and vanished entries dropped (see the module and `fresh` docs).
 pub fn load() -> HashMap<String, f64> {
