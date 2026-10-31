@@ -93,6 +93,10 @@ impl Palette {
         self.paint("31;1", s)
     }
 
+    pub fn bold(&self, s: &str) -> String {
+        self.paint("1", s)
+    }
+
     pub fn yellow(&self, s: &str) -> String {
         self.paint("33", s)
     }
@@ -105,7 +109,8 @@ impl Palette {
     pub fn outcome(&self, word_or_char: &str) -> String {
         match word_or_char {
             "PASSED" | "." => self.green(word_or_char),
-            "FAILED" | "ERROR" | "F" | "E" => self.red(word_or_char),
+            "FAILED" | "ERROR" | "F" | "E" | "u" => self.red(word_or_char),
+            w if w.starts_with("SUBFAILED") => self.red(w),
             _ => self.yellow(word_or_char), // SKIPPED/XFAIL/XPASS/s/x/X
         }
     }

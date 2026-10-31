@@ -1633,12 +1633,10 @@ fn dispatch_run(
                 {
                     session_peak = Some(*p);
                 }
+                if let (proto::Event::Interrupted {}, Some(i)) = (&event, &interrupts) {
+                    i.session_got_sigint();
+                }
                 if let proto::Event::Report(r) = &event {
-                    if r.when == "setup" {
-                        if let Some(i) = &interrupts {
-                            i.saw_setup();
-                        }
-                    }
                     if r.outcome == "rerun" {
                         // A retried attempt: pytest's own terminal shows it
                         // (`R`, `N rerun`); the run record keeps the final one.
@@ -1806,56 +1804,50 @@ fn interpreter_hint(
 /// While installed, the signal is only recorded (see
 /// [`crate::scheduling::interrupt`]); the orchestrator keeps reading the
 /// session, which ends with pytest's own INTERRUPTED (2), then writes the
-/// reports as usual. SIGINT is forwarded only once the session shows it never
-/// got it: Ctrl-C and a CI runner's cancel signal the whole process group, so
-/// pytest already has it, and a second SIGINT would abort pytest's teardown
-/// and summary. But a pytest that got it re-raises KeyboardInterrupt without
-/// reporting and never sets up another test, so a test set up after the
-/// signal (past [`SIGINT_IN_FLIGHT`], for reports already on their way) means
-/// it went to our pid alone (`kill -INT PID`): pass it on. SIGTERM is forwarded to
-/// the session as SIGINT: `kill PID` and job timeouts often target only our
-/// pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
+/// reports as usual. SIGINT is forwarded only when the session does not say
+/// it got one within [`SIGINT_GRACE`]: Ctrl-C and a CI runner's cancel signal
+/// the whole process group, so pytest already has it (and reports
+/// `Interrupted` from its KeyboardInterrupt hook), and a second SIGINT would
+/// abort pytest's teardown and summary. Silence means it went to our pid alone
+/// (`kill -INT PID`), even while a test hangs: pass it on. SIGTERM is
+/// forwarded to the session as SIGINT: `kill PID` and job timeouts often
+/// target only our pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
 /// too, the child is already gone and the caller winds down from what it
 /// reported. A second signal still exits at once.
 struct SingleWorkerInterrupts {
     _guard: crate::scheduling::interrupt::Guard,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Setup reports the session has sent (see [`Self::saw_setup`]).
-    setups: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The session reported a SIGINT of its own (see
+    /// [`Self::session_got_sigint`]).
+    got_sigint: std::sync::Arc<std::sync::atomic::AtomicBool>,
     forwarder: Option<std::thread::JoinHandle<()>>,
 }
 
-/// How long after a SIGINT a setup report may still be one the session sent
-/// before it: reports read that soon don't prove it missed the signal.
+/// How long after our SIGINT the session has to report one of its own (a
+/// group-wide signal reaches it at the same time) before it is passed on.
 #[cfg(unix)]
-const SIGINT_IN_FLIGHT: std::time::Duration = std::time::Duration::from_millis(200);
+const SIGINT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl SingleWorkerInterrupts {
     fn install(child: Option<u32>) -> Self {
         use std::sync::atomic::AtomicBool;
-        use std::sync::atomic::AtomicU64;
         let guard = crate::scheduling::interrupt::Guard::install();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let setups = std::sync::Arc::new(AtomicU64::new(0));
+        let got_sigint = std::sync::Arc::new(AtomicBool::new(false));
         #[cfg(unix)]
         let forwarder = child.map(|pid| {
             let stop = std::sync::Arc::clone(&stop);
-            let setups = std::sync::Arc::clone(&setups);
+            let got_sigint = std::sync::Arc::clone(&got_sigint);
             std::thread::spawn(move || {
                 use std::sync::atomic::Ordering::SeqCst;
-                // (when the SIGINT was seen, setups counted by then + the
-                // in-flight window); None until one arrives.
-                let mut sigint: Option<(std::time::Instant, Option<u64>)> = None;
+                // When our SIGINT was seen; None until one arrives.
+                let mut sigint: Option<std::time::Instant> = None;
                 while !stop.load(SeqCst) {
                     let forward = match crate::scheduling::interrupt::requested() {
                         Some(libc::SIGTERM) => true,
                         Some(libc::SIGINT) => {
-                            let (at, baseline) =
-                                sigint.get_or_insert((std::time::Instant::now(), None));
-                            if baseline.is_none() && at.elapsed() >= SIGINT_IN_FLIGHT {
-                                *baseline = Some(setups.load(SeqCst));
-                            }
-                            baseline.is_some_and(|b| setups.load(SeqCst) > b)
+                            let at = sigint.get_or_insert_with(std::time::Instant::now);
+                            at.elapsed() >= SIGINT_GRACE && !got_sigint.load(SeqCst)
                         }
                         _ => false,
                     };
@@ -1879,16 +1871,15 @@ impl SingleWorkerInterrupts {
         Self {
             _guard: guard,
             stop,
-            setups,
+            got_sigint,
             forwarder,
         }
     }
 
-    /// The session sent a setup report: a test started (or finished setting
-    /// up), which a pytest that got SIGINT never does.
-    fn saw_setup(&self) {
-        self.setups
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    /// The session caught a SIGINT itself: never send it another.
+    fn session_got_sigint(&self) {
+        self.got_sigint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2787,6 +2778,10 @@ fn fold_run_event(
             run.collect_skips += 1;
             None
         }
+        proto::Event::LfRecollected { path, ids } => {
+            run.lf_recollected.insert(path, ids);
+            None
+        }
         proto::Event::DoctorFixtures { fixtures: fx } => {
             fixtures.extend(fx);
             None
@@ -2816,7 +2811,9 @@ fn fold_run_event(
         | proto::Event::FileCollected { .. }
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
-        | proto::Event::StoppedIds { .. } => None,
+        | proto::Event::StoppedIds { .. }
+        // Read by the dispatch loop (`SingleWorkerInterrupts`).
+        | proto::Event::Interrupted {} => None,
         proto::Event::JunitCase { nodeid, cases } => {
             run.junit.record_case(nodeid, cases);
             None

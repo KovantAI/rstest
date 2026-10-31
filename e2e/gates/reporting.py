@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import xml.etree.ElementTree as ET
 
 from _harness import (
@@ -286,16 +287,29 @@ def gate_failure_output(g, args, binary):
         start = next(i for i, ln in enumerate(lines) if "short test summary info" in ln) + 1
         body = []
         for ln in lines[start:]:
-            if not ln.strip() or ln[0].isdigit() or ln.startswith("="):
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", ln)
+            if not plain.strip() or plain[0].isdigit() or plain.startswith("="):
                 break
             body.append(ln)
         return body
 
-    for chars in ("-rfE", "-rA"):
-        ref = short_summary(g.run("shortsum", "-n", "0", chars, env_extra={"CI": "1"}).stdout)
-        got = short_summary(g.run("shortsum", "-n", "2", chars, env_extra={"CI": "1"}).stdout)
+    ci = ({"CI": "1"}, ())
+    # Off CI pytest trims each message to the terminal by wcswidth (wide
+    # chars), and --color bolds the nodeid's test part.
+    tty = ({"COLUMNS": "80"}, ("CI", "BUILD_NUMBER"))
+    for args, (extra, drop) in (
+        (("-rfE",), ci),
+        (("-rA",), ci),
+        (("-rfE",), tty),
+        (("-rfE", "--color=yes"), tty),
+    ):
+        ref, got = (
+            short_summary(g.run("shortsum", "-n", n, *args, env_extra=extra, env_drop=drop).stdout)
+            for n in ("0", "2")
+        )
         check(
-            f"short test summary at -n 2 matches pytest ({chars})",
+            f"short test summary at -n 2 matches pytest ({' '.join(args)}"
+            f"{'' if extra is ci[0] else ', off CI'})",
             ref and got == ref,
             f"{ref}\n{got}",
         )

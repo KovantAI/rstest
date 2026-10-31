@@ -32,3 +32,7 @@ def test_xf():
 @pytest.mark.xfail(reason="lucky")
 def test_xp():
     pass
+
+# Wide chars: pytest trims the message by terminal columns (wcswidth).
+def test_wide():
+    assert False, "日本語のメッセージ" * 20
