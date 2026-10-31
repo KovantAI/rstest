@@ -34,7 +34,10 @@ def test_logreport_failed_subtest_fails_the_test():
 
     class FakeSubtestReport(SubtestReport):
         def __init__(self, **kw):
+            # pytest 9.2's nodeid is a property over a structured id.
+            nodeid = kw.pop("nodeid")
             self.__dict__.update(kw)
+            self.nodeid = nodeid
 
     rec = recorder._Recorder()
     rec.pytest_runtest_logreport(_report("t.py::a", "setup", "passed"))
@@ -56,7 +59,10 @@ def test_logreport_passing_subtests_leave_the_test_passed():
 
     class FakeSubtestReport(SubtestReport):
         def __init__(self, **kw):
+            # pytest 9.2's nodeid is a property over a structured id.
+            nodeid = kw.pop("nodeid")
             self.__dict__.update(kw)
+            self.nodeid = nodeid
 
     rec = recorder._Recorder()
     rec.pytest_runtest_logreport(FakeSubtestReport(**vars(_report("t.py::a", "call", "passed"))))

@@ -233,10 +233,9 @@ def test_build_workerinput_exposes_run_uid_under_both_spellings(monkeypatch):
     assert os.environ["PYTEST_XDIST_TESTRUNUID"] == "abc123"
 
 
-def _fdef(func, baseid=""):
-    """Minimal FixtureDef stand-in: is_visibility_more_specific falls back to
-    baseid comparison when node is None."""
-    return SimpleNamespace(func=func, node=None, baseid=baseid)
+def _fdef(func):
+    """Minimal FixtureDef stand-in: only `func` matters to the reorder."""
+    return SimpleNamespace(func=func)
 
 
 def _bound(p, name):
@@ -244,41 +243,46 @@ def _bound(p, name):
     return getattr(p, name)._get_wrapped_function()
 
 
-def _session_with_defs(defs_by_name):
-    fm = SimpleNamespace(_arg2fixturedefs=defs_by_name)
+def _session_with_defs(node2defs_by_name):
+    # pytest 9.2: name -> {defining node: defs, newest (winning) first}.
+    fm = SimpleNamespace(_arg2node2fixturedefs=node2defs_by_name)
     return SimpleNamespace(_fixturemanager=fm)
 
 
 def test_identity_fixtures_moved_after_other_global_plugins():
     # rstest's plugin registers before setuptools plugins, so xdist's global
-    # `worker_id` lands last and would win. The trylast sessionstart hook must
-    # move ours behind it.
+    # `worker_id` is the newer one on the session node and would win. The
+    # trylast sessionstart hook must make ours the newest there.
     p = _plugin()
     ours_wid, ours_uid = _fdef(_bound(p, "worker_id")), _fdef(_bound(p, "testrun_uid"))
     xdist_wid, xdist_uid = _fdef(lambda request: "gw0"), _fdef(lambda request: "x")
-    defs = {"worker_id": [ours_wid, xdist_wid], "testrun_uid": [ours_uid, xdist_uid]}
+    defs = {
+        "worker_id": {"session": [xdist_wid, ours_wid]},
+        "testrun_uid": {"session": [xdist_uid, ours_uid]},
+    }
     p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))
-    assert defs["worker_id"] == [xdist_wid, ours_wid]
-    assert defs["testrun_uid"] == [xdist_uid, ours_uid]
+    assert defs["worker_id"]["session"] == [ours_wid, xdist_wid]
+    assert defs["testrun_uid"]["session"] == [ours_uid, xdist_uid]
 
 
 def test_identity_fixtures_still_yield_to_conftest_override():
-    # A conftest/module-level override is more specific and must keep winning.
+    # A conftest/module-level override sits on a deeper node, which pytest
+    # treats as more specific: it must stay untouched and keep winning.
     p = _plugin()
     ours = _fdef(_bound(p, "worker_id"))
     xdist = _fdef(lambda request: "gw0")
-    conftest = _fdef(lambda request: "mine", baseid="tests")
-    defs = {"worker_id": [ours, xdist, conftest]}
+    conftest = _fdef(lambda request: "mine")
+    defs = {"worker_id": {"session": [xdist, ours], "tests": [conftest]}}
     p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))
-    assert defs["worker_id"] == [xdist, ours, conftest]
+    assert defs["worker_id"] == {"session": [ours, xdist], "tests": [conftest]}
 
 
 def test_identity_fixtures_reorder_tolerates_missing_state():
     p = _plugin()
     p.pytest_sessionstart_identity_fixtures(SimpleNamespace())  # no fixture manager
-    defs = {"worker_id": [_fdef(lambda request: "x")]}
+    defs = {"worker_id": {"session": [_fdef(lambda request: "x")]}}
     p.pytest_sessionstart_identity_fixtures(_session_with_defs(defs))  # none of ours
-    assert len(defs["worker_id"]) == 1
+    assert len(defs["worker_id"]["session"]) == 1
 
 
 class _FakeXdistPlugin:
@@ -1042,7 +1046,10 @@ def test_logreport_marks_subtest_reports():
 
     class FakeSubtestReport(SubtestReport):
         def __init__(self, **kw):
+            # pytest 9.2's nodeid is a property over a structured id.
+            nodeid = kw.pop("nodeid")
             self.__dict__.update(kw)
+            self.nodeid = nodeid
 
     p = _plugin()
     rep = mk_report("call", "failed", failed=True)

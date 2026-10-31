@@ -150,6 +150,21 @@ between 0.x releases and are listed here.
   don't change between runs. Errors are headed `ERROR at setup of`,
   `ERROR at teardown of` and `ERROR collecting`, as in pytest.
 
+### Behavior changes
+
+- **The vendored pytest core is now 9.2.0** (was 9.1.1), copied unmodified
+  and verified against the upstream wheel. Your suite runs pytest 9.2's
+  semantics whatever pytest is installed. What changes for a suite:
+  `parametrize`'s `indirect`, `ids` and `scope` are keyword-only; a `str` or
+  `bytes` parameter over 100 characters gets a short id (`test_s[s0]`), so
+  those nodeids change and rstest's durations and run history start over for
+  them (`parametrize_long_str_id_strategy = "legacy"` keeps the old ids); a
+  `-c` path that doesn't exist is a usage error; and a plugin that can't be
+  found exits 4, one that fails to import exits 3. rstest's runtime
+  dependencies follow pytest 9.2's: `pluggy>=1.6`, `iniconfig>=2`,
+  `packaging>=24`, `pygments>=2.15` (and `tomli>=2` below Python 3.11). See
+  [Upgrading to pytest 9](docs/guides/upgrade-to-pytest9.md).
+
 ### Fixes
 
 - **A test that a plugin reports in a phase of its own counts as failed,

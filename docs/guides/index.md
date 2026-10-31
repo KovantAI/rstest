@@ -5,7 +5,7 @@ Task-oriented how-tos. Start with the one that matches what you are doing.
 ## Migrating
 
 - [Migrating from pytest](migrate-from-pytest.md): what changes when you switch, and how to fall back
-- [Upgrading to pytest 9](upgrade-to-pytest9.md): rstest vendors pytest 9.1.1; how to get a suite written for older pytest green on it
+- [Upgrading to pytest 9](upgrade-to-pytest9.md): rstest vendors pytest 9.2.0; how to get a suite written for older pytest green on it
 - [Migrating from pytest-xdist](migrate-from-xdist.md): flag map, differences, and the CPU-bound case
 
 ## Running tests well

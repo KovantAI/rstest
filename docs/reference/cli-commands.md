@@ -85,7 +85,7 @@ missing, or the suite doesn't collect), `try` exits 2; check with
 so `migrate-check` and normal runs have no such requirement.
 
 The baseline uses the pytest version installed in that environment. If it is
-older than the vendored pytest 9.1.1 (for example a `pytest<9` pin), a
+older than the vendored pytest 9.2.0 (for example a `pytest<9` pin), a
 difference `try` reports may come from the pytest version rather than from
 rstest; see [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md).
 
@@ -807,7 +807,7 @@ one with `--python`.
 
 ```console
 $ rstest verify-vendor
-vendored pytest 9.1.1: 84 files verified against vendor.lock
+vendored pytest 9.2.0: 85 files verified against vendor.lock
 ```
 
 Exit 0 when the tree matches the manifest, 1 on any drift (each

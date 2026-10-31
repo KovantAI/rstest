@@ -24,7 +24,7 @@ version before reporting.
 
 ## Vendored pytest
 
-rstest ships an **unmodified, vendored copy of pytest** (currently 9.1.1)
+rstest ships an **unmodified, vendored copy of pytest** (currently 9.2.0)
 inside `rstest_worker._vendor`. When upstream pytest ships a security fix
 affecting the vendored code, an rstest release with the re-vendored core is
 expected **within two weeks** of the upstream release. Because the vendored

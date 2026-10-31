@@ -15,12 +15,12 @@ dependencies = [
     # worker protocol
     "msgpack>=1.0",
     # runtime deps of the vendored pytest core (python/VENDOR.md)
-    "pluggy>=1.5,<2",
-    "iniconfig",
-    "packaging",
-    "pygments>=2.7.2",
+    "pluggy>=1.6,<2",
+    "iniconfig>=2",
+    "packaging>=24",
+    "pygments>=2.15",
     "exceptiongroup>=1; python_version < '3.11'",
-    "tomli>=1; python_version < '3.11'",
+    "tomli>=2; python_version < '3.11'",
     "colorama>=0.4; sys_platform == 'win32'",
 ]
 classifiers = [
@@ -71,7 +71,7 @@ dev = [
     # project .venv (it can't follow the runtime _vendor sys.path shim). Pin to
     # the vendored version (python/VENDOR.md) so pre-commit's ty matches CI's
     # `uvx --with pytest ... ty check`.
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     # corpus/procmem.py's optional memory sampler; ty resolves it from .venv.
     "psutil>=5",
     # e2e/personas: the persona specs are Gherkin features bound with pytest-bdd.

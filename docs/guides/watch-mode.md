@@ -17,7 +17,7 @@ rstest 0.9.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
 [watch] test_w.py changed; rerunning changed files
 ============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
 rootdir: /Users/me/proj
 collected 2 items
 
@@ -28,7 +28,7 @@ test_w.py ..                                                             [100%]
 [watch] waiting for changes... (q + Enter or Ctrl+C to quit, last exit: 0)
 [watch] helper.py changed; rerunning affected tests
 ============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
 rootdir: /Users/me/proj
 collected 1 item
 

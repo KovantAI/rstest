@@ -168,7 +168,7 @@ def find_python() -> str:
 
 BASE_DEPS = [
     "msgpack",
-    "pluggy>=1.5",
+    "pluggy>=1.6",
     "iniconfig",
     "packaging",
     "pygments",
