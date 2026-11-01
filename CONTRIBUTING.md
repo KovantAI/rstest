@@ -51,6 +51,12 @@ cargo test --release                                     # Rust tests
 uv run python e2e/gate.py                                # end-to-end test gate (+ persona specs)
 ```
 
+CI runs the gate as shards, one runner each: `gate.py --shard a`, `--shard b`
+and `--shard personas` (`--list` prints each section's shard). A section's
+shard is its `e2e/gates/` module, mapped in `SHARD_OF_MODULE` in `gate.py`.
+Every section must write the fixtures it reads, never reuse another section's,
+so it passes on its own: `uv run python e2e/gate.py --only gate_<name>`.
+
 The end-to-end Rust tests (`crates/rstest-cli/tests/`) need a python with
 pytest and msgpack. They use `python3` from `PATH`, or the venv in
 `RSTEST_TEST_VENV`, and skip with a `skipping:` line when it lacks them. To

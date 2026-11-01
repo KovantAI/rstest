@@ -7,9 +7,11 @@ import xml.etree.ElementTree as ET
 
 from _harness import (
     BASIC,
+    CRASH,
     DISCO,
     DOCTOR,
     DURATIONS_FIXTURE,
+    MAXFAIL,
     SECTIONS,
     SHORT_SUMMARY,
     WARN,
@@ -157,6 +159,8 @@ def gate_output_styles(g, args, binary):
 def gate_report_json_contract(g, args, binary):
     print("== report-json contract ==")
     rj = g.tmp / "contract.json"
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
+    g.write("crash/test_crash.py", CRASH)  # self-contained (also written by gate_crash_handling)
     g.run("basic/test_basic.py", "-n", "2", "--report-json", str(rj))
     doc = json.loads(rj.read_text(encoding="utf-8"))
     check("report-json schema version", doc["meta"].get("schema") == 5, str(doc["meta"])[:200])
@@ -372,6 +376,7 @@ def gate_html_report(g, args, binary):
 def gate_junitxml(g, args, binary):
     print("== junitxml ==")
     xml_path = g.tmp / "junit.xml"
+    g.write("maxfail/test_maxfail.py", MAXFAIL)  # self-contained (also written by gate_x_maxfail)
     g.run("maxfail", "-n", "2", "--junitxml", str(xml_path), timeout=60)
     ts = ET.parse(xml_path).getroot().find("testsuite")
     check(

@@ -98,8 +98,12 @@ jobs:
       - name: pip-audit
         run: uvx pip-audit@2.7.3 --strict --requirement requirements-audit.txt
 
-  gate:
-    name: gate (${{ matrix.os }})
+  # cargo test and the e2e gate run as separate jobs so they overlap; the gate
+  # is further split into shards (gate.py SHARD_OF_MODULE), one runner each.
+  # One shard per runner, never several per runner: many gate sections assert
+  # on wall-clock timing and would flake under CPU contention.
+  rust-tests:
+    name: rust tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -109,8 +113,45 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          components: rustfmt, clippy
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.12.7"
+
+      # The end-to-end Rust tests (interrupt, replay, audit, bisect,
+      # migrate_check, xdist_removal) need pytest and msgpack in this
+      # interpreter. The dev group carries them, installed from uv.lock.
+      - name: install python test deps
+        run: |
+          uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
+          python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
+
+      # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
+      # the interpreter lacks their deps. Not on Windows: those tests drive
+      # POSIX tooling (`sh -c`, `<venv>/bin/python`) and always skip there.
+      - name: cargo test
+        run: cargo test --release
+        env:
+          RSTEST_TEST_REQUIRE: ${{ matrix.os != 'windows-latest' && '1' || '' }}
+
+  gate:
+    name: gate (${{ matrix.os }}, ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        shard: [a, b, personas]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
@@ -125,26 +166,15 @@ jobs:
         with:
           version: "0.12.7"
 
-      # Installed before `cargo test`: the end-to-end Rust tests (interrupt,
-      # replay, audit, bisect, migrate_check, xdist_removal) need pytest and
-      # msgpack in this interpreter, and gate.py's `personas` section runs the
-      # Gherkin persona specs (e2e/personas) under pytest-bdd. The dev group
-      # carries all of them, installed from uv.lock.
+      # gate.py's `personas` shard runs the Gherkin persona specs
+      # (e2e/personas) under pytest-bdd; the dev group carries it.
       - name: install python test deps
         run: |
           uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
           python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
-      # RSTEST_TEST_REQUIRE=1 makes those tests fail instead of skipping when
-      # the interpreter lacks their deps. Not on Windows: those tests drive
-      # POSIX tooling (`sh -c`, `<venv>/bin/python`) and always skip there.
-      - name: cargo test
-        run: cargo test --release
-        env:
-          RSTEST_TEST_REQUIRE: ${{ matrix.os != 'windows-latest' && '1' || '' }}
-
       - name: test gate
-        run: python e2e/gate.py
+        run: python e2e/gate.py --shard ${{ matrix.shard }}
 
   python-lint:
     name: python lint + worker tests
@@ -187,11 +217,13 @@ jobs:
           fail_ci_if_error: false
 
   python-compat:
-    name: python compat (${{ matrix.python-version }})
+    name: python compat (${{ matrix.python-version }}, ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # The full gate on every interpreter, split over two runners.
+        shard: [a, "b,personas"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -225,7 +257,7 @@ jobs:
           python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
       - name: test gate
-        run: python e2e/gate.py --binary target/release/rstest
+        run: python e2e/gate.py --binary target/release/rstest --shard ${{ matrix.shard }}
 
       # The gate venv above carries pytest-cov, which pulls in pytest and its
       # conditional deps, so a runtime dep missing from pyproject.toml (e.g.
@@ -234,6 +266,7 @@ jobs:
   # Its runtime deps come hash-pinned from uv.lock (the wheel goes in
   # --no-deps); `pip check` confirms they satisfy what the wheel declares.
       - name: declared deps suffice
+        if: matrix.shard == 'a'
         shell: bash
         run: |
           python -m venv /tmp/bare
@@ -253,6 +286,7 @@ jobs:
       # Worker unit tests under the matrix interpreter (pure-python helpers).
       # msgpack/coverage/pytest come from the dev group installed above.
       - name: worker unit tests
+        if: matrix.shard == 'a'
         run: python -m pytest python/tests
 
   # Service-backed plugin gates: the three top-50 plugins that need an external
@@ -344,8 +378,15 @@ jobs:
           name: wheel-${{ matrix.os }}
           path: target/wheels/*.whl
 
+  # Unit and e2e coverage run as separate jobs, the e2e one per gate shard.
+  # Codecov merges every upload under the same flag for a commit, so the
+  # rust-e2e shards add up to the same coverage as one full gate run.
   coverage:
-    name: coverage
+    name: coverage (${{ matrix.part }})
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [unit, a, b, personas]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -377,11 +418,11 @@ jobs:
           uv export --frozen --only-group dev --no-emit-project -o "${{ runner.temp }}/dev-requirements.txt"
           python -m pip install -q --require-hashes -r "${{ runner.temp }}/dev-requirements.txt"
 
-      # Two separate instrumented runs so unit and e2e coverage upload under
-      # distinct flags. `show-env` exports the RUSTFLAGS / LLVM_PROFILE_FILE the
-      # build and binary inherit, so gate.py's subprocess runs land in the
-      # profile set too. `clean` between runs keeps the two profile sets apart.
+      # Unit and e2e coverage upload under distinct flags. `show-env` exports
+      # the RUSTFLAGS / LLVM_PROFILE_FILE the build and binary inherit, so
+      # gate.py's subprocess runs land in the profile set too.
       - name: collect rust unit coverage
+        if: matrix.part == 'unit'
         env:
           RSTEST_TEST_REQUIRE: "1"
         run: |
@@ -389,29 +430,22 @@ jobs:
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo test --release
-          cargo llvm-cov report --release --lcov --output-path unit.lcov
+          cargo llvm-cov report --release --lcov --output-path cov.lcov
 
       - name: collect rust e2e coverage
+        if: matrix.part != 'unit'
         run: |
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo build --release
-          python e2e/gate.py --binary target/release/rstest
-          cargo llvm-cov report --release --lcov --output-path e2e.lcov
+          python e2e/gate.py --binary target/release/rstest --shard ${{ matrix.part }}
+          cargo llvm-cov report --release --lcov --output-path cov.lcov
 
-      - name: upload rust-unit coverage
+      - name: upload rust coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
-          files: unit.lcov
-          flags: rust-unit
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-
-      - name: upload rust-e2e coverage
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          files: e2e.lcov
-          flags: rust-e2e
+          files: cov.lcov
+          flags: ${{ matrix.part == 'unit' && 'rust-unit' || 'rust-e2e' }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
@@ -428,3 +462,32 @@ jobs:
       - name: build (strict)
         # Fails on broken links and anchors, as on Read the Docs.
         run: zensical build --strict
+
+  # One stable check for branch protection: the sharded jobs' names follow
+  # their matrix, so require this instead of each of them.
+  ci-ok:
+    name: ci ok
+    if: always()
+    needs:
+      - rust-lint
+      - bench-scaling
+      - cargo-deny
+      - pip-audit
+      - rust-tests
+      - gate
+      - python-lint
+      - python-compat
+      - plugin-services
+      - wheel
+      - coverage
+      - docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: every job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do
+            test "$r" = success || { echo "a required job ended: $r"; exit 1; }
+          done

@@ -8,19 +8,25 @@ import time
 from _harness import FLAKY, WINDOWS, check, git, git_commit, git_init_commit
 
 
-def gate_monorepo(g, args, binary):
-    print("== monorepo ==")
-    mono = g.tmp / "mono"
+def _write_mono(g, name):
+    """A fresh two-project monorepo tree at g.tmp/name (libs/c is not a project)."""
+    mono = g.tmp / name
     shutil.rmtree(mono, ignore_errors=True)
-    g.write("mono/libs/a/pytest.ini", "[pytest]\n")
-    g.write("mono/libs/a/tests/test_a.py", "def test_a1(): pass\ndef test_a2(): pass\n")
+    g.write(f"{name}/libs/a/pytest.ini", "[pytest]\n")
+    g.write(f"{name}/libs/a/tests/test_a.py", "def test_a1(): pass\ndef test_a2(): pass\n")
     g.write(
-        "mono/libs/b/pyproject.toml",
+        f"{name}/libs/b/pyproject.toml",
         '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
     )
-    g.write("mono/libs/b/tests/test_b.py", "def test_b1(): pass\ndef test_b2(): assert False\n")
+    g.write(f"{name}/libs/b/tests/test_b.py", "def test_b1(): pass\ndef test_b2(): assert False\n")
     # a pyproject without a pytest section is NOT a project
-    g.write("mono/libs/c/pyproject.toml", '[project]\nname = "c"\n')
+    g.write(f"{name}/libs/c/pyproject.toml", '[project]\nname = "c"\n')
+    return mono
+
+
+def gate_monorepo(g, args, binary):
+    print("== monorepo ==")
+    mono = _write_mono(g, "mono")
     r = g.run("-n", "2", cwd=mono)
     check(
         "mono: discovers configured projects",
@@ -571,9 +577,9 @@ def gate_shared_cache_backend(g, args, binary):
 
     # Shared-cache flags in monorepo mode would silently no-op (push unreachable,
     # pull warms the wrong root cache). Must fail loud instead, and the rejection
-    # must come BEFORE the pull runs (no 'pulled' line first). `mono` fixture is
-    # the multi-project tree built in the monorepo section above.
-    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=g.tmp / "mono")
+    # must come BEFORE the pull runs (no 'pulled' line first).
+    mono = _write_mono(g, "sc-mono")
+    r = g.run("-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=mono)
     check(
         "shared-cache: cache flags rejected in monorepo mode before pull runs",
         r.returncode != 0 and "monorepo" in r.stderr and "pulled" not in r.stderr,

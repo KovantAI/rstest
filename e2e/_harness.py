@@ -23,7 +23,8 @@ WINDOWS = os.name == "nt"
 
 # A FAIL detail can quote test output the console encoding (cp1252 on
 # Windows) cannot encode; escape it rather than crash the gate mid-section.
-sys.stdout.reconfigure(errors="backslashreplace")
+# Line-buffered so CI log timestamps show when each line was actually printed.
+sys.stdout.reconfigure(errors="backslashreplace", line_buffering=True)
 
 
 def fx(name: str) -> str:
