@@ -295,7 +295,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 3,
-  "rstest_version": "0.9.0",
+  "rstest_version": "0.10.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "startup_seconds": 0.6,
