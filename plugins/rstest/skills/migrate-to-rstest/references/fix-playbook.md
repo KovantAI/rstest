@@ -158,6 +158,9 @@ resource (below).
 
 **Stopgap.** `@pytest.mark.serial` (the marker is auto-registered): the test
 runs alone after the parallel phase.
+When the report named a polluter, `@pytest.mark.isolated` on the *polluter*
+is the better stopgap (Unix): it runs in a forked process, so what it leaks
+dies with it and both tests stay in the parallel run.
 
 ---
 

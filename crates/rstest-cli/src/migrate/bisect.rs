@@ -739,7 +739,9 @@ fn print_report(sink: &mut Sink, victim: &str, culprits: &[String], repro: &str,
         "\n  Fix: the culprit leaks state the victim depends on being clean \
          (a module global, a monkeypatch not undone, a cached singleton, an \
          env var, a temp file). Reset it in the culprit's teardown, or make \
-         the victim set up its own state.",
+         the victim set up its own state. Until then, @pytest.mark.isolated \
+         on the culprit runs it in a forked process, so what it leaks dies \
+         with it.",
     );
     sink.out_line("================================================");
 }
