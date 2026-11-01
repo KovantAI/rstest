@@ -214,6 +214,13 @@ pub enum Event {
         #[allow(dead_code)]
         path: String,
     },
+    /// A collector the previous lastfailed recorded as failed collected now;
+    /// `ids` are the nodeids it yielded (`report.result`), which pytest's
+    /// LFPlugin records as failed in its place until they run.
+    LfRecollected {
+        path: String,
+        ids: Vec<String>,
+    },
     /// Doctor mode: per-fixture setup timing, sent at session finish.
     DoctorFixtures {
         fixtures: Vec<FixtureStat>,
@@ -364,6 +371,9 @@ pub enum Event {
         reason: String,
         returncode: i32,
     },
+    /// Single session: a SIGINT reached pytest (KeyboardInterrupt), so the
+    /// orchestrator must not pass on the one it caught.
+    Interrupted {},
     Done {
         exitstatus: i32,
         /// The worker's peak RSS in bytes over its session (memory-aware
@@ -696,6 +706,7 @@ mod property {
             (small_str(), small_str())
                 .prop_map(|(path, longrepr)| Event::CollectError { path, longrepr }),
             small_str().prop_map(|path| Event::CollectSkip { path }),
+            (small_str(), small_strs()).prop_map(|(path, ids)| Event::LfRecollected { path, ids }),
             prop::collection::vec(arb_fixture(), 0..4)
                 .prop_map(|fixtures| Event::DoctorFixtures { fixtures }),
             prop::collection::vec(arb_warning(), 0..4)

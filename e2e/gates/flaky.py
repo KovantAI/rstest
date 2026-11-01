@@ -1,6 +1,7 @@
 """e2e gate sections: flaky."""
 
 import json
+import shutil
 import time
 
 from _harness import CRASHFLAKY, FLAKY, MARKS, check, git, git_commit, git_init_commit
@@ -848,17 +849,18 @@ def gate_flaky_marks_only_rerun(g, args, binary):
     # failure out, the orchestrator honors it, at any -n and with lazy.
     g.write("markfilters/test_filters.py", MARK_FILTERS)
     for mode in (("-n", "2"), ("-n", "2", "--collect", "lazy")):
+        # One file per test: workers appending to a shared file race on
+        # Windows (CRT "a" mode is seek+write, not atomic), dropping hits.
         hits = g.tmp / "markfilters_hits"
-        hits.unlink(missing_ok=True)
+        shutil.rmtree(hits, ignore_errors=True)
+        hits.mkdir()
         g.run(
             "test_filters.py",
             *mode,
             cwd=g.tmp / "markfilters",
             env_extra={"HITS": str(hits)},
         )
-        counts = {}
-        for name in hits.read_text().split():
-            counts[name] = counts.get(name, 0) + 1
+        counts = {f.name: len(f.read_text().split()) for f in hits.iterdir()}
         check(
             f"flaky mark only_rerun / rerun_except ({' '.join(mode)})",
             counts == {"nomatch": 1, "match": 3, "except": 1},
@@ -873,7 +875,7 @@ import pytest
 
 
 def hit(name):
-    with open(os.environ["HITS"], "a") as f:
+    with open(os.path.join(os.environ["HITS"], name), "a") as f:
         f.write(name + "\\n")
 
 

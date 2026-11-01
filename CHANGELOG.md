@@ -165,9 +165,11 @@ between 0.x releases and are listed here.
 
 - **At `-n 0`, a SIGINT sent to rstest's pid alone stops the session.**
   `kill -INT <pid>` was recorded but never reached pytest, which ran every
-  remaining test. rstest now passes it on as soon as the session sets up
-  another test (proof it never got the signal); a Ctrl-C or CI cancel, which
-  reaches the whole process group, is still never sent twice.
+  remaining test. The pytest session now tells rstest when it got a SIGINT
+  itself; if it says nothing within half a second, rstest passes the signal
+  on, so a test stuck in a sleep or on a lock stops on the first signal. A
+  Ctrl-C or CI cancel, which reaches the whole process group, is still never
+  sent twice.
 
 - **`@pytest.mark.flaky`'s `only_rerun`, `rerun_except` and `reruns_delay`
   are honored.** They were ignored, so a failure the mark excluded was still
@@ -205,6 +207,26 @@ between 0.x releases and are listed here.
   one outside a test; per-file counts from 10 tests on) with its source line,
   where it showed only `path:line: Category` and the message. A failed subtest
   reads `SUBFAILED(i=1) nodeid - message` in the short summary, not `FAILED`.
+
+- **The short test summary matches pytest's markup and width.** With color
+  on, the test part of each nodeid is bold. Messages are trimmed by terminal
+  columns, not characters, so a message with wide characters (CJK, emoji) no
+  longer runs past the terminal edge.
+
+- **A failed subtest shows as pytest's `u` in the progress line** and as
+  `SUBFAILED(<desc>)` under `-v`. It no longer counts as an extra finished
+  test, which gave an early or repeated `[100%]`.
+
+- **`--lf` keeps a recovered file's unrun tests after a parallel run.** When a
+  file that failed to collect last time collects again, its tests that did
+  not run (deselected with `-k` / `-m`, or cut by `-x` / `--maxfail`) stay
+  recorded as failed, as in pytest. The file used to drop out of the
+  last-failed cache, so the next `--lf` skipped them.
+
+- **`--shard` and lazy scheduling use cached durations on Windows.** File
+  paths were matched against the duration cache with backslash separators,
+  so every file looked untimed and shards and file order were not balanced by
+  runtime.
 
 ## 0.9.0 (2026-10-06)
 

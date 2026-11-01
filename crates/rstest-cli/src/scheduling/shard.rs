@@ -179,11 +179,7 @@ pub fn shard_files(
         let file = id.split("::").next().unwrap_or(id);
         *totals.entry(file.to_string()).or_insert(0.0) += floored(secs);
     }
-    let rel = |f: &Path| -> String {
-        f.strip_prefix(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| f.to_string_lossy().into_owned())
-    };
+    let rel = |f: &Path| crate::scheduling::durations::file_key(f, cwd);
     let weights: Vec<f64> = {
         // Untimed files get the average known file weight.
         let known: Vec<f64> = files
@@ -314,6 +310,26 @@ mod tests {
             sizes[b] += 1;
         }
         assert_eq!(sizes, [3, 3, 3]);
+    }
+
+    #[test]
+    fn shard_files_times_backslash_paths() {
+        // Windows paths carry `\`, cached nodeids `/`: a lookup miss would
+        // weigh every file the same and pair the long file with a short one.
+        let cwd = PathBuf::from("/p");
+        let files: Vec<PathBuf> = ["big", "a", "b"]
+            .iter()
+            .map(|f| cwd.join(format!("tests\\{f}.py")))
+            .collect();
+        let cache = HashMap::from([
+            ("tests/big.py::t".to_string(), 10.0),
+            ("tests/a.py::t".to_string(), 1.0),
+            ("tests/b.py::t".to_string(), 1.0),
+        ]);
+        let shards: Vec<_> = (1..=2)
+            .map(|k| shard_files(&files, &cache, &cwd, k, 2))
+            .collect();
+        assert!(shards.contains(&vec![files[0].clone()]), "got {shards:?}");
     }
 
     #[test]
