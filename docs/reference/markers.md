@@ -30,6 +30,43 @@ entry. See [What ties you to rstest](../guides/migrate-from-pytest.md#what-ties-
 Semantics details in [Scheduling](../concepts/scheduling.md#the-serial-phase);
 when to use it in [Parallel safety](../guides/parallel-safety.md).
 
+## `@pytest.mark.isolated`
+
+```python
+import pytest
+
+
+@pytest.mark.isolated
+def test_patches_a_global_and_never_restores_it(): ...
+```
+
+Runs the test in a forked child of its worker (Unix). Whatever it changes in
+the process (module globals, `os.environ`, `sys.modules`, a monkeypatch it
+never undid, a thread or file descriptor it left open) dies with the child, so
+the tests after it see the process as it was. Use it to contain a polluter
+that [`rstest bisect`](cli-commands.md#bisect-nodeid) or
+[`--fail-on-leak`](cli.md#-fail-on-leak) found, while it stays in the parallel
+run, until it is fixed.
+
+- Works at every worker count, `-n 0` included, and with `--collect lazy`.
+- Reports come back as usual: pass, fail, skip and teardown errors. A child
+  that dies before reporting (a segfault, `os._exit`) is a failed test
+  (`isolated test crashed: its child process ...`), not a crashed worker.
+- **Fixtures.** The worker keeps every fixture it had already set up, and the
+  child tears down only what it added. So nothing is torn down twice, and
+  nothing the child created is left behind. The cost: a module, class or
+  session fixture an isolated test is the first to use is set up in the child
+  and set up again by the next test that needs it.
+- A fork costs a few milliseconds; mark the tests that need it, not whole
+  modules.
+- **Windows** has no `fork()`: the test runs in its worker as usual, with a
+  one-time warning.
+- What the child records itself is not carried back: warnings it raises and
+  `--doctor` CPU time.
+
+Registered by rstest, like `serial`; plain pytest warns about it as an
+unknown marker (see `serial` above).
+
 ## `@pytest.mark.flaky`
 
 ```python

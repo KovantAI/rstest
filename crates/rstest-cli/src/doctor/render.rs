@@ -603,7 +603,8 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
         sink.out_line(
             "  a test opened a thread/fd it never released; leaked state can flake \
-             later tests (reset it, or close in teardown).",
+             later tests (reset it, or close in teardown; to contain it meanwhile, \
+             @pytest.mark.isolated runs the test in a forked process).",
         );
     }
     sink.out_line("===================================================");
