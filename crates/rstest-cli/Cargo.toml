@@ -38,6 +38,9 @@ toml = "1.1"
 notify = "8"
 sha2 = "0.11"
 ureq = { version = "3", optional = true }
+# Terminal column widths (East Asian wide, combining) for pytest's wcwidth
+# in short-summary trimming. No deps; `cjk` (ambiguous-as-wide) is unused.
+unicode-width = { version = "0.2", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

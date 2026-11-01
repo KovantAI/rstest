@@ -156,6 +156,11 @@ class SessionExitPayload(TypedDict):
     returncode: int
 
 
+class InterruptedPayload(TypedDict):
+    # A SIGINT reached the single session (KeyboardInterrupt); nothing to carry.
+    pass
+
+
 class ItemStartIdPayload(TypedDict):
     id: str
     timeout: float | None
@@ -196,6 +201,11 @@ class CollectSkipPayload(TypedDict):
     path: str
 
 
+class LfRecollectedPayload(TypedDict):
+    path: str  # collector the previous lastfailed recorded as failed
+    ids: list[str]  # nodeids it yielded now (report.result)
+
+
 class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
@@ -217,6 +227,7 @@ EventKind = Literal[
     "report",
     "collect_error",
     "collect_skip",
+    "lf_recollected",
     "doctor_fixtures",
     "scope_costs",
     "warnings",
@@ -231,6 +242,7 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "session_exit",
+    "interrupted",
     "done",
     "junit_case",
     "junit_suite",

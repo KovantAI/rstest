@@ -1091,7 +1091,9 @@ def gate_pytest_httpserver(g, args, binary):
 
 def gate_pytest_bdd(g, args, binary):
     print("== pytest-bdd (.feature-generated items per worker) ==")
-    gb = _plugin_gate(binary, args, "-bdd", ["pytest-bdd"])
+    # ponytail: pytest-bdd 9.0.0 fails here with "FixtureManager object has no
+    # attribute '_arg2node2fixturedefs'"; cap at 8.x until a fixed release.
+    gb = _plugin_gate(binary, args, "-bdd", ["pytest-bdd<9"])
     gb.write(
         "bd/add.feature",
         "Feature: calc\n"
