@@ -30,6 +30,17 @@
         }
       ]
     },
+    "fixture_grouping": {
+      "description": "Modules and classes `--dist load` kept on one worker for their fixture\nsetup cost. `null` when the run grouped none (lazy collection,\n`--shuffle`, `--order fail-fast`, one worker, or no costly scope).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FixtureGrouping"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "fixtures": {
       "description": "Fixture setup cost summed across all workers, costliest first (top 50).",
       "type": "array",
@@ -162,6 +173,7 @@
     "parallel_floor",
     "parallel_efficiency",
     "fixtures",
+    "fixture_grouping",
     "slowest_files",
     "coverage_waste",
     "timeouts",
@@ -321,6 +333,28 @@
         "total_seconds"
       ]
     },
+    "FixtureGrouping": {
+      "description": "What fixture-cost-aware dispatch saved: each module or class it kept on\none worker, its setups this run, and how many plain chunked dispatch would\nhave caused (an estimate from the chunk size and worker count).",
+      "type": "object",
+      "properties": {
+        "groups": {
+          "description": "Every group, most saved first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GroupEntry"
+          }
+        },
+        "saved_seconds": {
+          "description": "Setup seconds saved over every group, against plain chunked dispatch.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "saved_seconds",
+        "groups"
+      ]
+    },
     "GateTest": {
       "type": "object",
       "properties": {
@@ -337,6 +371,51 @@
       "required": [
         "nodeid",
         "duration"
+      ]
+    },
+    "GroupEntry": {
+      "type": "object",
+      "properties": {
+        "chunked_setups": {
+          "description": "About how many times plain chunked dispatch would have set them up.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "saved_seconds": {
+          "description": "`(chunked_setups - setups) * setup_seconds`, never negative.",
+          "type": "number",
+          "format": "double"
+        },
+        "scope": {
+          "description": "The module's or class's nodeid.",
+          "type": "string"
+        },
+        "setup_seconds": {
+          "description": "One setup's recorded seconds.",
+          "type": "number",
+          "format": "double"
+        },
+        "setups": {
+          "description": "Times its module/class fixtures were set up this run.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tests": {
+          "description": "Tests in it this run dispatched.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "scope",
+        "tests",
+        "setups",
+        "chunked_setups",
+        "setup_seconds",
+        "saved_seconds"
       ]
     },
     "Leak": {

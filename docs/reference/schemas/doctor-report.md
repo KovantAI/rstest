@@ -9,6 +9,7 @@ Source: `--doctor-json`
 | `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of whole-protocol CPU time (the worker process plus child processes it waited for), over tests where it was measured. |
 | `drift` | Drift or null | yes | Tests whose typical call time crept up across their recorded runs, in steps too small for `--durations-regress`. `null` unless one did. |
+| `fixture_grouping` | FixtureGrouping or null | yes | Modules and classes `--dist load` kept on one worker for their fixture setup cost. `null` when the run grouped none (lazy collection, `--shuffle`, `--order fail-fast`, one worker, or no costly scope). |
 | `fixtures` | array of FixtureEntry | yes | Fixture setup cost summed across all workers, costliest first (top 50). |
 | `fork_prewarm` | boolean | yes | Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates the "try --fork-pool" hint so it isn't suggested when already on. |
 | `leaks` | array of Leak | no | Tests that leaked threads / fds (created by the test, still open after its teardown). Empty unless leak-check instrumentation ran (`--doctor` / `--fail-on-leak`). |
@@ -74,12 +75,32 @@ Slow creep: a test whose median call time rose from the older third of its recor
 | `scope` | string | yes | pytest scope: `function`, `class`, `module`, `package` or `session`. |
 | `total_seconds` | number | yes | Setup time summed across all workers, in seconds. |
 
+### FixtureGrouping
+
+What fixture-cost-aware dispatch saved: each module or class it kept on one worker, its setups this run, and how many plain chunked dispatch would have caused (an estimate from the chunk size and worker count).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `groups` | array of GroupEntry | yes | Every group, most saved first. |
+| `saved_seconds` | number | yes | Setup seconds saved over every group, against plain chunked dispatch. |
+
 ### GateTest
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `duration` | number | yes | Its whole-protocol time (setup + call + teardown), in seconds. |
 | `nodeid` | string | yes | The test that gates the wall time. |
+
+### GroupEntry
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `chunked_setups` | integer | yes | About how many times plain chunked dispatch would have set them up. |
+| `saved_seconds` | number | yes | `(chunked_setups - setups) * setup_seconds`, never negative. |
+| `scope` | string | yes | The module's or class's nodeid. |
+| `setup_seconds` | number | yes | One setup's recorded seconds. |
+| `setups` | integer | yes | Times its module/class fixtures were set up this run. |
+| `tests` | integer | yes | Tests in it this run dispatched. |
 
 ### Leak
 

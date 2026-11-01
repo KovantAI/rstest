@@ -1666,6 +1666,7 @@ fn dispatch_run(
                 w.shutdown()?;
             }
             pool::PoolOutcome {
+                fixture_groups: Vec::new(),
                 run,
                 prog,
                 fixtures,
@@ -2786,6 +2787,10 @@ fn fold_run_event(
             fixtures.extend(fx);
             None
         }
+        proto::Event::ScopeCosts { costs } => {
+            run.add_scope_costs(costs);
+            None
+        }
         proto::Event::Warnings { entries } => {
             warnings.extend(entries);
             None
@@ -3569,6 +3574,7 @@ mod tests {
 
     fn compact_segment(id: &str, generated_at: u64) -> remote::Segment {
         remote::Segment {
+            scope_costs: Default::default(),
             schema: 1,
             id: id.into(),
             generated_at,
