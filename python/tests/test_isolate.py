@@ -4,6 +4,7 @@ with it, and fixture setup/teardown stays balanced across the fork."""
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import uuid
 
@@ -41,6 +42,7 @@ def child_first():
 
 SRC = """
 import os
+import signal
 import sys
 import pytest
 
@@ -67,6 +69,11 @@ def test_3_after(parent_owned, child_first):
 @pytest.mark.isolated
 def test_4_crash():
     os._exit(3)
+
+
+@pytest.mark.isolated
+def test_4b_killed():
+    os.kill(os.getpid(), signal.SIGKILL)
 
 
 @pytest.mark.isolated
@@ -124,6 +131,37 @@ def test_failures_and_crashes_come_back_as_reports(tmp_path, monkeypatch):
     outcome, text = seen[("test_4_crash", "call")]
     assert outcome == "failed"
     assert "isolated test crashed: its child process exited with code 3" in text
+    outcome, text = seen[("test_4b_killed", "call")]
+    assert outcome == "failed"
+    assert f"killed by signal {signal.SIGKILL}" in text
+
+
+def test_without_fork_runs_in_process_and_warns_once(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "fork")
+    name = f"test_nofork_{uuid.uuid4().hex[:8]}"
+    (tmp_path / f"{name}.py").write_text(
+        "import os, pytest\n"
+        f"PARENT = {os.getpid()}\n"
+        "@pytest.mark.isolated\n"
+        "def test_a():\n    assert os.getpid() == PARENT\n"
+        "@pytest.mark.isolated\n"
+        "def test_b():\n    assert os.getpid() == PARENT\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    warned: list[str] = []
+
+    class Recorder:
+        def pytest_warning_recorded(self, warning_message):
+            warned.append(str(warning_message.message))
+
+    rc = runner_pytest._pytest_main(
+        [str(tmp_path / f"{name}.py"), "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
+        plugins=[IsolatedTests(), Recorder()],
+    )
+    sys.modules.pop(name, None)
+    # Both ran in this process (the pid asserts passed), warned about once.
+    assert rc == 0
+    assert len([w for w in warned if "needs fork" in w]) == 1
 
 
 def test_fixtures_are_finalized_once_by_their_owner(tmp_path, monkeypatch):
