@@ -187,6 +187,25 @@ about the value. It still can't see side effects that leave no trace
 (writing a file, setting a global), so treat it as *advice* and check the
 fixture body before promoting.
 
+### FIXTURE GROUPING
+
+Under `--dist load`, rstest keeps each module or class whose module- and
+class-scoped fixtures take 0.5s or more to set up on one worker
+([how](../concepts/scheduling.md#costly-modules-and-classes-stay-on-one-worker)).
+This section lists those it grouped in this run:
+
+```
+FIXTURE GROUPING (~1.80s of setup saved by keeping costly modules/classes on one worker):
+  ~  1.80s saved  set up 1x, ~4x if chunked (0.60s each)  40 tests  tests/test_db.py
+```
+
+`set up` is measured: how many times the fixtures ran this run. `if chunked`
+is an estimate of how many workers plain chunked dispatch would have spread
+the module over, each setting it up again. The saving is the difference times
+one setup. The section is absent when nothing was grouped: on a cold cache,
+under lazy collection, `--shuffle`, `--order fail-fast` or one worker, or when
+no module is costly enough. `--doctor-json` carries it as `fixture_grouping`.
+
 ### SLOWEST FILES
 
 Test time aggregated by file: where to look first, and the input for
@@ -297,6 +316,10 @@ timeout. The suite `--timeout` is the limit that covers 95% of those tests; the
 tests above it are listed slowest first (top 20) with a marker to paste onto
 them, since one global value would either kill them or be too loose to catch
 a hang anywhere else.
+
+A test that already carries a `@pytest.mark.timeout` at or above its limit is
+left off the list (the summary line counts it as covered by its own marker);
+one whose marker is lower is listed with it, as `(now 10)`.
 
 Only tests in this run with at least 5 passing runs in the history count
 (failed runs never set the limit), so the section appears once the history

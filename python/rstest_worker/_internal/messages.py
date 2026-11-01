@@ -76,6 +76,7 @@ class ReportPayload(_ReportRequired, total=False):
     skip_location: list[str | int | None]  # skip: [relpath, lineno|None] as pytest folds it
     cause: CauseInfo  # failed reports: what raised and where (grouping by cause)
     network: list[str]  # teardown: outbound destinations ("host:port") the test reached
+    marker_timeout: float  # call: the test's @pytest.mark.timeout in seconds, when it has one
     no_rerun: bool  # failed: the flaky mark's only_rerun / rerun_except rule out a rerun
     subtest_desc: str  # subtest: its description as pytest prints it ("(i=1)")
 
@@ -182,6 +183,16 @@ class DoctorFixturesPayload(TypedDict):
     fixtures: list[FixtureStat]
 
 
+class ScopeCost(TypedDict):
+    key: str  # nodeid of the module or class the fixtures were set up for
+    total: float  # setup seconds of its module/class-scoped fixtures
+    count: int  # times that scope was set up in this session
+
+
+class ScopeCostsPayload(TypedDict):
+    costs: list[ScopeCost]
+
+
 class CollectErrorPayload(TypedDict):
     path: str
     longrepr: str
@@ -219,6 +230,7 @@ EventKind = Literal[
     "collect_skip",
     "lf_recollected",
     "doctor_fixtures",
+    "scope_costs",
     "warnings",
     "collection_done",
     "lazy_ready",

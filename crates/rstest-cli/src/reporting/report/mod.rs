@@ -73,6 +73,10 @@ pub struct TestEntry {
     pub setup_cpu: Option<f64>,
     #[serde(skip)]
     pub teardown_cpu: Option<f64>,
+    /// The test's `@pytest.mark.timeout` in seconds, when it has one.
+    /// Doctor-internal; not serialized.
+    #[serde(skip)]
+    pub marker_timeout: Option<f64>,
     /// Passed only after one or more reruns (--reruns or @pytest.mark.flaky).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -417,6 +421,9 @@ pub struct Run {
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
     /// included); empty when it was off or over its cap.
     pub auto_quarantined: std::collections::BTreeSet<String>,
+    /// Module/class fixture setup per scope nodeid, summed over the workers:
+    /// (seconds, setups). Saved for fixture-cost-aware dispatch.
+    pub scope_costs: std::collections::HashMap<String, (f64, u64)>,
 }
 
 /// A `pytest.exit(reason, returncode)` that stopped the run.
@@ -461,6 +468,23 @@ impl Interruption {
 }
 
 impl Run {
+    /// One setup's mean seconds per module/class scope this run set up.
+    pub fn scope_cost_means(&self) -> impl Iterator<Item = (&String, f64)> {
+        self.scope_costs
+            .iter()
+            .filter(|(_, &(_, setups))| setups > 0)
+            .map(|(k, &(secs, setups))| (k, secs / setups as f64))
+    }
+
+    /// Fold one worker session's module/class fixture setup costs in.
+    pub fn add_scope_costs(&mut self, costs: Vec<proto::ScopeCost>) {
+        for c in costs {
+            let e = self.scope_costs.entry(c.key).or_default();
+            e.0 += c.total;
+            e.1 += c.count;
+        }
+    }
+
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
         if !r.network.is_empty() {
             // Each attempt (rerun) ships its own list: keep each host once.
@@ -557,6 +581,7 @@ impl Run {
                 }
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
+                entry.marker_timeout = r.marker_timeout;
             }
         }
         entry.wasxfail |= r.wasxfail;
@@ -1115,6 +1140,7 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
         }
@@ -1469,6 +1495,7 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
             ..report(nodeid, "call", outcome)
@@ -1721,6 +1748,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
             },
@@ -1748,6 +1776,7 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
             },

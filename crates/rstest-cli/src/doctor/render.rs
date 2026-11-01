@@ -2,7 +2,7 @@
 //! job summary, and the CI summary sinks (GitHub step summary, Buildkite
 //! annotation). All read-only over a `DoctorReport`.
 
-use super::{DoctorReport, FixtureEntry};
+use super::{DoctorReport, FixtureEntry, TimeoutAdvice, TimeoutOverride};
 use crate::reporting::sink::Sink;
 
 /// The tuning hint a fixture hotspot warrants, from its scope + run profile.
@@ -216,22 +216,47 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         }
         md.push('\n');
     }
+    if let Some(g) = &r.fixture_grouping {
+        let _ = writeln!(
+            md,
+            "### Fixture grouping\n\n> ~{:.2}s of module/class fixture setup saved: `--dist load` \
+             kept each of these on one worker instead of spreading it over chunks.\n",
+            g.saved_seconds
+        );
+        md.push_str(
+            "| Saved | Setups | If chunked | Each | Tests | Scope |\n\
+             |---:|---:|---:|---:|---:|---|\n",
+        );
+        for e in &g.groups {
+            let _ = writeln!(
+                md,
+                "| ~{:.2}s | {} | ~{} | {:.2}s | {} | `{}` |",
+                e.saved_seconds, e.setups, e.chunked_setups, e.setup_seconds, e.tests, e.scope
+            );
+        }
+        md.push('\n');
+    }
     if let Some(t) = &r.timeouts {
         let _ = writeln!(
             md,
             "### Timeouts\n\n> `--timeout {}` covers {} of the {} test(s) with 5+ recorded \
-             passing runs (a test's limit: 3x its slowest run, at least +1s).\n",
+             passing runs{} (a test's limit: 3x its slowest run, at least +1s).\n",
             t.suite_timeout,
-            t.tests_judged - t.override_count,
-            t.tests_judged
+            t.tests_judged - t.override_count - t.marker_covered,
+            t.tests_judged,
+            marker_covered_note(t)
         );
         if !t.overrides.is_empty() {
             md.push_str("| Timeout | Slowest | Runs | Test |\n|---:|---:|---:|---|\n");
             for o in &t.overrides {
                 let _ = writeln!(
                     md,
-                    "| `@pytest.mark.timeout({})` | {:.2}s | {} | `{}` |",
-                    o.timeout, o.slowest_seconds, o.runs, o.nodeid
+                    "| `@pytest.mark.timeout({})`{} | {:.2}s | {} | `{}` |",
+                    o.timeout,
+                    current_note(o),
+                    o.slowest_seconds,
+                    o.runs,
+                    o.nodeid
                 );
             }
             md.push('\n');
@@ -520,20 +545,43 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
+    if let Some(g) = &r.fixture_grouping {
+        sink.out_line(&format!(
+            "\nFIXTURE GROUPING (~{:.2}s of setup saved by keeping costly modules/classes \
+             on one worker):",
+            g.saved_seconds
+        ));
+        for e in g.groups.iter().take(8) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s saved  set up {}x, ~{}x if chunked ({:.2}s each)  {} tests  {}",
+                e.saved_seconds, e.setups, e.chunked_setups, e.setup_seconds, e.tests, e.scope
+            ));
+        }
+        if g.groups.len() > 8 {
+            sink.out_line(&format!("  ... and {} more", g.groups.len() - 8));
+        }
+    }
+
     if let Some(t) = &r.timeouts {
         sink.out_line(&format!(
             "\nTIMEOUTS (a test's limit: 3x its slowest recorded passing run, at least +1s):\n  \
-             --timeout {} covers {} of the {} test(s) with 5+ recorded runs",
+             --timeout {} covers {} of the {} test(s) with 5+ recorded runs{}",
             t.suite_timeout,
-            t.tests_judged - t.override_count,
-            t.tests_judged
+            t.tests_judged - t.override_count - t.marker_covered,
+            t.tests_judged,
+            marker_covered_note(t)
         ));
         if !t.overrides.is_empty() {
             sink.out_line("  these need their own limit:");
             for o in &t.overrides {
                 sink.out_line(&format!(
-                    "  {:4}s  slowest {:.2}s of {} runs  {}  <- @pytest.mark.timeout({})",
-                    o.timeout, o.slowest_seconds, o.runs, o.nodeid, o.timeout
+                    "  {:4}s  slowest {:.2}s of {} runs  {}  <- @pytest.mark.timeout({}){}",
+                    o.timeout,
+                    o.slowest_seconds,
+                    o.runs,
+                    o.nodeid,
+                    o.timeout,
+                    current_note(o)
                 ));
             }
             if t.override_count > t.overrides.len() {
@@ -624,6 +672,22 @@ pub(crate) fn leak_delta(l: &super::Leak) -> String {
 }
 
 /// "1 worker" for a single-worker run (`-n 0` / `-n 1`), else "N workers".
+/// `; N more by their own @pytest.mark.timeout`, when any test is.
+fn marker_covered_note(t: &TimeoutAdvice) -> String {
+    if t.marker_covered == 0 {
+        return String::new();
+    }
+    format!(
+        "; {} more by their own @pytest.mark.timeout",
+        t.marker_covered
+    )
+}
+
+/// ` (now N)` for a test whose current marker is below the suggestion.
+fn current_note(o: &TimeoutOverride) -> String {
+    o.current.map_or(String::new(), |c| format!(" (now {c})"))
+}
+
 fn workers_label(n: usize) -> String {
     if n <= 1 {
         "1 worker".to_string()
@@ -691,6 +755,9 @@ mod tests {
         assert!(md.contains("### Scope-promotion candidates"));
         assert!(md.contains("| `settings` | 40 | ~0.90s |"));
         assert!(md.contains("promote to `scope=\"session\"` to save ~0.90s"));
+        assert!(md.contains("### Fixture grouping"));
+        assert!(md.contains("> ~1.80s of module/class fixture setup saved"));
+        assert!(md.contains("| ~1.80s | 1 | ~4 | 0.60s | 40 | `tests/test_db.py` |"));
         assert!(md.contains("### Slowest files"));
         assert!(md.contains("| `tests/test_a.py` | 20.00s | 67% |"));
         assert!(md.contains("### Coverage waste"));
@@ -767,6 +834,14 @@ mod tests {
             ),
             "{out}"
         );
+        assert!(
+            out.contains("FIXTURE GROUPING (~1.80s of setup saved"),
+            "{out}"
+        );
+        assert!(
+            out.contains("~  1.80s saved  set up 1x, ~4x if chunked (0.60s each)  40 tests  tests/test_db.py"),
+            "{out}"
+        );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
     }
 
@@ -823,6 +898,30 @@ mod tests {
         );
         let md = render_markdown(&r);
         assert!(md.contains("### Timeouts"), "{md}");
+        // A marker-covered test and a low current marker are both said.
+        let mut marked = report(12);
+        let t = marked.timeouts.as_mut().unwrap();
+        t.marker_covered = 2;
+        t.overrides[0].current = Some(10.0);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &marked);
+        let marked_out = cap.out();
+        assert!(
+            marked_out.contains(
+                "  --timeout 3 covers 37 of the 40 test(s) with 5+ recorded runs; \
+                 2 more by their own @pytest.mark.timeout"
+            ),
+            "{marked_out}"
+        );
+        assert!(
+            marked_out.contains("<- @pytest.mark.timeout(26) (now 10)"),
+            "{marked_out}"
+        );
+        let marked_md = render_markdown(&marked);
+        assert!(
+            marked_md.contains("| `@pytest.mark.timeout(26)` (now 10) | 8.40s |"),
+            "{marked_md}"
+        );
         assert!(
             md.contains(
                 "| `@pytest.mark.timeout(26)` | 8.40s | 12 | `tests/test_a.py::test_long` |"

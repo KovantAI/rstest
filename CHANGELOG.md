@@ -7,6 +7,18 @@ between 0.x releases and are listed here.
 
 ### Features
 
+- **`--dist load` keeps a module with costly fixtures on one worker.** Tests
+  went out in small chunks, so a long module was spread over several workers
+  and each set up its module- and class-scoped fixtures again. rstest now
+  times those fixtures on every run (`.rstest_cache/scope_costs.json`), and
+  from the next run sends the tests of a module or class whose setup takes
+  0.5s or more to one worker, ahead of the rest. It splits such a module only
+  when that saves more wall time than the setup it repeats. Off under
+  `--shuffle` and `--order fail-fast`; lazy collection already sends whole
+  files. The costs ride `--cache-push` / `--cache-pull`, so a fresh CI runner
+  groups from its first run, and `--doctor` gets a FIXTURE GROUPING section
+  (`fixture_grouping` in `--doctor-json`) with the setup time saved.
+
 - **`@pytest.mark.isolated` runs a test in a forked process.** What the test
   changes in its worker (module globals, `os.environ`, `sys.modules`, a
   monkeypatch it never undid, a thread it left running) dies with the fork,
@@ -95,7 +107,10 @@ between 0.x releases and are listed here.
   slowest recorded passing run from the run history, suggests a suite
   `--timeout` that covers 95% of the tests, and lists the slower tests with a
   `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
-  least +1s). Appears once tests have 5 passing runs in the history.
+  least +1s). A test whose own marker already covers its limit is not listed,
+  and one whose marker is lower shows it (`(now 10)`; `--doctor-json`:
+  `current`, plus `marker_covered`). Appears once tests have 5 passing runs in
+  the history.
 
 - **A red run says what changed since the last green one.** Every whole-suite
   run that exits 0 on a clean tree (no `-k`, sub-path, nodeid, `--lf`,
@@ -114,6 +129,8 @@ between 0.x releases and are listed here.
   and flaky tests per run, test call time per run, the flaky ranking, the
   slowest tests, duration drift and the runs table. Written to
   `.rstest_cache/report.html` (or `--out PATH`); opens from disk, no server.
+  Runs older than what `RSTEST_HISTORY_RUNS` kept for every test are left
+  out (with a note saying how many), so trimmed runs never chart as a drop.
 
 - **Failures are grouped by cause.** Failed tests that raised the same
   exception, with the same message (numbers and addresses masked), through

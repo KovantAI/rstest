@@ -310,6 +310,10 @@ class StreamPlugin:
         # only function-scoped fixtures whose value fingerprints identically on
         # every call stay `all_constant`.
         self._fixtures: dict[tuple[str, str], list[Any]] = {}
+        # Always on: module/class nodeid -> argname -> [setups, secs] of its
+        # module- and class-scoped fixtures. The orchestrator keeps the tests
+        # of a costly scope on one worker (fixture-cost-aware dispatch).
+        self._scope_costs: dict[str, dict[str, list[Any]]] = {}
         # Doctor: one frame per fixture setup in progress, innermost last. A
         # frame is [tainted]; a narrower-than-session setup starting inside it
         # (request.getfixturevalue in the body) taints every enclosing frame.
@@ -769,6 +773,10 @@ class StreamPlugin:
         report = yield
         if call.excinfo is not None and report.failed:
             report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
+        # The doctor's TIMEOUTS section skips a test whose marker already
+        # covers its suggested limit.
+        if report.when == "call" and item.get_closest_marker("timeout") is not None:
+            report._rstest_marker_timeout = self._effective_timeout(item)
         return report
 
     @pytest.hookimpl(wrapper=True)
@@ -799,10 +807,18 @@ class StreamPlugin:
 
     @pytest.hookimpl(wrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):
-        if not self._doctor or fixturedef.argname == "request":
+        if fixturedef.argname == "request":
             return (yield)
         import time
 
+        if not self._doctor:
+            if fixturedef.scope not in ("module", "class"):
+                return (yield)
+            t0 = time.perf_counter()
+            try:
+                return (yield)
+            finally:
+                self._add_scope_cost(fixturedef, request, time.perf_counter() - t0)
         fins = getattr(fixturedef, "_finalizers", None)
         fins_before = len(fins) if fins is not None else None
         # Declared argnames are set up before this hook runs, so anything that
@@ -820,6 +836,7 @@ class StreamPlugin:
             if spied:
                 del request.getfixturevalue
             self._setup_stack.pop()
+            self._add_scope_cost(fixturedef, request, time.perf_counter() - t0)
             key = (fixturedef.argname, fixturedef.scope)
             entry = self._fixtures.setdefault(key, [0, 0.0, True, _UNSET])
             entry[0] += 1
@@ -837,6 +854,18 @@ class StreamPlugin:
                     entry[3] = fp
                 elif entry[3] != fp:
                     entry[2] = False
+
+    def _add_scope_cost(self, fixturedef, request, secs: float) -> None:
+        if fixturedef.scope not in ("module", "class"):
+            return
+        node = getattr(request, "node", None)
+        if node is None:
+            return
+        entry = self._scope_costs.setdefault(node.nodeid, {}).setdefault(
+            fixturedef.argname, [0, 0.0]
+        )
+        entry[0] += 1
+        entry[1] += secs
 
     def pytest_warning_recorded(self, warning_message, when, nodeid, location):
         from _pytest.warnings import warning_record_to_str
@@ -894,6 +923,18 @@ class StreamPlugin:
                 ), count in self._warnings.items()
             ]
             self._conn.send("warnings", {"entries": entries})
+        if self._scope_costs:
+            # A scope with two costly fixtures is set up once, not twice: count
+            # its setups by its most-set-up fixture, add up their seconds.
+            costs: list[m.ScopeCost] = [
+                {
+                    "key": key,
+                    "total": round(sum(t for _, t in fx.values()), 4),
+                    "count": max(c for c, _ in fx.values()),
+                }
+                for key, fx in self._scope_costs.items()
+            ]
+            self._conn.send("scope_costs", {"costs": costs})
         if self._doctor and self._fixtures:
             fixtures: list[m.FixtureStat] = [
                 {
@@ -995,6 +1036,9 @@ class StreamPlugin:
             start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
             for _, fspath, lineno, _ in _folded_skips(start, [report]):
                 payload["skip_location"] = [fspath, lineno]
+        marker_timeout = getattr(report, "_rstest_marker_timeout", None)
+        if marker_timeout is not None:
+            payload["marker_timeout"] = marker_timeout
         if getattr(report, "_rstest_no_rerun", False):
             payload["no_rerun"] = True
         cause = getattr(report, "_rstest_cause", None)
