@@ -254,6 +254,105 @@ mod tests {
         assert_eq!(c["a"].size, 11);
     }
 
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rstest-probecache-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn file_fingerprint_is_mtime_and_size() {
+        let dir = temp("fp");
+        let f = dir.join("python");
+        std::fs::write(&f, b"12345").unwrap();
+        let (mtime, size) = file_fingerprint(&f).unwrap();
+        let want = std::fs::metadata(&f)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!((mtime, size), (want, 5));
+        assert!(file_fingerprint(&dir.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_path_prefers_override_then_xdg_then_home() {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        let tail = Path::new("rstest").join("interp-probes-v1.json");
+        let _o = set_var(&held, "RSTEST_CACHE_DIR", "/o");
+        let _x = set_var(&held, "XDG_CACHE_HOME", "/x");
+        let _h = set_var(&held, "HOME", "/h");
+        assert_eq!(cache_path(), Some(Path::new("/o").join(&tail)));
+        if cfg!(windows) {
+            return;
+        }
+        let _o = remove_var(&held, "RSTEST_CACHE_DIR");
+        assert_eq!(cache_path(), Some(Path::new("/x").join(&tail)));
+        let _x = remove_var(&held, "XDG_CACHE_HOME");
+        assert_eq!(cache_path(), Some(Path::new("/h/.cache").join(&tail)));
+        let _h = remove_var(&held, "HOME");
+        assert_eq!(cache_path(), None);
+    }
+
+    fn entry_at(mtime: u64, size: u64, minor: u8) -> CacheEntry {
+        let mut e = entry(size);
+        e.mtime = mtime;
+        e.probe.version = (3, minor, 0);
+        e
+    }
+
+    #[test]
+    fn put_persists_get_gates_and_disk_writes_merge_skip_and_recover() {
+        use crate::test_env::set_var;
+        let held = crate::test_env::lock();
+        let dir = temp("put");
+        let _o = set_var(&held, "RSTEST_CACHE_DIR", &dir);
+        let file = dir.join("rstest").join("interp-probes-v1.json");
+        let on_disk = || read_cache(&std::fs::read(&file).unwrap()).unwrap();
+        // Unique keys: the in-memory map is process-wide.
+        let a = dir.join("a/python");
+        let b = dir.join("b/python");
+        let key = |p: &Path| p.to_string_lossy().into_owned();
+
+        disk_cache_put(&a, 10, 20, &entry_at(10, 20, 12).probe);
+        assert_eq!(on_disk().entries[&key(&a)].probe.version, (3, 12, 0));
+        // A hit needs both halves of the fingerprint.
+        assert_eq!(disk_cache_get(&a, 10, 20).unwrap().version, (3, 12, 0));
+        assert!(disk_cache_get(&a, 10, 21).is_none());
+        assert!(disk_cache_get(&a, 11, 20).is_none());
+        assert!(disk_cache_get(&b, 10, 20).is_none());
+
+        // Disk already holds this key with the same fingerprint (another
+        // process's probe): the put skips the write, so disk keeps its copy.
+        let mut other = DiskCache::default();
+        other.entries.insert(key(&a), entry_at(10, 20, 11));
+        write_cache(&file, &other).unwrap();
+        disk_cache_put(&a, 10, 20, &entry_at(10, 20, 12).probe);
+        assert_eq!(on_disk().entries[&key(&a)].probe.version, (3, 11, 0));
+
+        // A new key folds in alongside what's on disk.
+        disk_cache_put(&b, 1, 2, &entry_at(1, 2, 13).probe);
+        let d = on_disk();
+        assert_eq!(d.entries[&key(&a)].probe.version, (3, 11, 0));
+        assert_eq!(d.entries[&key(&b)].probe.version, (3, 13, 0));
+
+        // Corrupt file: re-seeded from everything this process knows.
+        std::fs::write(&file, b"garbage").unwrap();
+        disk_cache_put(&b, 1, 2, &entry_at(1, 2, 13).probe);
+        let d = on_disk();
+        assert_eq!(d.entries[&key(&a)].probe.version, (3, 12, 0));
+        assert_eq!(d.entries[&key(&b)].probe.version, (3, 13, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn put_reseeds_from_full_map_when_disk_absent_or_corrupt() {
         // base None (absent/corrupt): recovery re-seeds from the whole in-memory

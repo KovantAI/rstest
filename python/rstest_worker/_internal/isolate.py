@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import warnings
 from typing import Any
 
@@ -93,6 +94,34 @@ def _run_in_child(item, nextitem, write_fd: int) -> None:
         os._exit(code)
 
 
+def _read_until_exit(read_fd: int, pid: int) -> tuple[list[bytes], int]:
+    """The child's report bytes and its wait status. Read until the child
+    exits, not until EOF: a process the test forked and left running inherits
+    the pipe's write end and holds it open long after the child is gone."""
+    chunks: list[bytes] = []
+    status = None
+    while status is None:
+        if select.select([read_fd], [], [], 0.05)[0]:
+            chunk = os.read(read_fd, 65536)
+            if chunk:
+                chunks.append(chunk)
+                continue
+            status = os.waitpid(pid, 0)[1]  # EOF: every writer is gone
+            break
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = st
+    # The child wrote everything before exiting: drain what the pipe holds.
+    os.set_blocking(read_fd, False)
+    try:
+        while chunk := os.read(read_fd, 65536):
+            chunks.append(chunk)
+    except BlockingIOError:
+        pass
+    os.close(read_fd)
+    return chunks, status
+
+
 def _crash_report(item, status: int):
     """A failed call report for a child that died without reporting."""
     from _pytest.reports import TestReport
@@ -158,11 +187,7 @@ class IsolatedTests:
             os.close(read_fd)
             _run_in_child(item, nextitem, write_fd)
         os.close(write_fd)
-        chunks = []
-        with os.fdopen(read_fd, "rb") as r:
-            while chunk := r.read(65536):
-                chunks.append(chunk)
-        _, status = os.waitpid(pid, 0)
+        chunks, status = _read_until_exit(read_fd, pid)
         hook = item.config.hook
         if chunks:
             reports = [

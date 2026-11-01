@@ -753,6 +753,165 @@ mod tests {
     }
 
     #[test]
+    fn record_stamps_schema_version_and_time() {
+        let before = crate::time::now_epoch_secs();
+        let j = Journal::record(
+            "uid".into(),
+            2,
+            "loadfile".into(),
+            Some(7),
+            vec!["tests".into(), "-k".into(), "slow".into()],
+            Some("h".into()),
+            3,
+            vec![vec!["a::t".into()], vec!["b::t".into(), "c::t".into()]],
+        );
+        assert_eq!(j.schema, SCHEMA);
+        assert_eq!(j.rstest_version, env!("CARGO_PKG_VERSION"));
+        assert!(j.created_epoch >= before);
+        assert_eq!(
+            (
+                j.run_uid.as_str(),
+                j.workers,
+                j.dist.as_str(),
+                j.shuffle_seed
+            ),
+            ("uid", 2, "loadfile", Some(7))
+        );
+        assert_eq!(j.args, ["tests", "-k", "slow"]);
+        let p = j.pinned();
+        assert_eq!(p.assignment, j.assignment);
+        assert_eq!(
+            (p.collection_hash.as_deref(), p.collection_size),
+            (Some("h"), 3)
+        );
+    }
+
+    #[test]
+    fn journaling_honors_the_opt_out_env() {
+        let held = crate::test_env::lock();
+        {
+            let _v = crate::test_env::remove_var(&held, "RSTEST_NO_REPLAY_JOURNAL");
+            assert!(journaling_enabled());
+        }
+        {
+            let _v = crate::test_env::set_var(&held, "RSTEST_NO_REPLAY_JOURNAL", "1");
+            assert!(!journaling_enabled());
+        }
+        let _v = crate::test_env::set_var(&held, "RSTEST_NO_REPLAY_JOURNAL", "false");
+        assert!(journaling_enabled());
+    }
+
+    #[test]
+    fn load_pinned_returns_the_journal_and_its_schedule() {
+        with_cache_dir(|_| {
+            let j = journal("pin", vec![vec!["a::t1"], vec!["a::t2", "a::t3"]]);
+            write(&j);
+            let (got, pinned) = load_pinned(Some("pin"), None).unwrap();
+            assert_eq!(got, j);
+            assert_eq!(pinned.assignment, j.assignment);
+            assert_eq!(pinned.collection_hash.as_deref(), Some("abc"));
+            assert_eq!(pinned.collection_size, 3);
+            assert!(load_pinned(Some("absent"), None).is_err());
+        });
+    }
+
+    #[test]
+    fn load_reports_unparseable_journal() {
+        with_cache_dir(|dir| {
+            let p = dir.join("junk.json");
+            std::fs::write(&p, b"{not json").unwrap();
+            let err = load(None, Some(&p)).unwrap_err().to_string();
+            assert_eq!(err, format!("parsing {} as a replay journal", p.display()));
+        });
+    }
+
+    // Unix path spelling (`/no/such/...` is not absolute on Windows).
+    #[cfg(unix)]
+    #[test]
+    fn run_replay_warns_about_the_journal_then_runs_its_args() {
+        // The recorded args reach the run: `--looponfail` is rejected there,
+        // before any interpreter is needed, so the run fails fast and the
+        // warnings printed on the way are observable.
+        let held = crate::test_env::lock();
+        let base = std::env::temp_dir().join(format!(
+            "rstest-replay-run-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let _remote = crate::test_env::remove_var(&held, "RSTEST_CACHE_REMOTE");
+        let workers = 4 * std::thread::available_parallelism().map_or(1, usize::from) + 1;
+        let mut j = journal("r", vec![vec!["a::t"]]);
+        j.workers = workers;
+        j.assignment.resize(workers, Vec::new());
+        j.collection_size = 1;
+        j.args = [
+            "--looponfail",
+            "--lf",
+            "/no/such/dir/tests",
+            "-k",
+            "not slow",
+        ]
+        .map(String::from)
+        .to_vec();
+        let path = base.join("j.json");
+        std::fs::write(&path, serde_json::to_vec(&j).unwrap()).unwrap();
+        let cli = <crate::Cli as clap::Parser>::parse_from(["rstest"]);
+        let (mut sink, cap) = crate::reporting::sink::Sink::captured();
+        let err = run_replay(&cli, None, Some(&path), &mut sink)
+            .unwrap_err()
+            .to_string();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(err.starts_with("--looponfail is pytest-xdist's"), "{err}");
+        let lines: Vec<String> = cap.err().lines().map(String::from).collect();
+        assert_eq!(
+            lines[0],
+            format!("rstest: replay: run r (test recorded), {workers} worker(s), 1 test(s) across {workers} slot(s)")
+        );
+        assert_eq!(
+            lines[1],
+            "rstest: replay: args: --looponfail --lf /no/such/dir/tests -k 'not slow'"
+        );
+        assert!(
+            lines[2].starts_with(&format!(
+                "rstest: replay: the journal records {workers} workers"
+            )),
+            "{lines:?}"
+        );
+        assert!(
+            lines[3]
+                .starts_with("rstest: replay: recorded arg /no/such/dir/tests is an absolute path"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[4].starts_with("rstest: replay: ignoring recorded --lf (they select"),
+            "{lines:?}"
+        );
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        // A missing journal fails before printing anything.
+        let (mut sink, cap) = crate::reporting::sink::Sink::captured();
+        assert!(run_replay(&cli, None, Some(&base.join("gone.json")), &mut sink).is_err());
+        assert_eq!(cap.err(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_lenient_keeps_the_missing_tail() {
+        let tmp = std::env::temp_dir();
+        let canon = std::fs::canonicalize(&tmp).unwrap();
+        assert_eq!(canonical_lenient(&tmp), canon);
+        assert_eq!(
+            canonical_lenient(&tmp.join("no-such-dir-xyz/f.py")),
+            canon.join("no-such-dir-xyz/f.py")
+        );
+        // A path under cwd that does not exist yet still relativizes.
+        assert_eq!(
+            relativize(&format!("{}/new/t.py::x", tmp.display()), &canon),
+            "new/t.py::x"
+        );
+    }
+
+    #[test]
     fn sanitize_blocks_traversal_and_exotic_chars() {
         assert_eq!(sanitize("a1b2._-"), "a1b2._-");
         // Slashes/backslashes become underscores, so the result is always a

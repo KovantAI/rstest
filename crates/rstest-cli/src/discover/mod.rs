@@ -1094,6 +1094,194 @@ mod tests {
         assert!(py_launcher_candidates().is_empty());
     }
 
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rstest-disc-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    /// A repo-rooted scope with PATH, `$VIRTUAL_ENV` and uv's install dir all
+    /// pointed at empty places, so only what the test plants is discoverable.
+    #[cfg(unix)]
+    fn isolated<T>(f: impl FnOnce(&crate::test_env::Held, &Path) -> T) -> T {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        let base = temp("iso");
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::create_dir_all(base.join("empty")).unwrap();
+        let out = {
+            let _p = set_var(&held, "PATH", base.join("empty"));
+            let _u = set_var(&held, "UV_PYTHON_INSTALL_DIR", base.join("empty"));
+            let _v = remove_var(&held, "VIRTUAL_ENV");
+            // Positive probes persist; keep them out of the user's cache.
+            let _c = set_var(&held, "RSTEST_CACHE_DIR", base.join("cache"));
+            f(&held, &base)
+        };
+        let _ = std::fs::remove_dir_all(&base);
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_python_errors_name_the_path_and_reason() {
+        let real_path = std::env::var_os("PATH").unwrap_or_default();
+        isolated(|held, scope| {
+            let missing = scope.join("nope/python");
+            let err = super::resolve(scope, Some(missing.to_str().unwrap()))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "no usable Python interpreter at the --python path:\n  {}: no such file",
+                    missing.display()
+                )
+            );
+            // A directory that isn't a venv stays the candidate, and says why.
+            let err = super::resolve(scope, Some(scope.join("empty").to_str().unwrap()))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.ends_with("a directory with no bin/python or Scripts/python.exe in it"),
+                "{err}"
+            );
+            // An explicit version request: no "pass --python" hint. Probed
+            // on the real PATH: a bare name's probe is memoized process-wide,
+            // so a fake PATH here would poison it for other tests.
+            let _p = crate::test_env::set_var(held, "PATH", &real_path);
+            let err = super::resolve(scope, Some("3.1")).unwrap_err().to_string();
+            assert!(
+                err.starts_with("No interpreter satisfied '3.1'. Tried:\n"),
+                "{err}"
+            );
+            assert!(!err.contains("pass --python"), "{err}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_version_file_errors_name_the_pin_file() {
+        let real_path = std::env::var_os("PATH").unwrap_or_default();
+        isolated(|held, scope| {
+            let pin = scope.join(".python-version");
+            let sub = scope.join("pkg");
+            std::fs::create_dir_all(&sub).unwrap();
+            // Pinned to a concrete path: that one candidate, authoritative.
+            let missing = scope.join("gone/python");
+            std::fs::write(&pin, format!("\n{}\n", missing.display())).unwrap();
+            let err = super::resolve(&sub, None).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "no usable Python interpreter at the path named in {pin}:\n  {}: no such file\
+                     \n\nUpdate or remove {pin}, or pass --python PATH-OR-VERSION.",
+                    missing.display(),
+                    pin = pin.display()
+                )
+            );
+            // Pinned to an unsatisfiable version (real PATH, see above).
+            let _p = crate::test_env::set_var(held, "PATH", &real_path);
+            std::fs::write(&pin, "3.1\n").unwrap();
+            let err = super::resolve(&sub, None).unwrap_err().to_string();
+            assert!(
+                err.starts_with(&format!(
+                    "No interpreter satisfied '3.1' (pinned by {}). Tried:\n",
+                    pin.display()
+                )),
+                "{err}"
+            );
+            assert!(
+                err.ends_with(&format!(
+                    "Update or remove {}, or pass --python PATH-OR-VERSION.",
+                    pin.display()
+                )),
+                "{err}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrunnable_reason_tells_missing_from_broken() {
+        use super::{on_path, unrunnable_reason};
+        let real_path = std::env::var_os("PATH").unwrap_or_default();
+        isolated(|held, scope| {
+            let bin = scope.join("empty");
+            {
+                // The writer shells out to chmod, which needs the real PATH.
+                let _p = crate::test_env::set_var(held, "PATH", &real_path);
+                crate::test_env::write_executable(&bin.join("python3.99"), "#!/bin/sh\nexit 1\n");
+            }
+            assert!(on_path(Path::new("python3.99")));
+            assert!(!on_path(Path::new("python3.98")));
+            assert_eq!(
+                unrunnable_reason(Path::new("python3.99")),
+                "not runnable as a Python interpreter"
+            );
+            assert_eq!(
+                unrunnable_reason(Path::new("python3.98")),
+                "not found on PATH"
+            );
+            assert_eq!(
+                unrunnable_reason(&bin.join("python3.99")),
+                "not runnable as a Python interpreter"
+            );
+            assert_eq!(unrunnable_reason(&bin.join("absent")), "no such file");
+            assert_eq!(
+                unrunnable_reason(&bin),
+                "a directory with no bin/python or Scripts/python.exe in it"
+            );
+        });
+        let held = crate::test_env::lock();
+        let _p = crate::test_env::remove_var(&held, "PATH");
+        assert!(!super::on_path(Path::new("sh")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_project_venv_reports_the_unused_dotvenv() {
+        use super::skipped_project_venv;
+        isolated(|_, repo| {
+            let scope = repo.join("a/b");
+            std::fs::create_dir_all(&scope).unwrap();
+            // Nothing to skip without a project venv.
+            let other = repo.join("other/bin/python");
+            std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+            std::fs::write(&other, "").unwrap();
+            assert_eq!(skipped_project_venv(&scope, &other), None);
+
+            let venv = repo.join(".venv");
+            std::fs::create_dir_all(venv.join("bin")).unwrap();
+            std::fs::write(venv.join("bin/python"), "").unwrap();
+            // Ran with another interpreter: the project venv was skipped.
+            assert_eq!(
+                skipped_project_venv(&scope, &other),
+                Some((venv.clone(), false))
+            );
+            // Ran with the project venv itself: nothing skipped.
+            assert_eq!(skipped_project_venv(&scope, &venv.join("bin/python")), None);
+        });
+        // `$VIRTUAL_ENV` won discovery: flagged as such.
+        let held = crate::test_env::lock();
+        let repo = temp("venv-active");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for v in [".venv", "active"] {
+            std::fs::create_dir_all(repo.join(v).join("bin")).unwrap();
+            std::fs::write(repo.join(v).join("bin/python"), "").unwrap();
+        }
+        let _v = crate::test_env::set_var(&held, "VIRTUAL_ENV", repo.join("active"));
+        let got = skipped_project_venv(&repo, &repo.join("active/bin/python"));
+        // Another interpreter, not `$VIRTUAL_ENV`'s: not flagged as such.
+        let other = skipped_project_venv(&repo, &repo.join("x/bin/python"));
+        let _ = std::fs::remove_dir_all(&repo);
+        assert_eq!(got, Some((repo.join(".venv"), true)));
+        assert_eq!(other, Some((repo.join(".venv"), false)));
+    }
+
     /// End-to-end probe-script + JSON shape, exercised against whatever
     /// `python3` is on PATH. Skips cleanly when none is available.
     #[test]

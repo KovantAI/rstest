@@ -50,6 +50,18 @@ def test_pytest_main_falls_back_without_a_prog_parameter(monkeypatch):
     assert runner_pytest._pytest_main(["t.py"], plugins=[]) == 5
 
 
+def test_pytest_main_falls_back_when_private_main_is_gone(monkeypatch):
+    import _pytest.config
+
+    monkeypatch.delattr(_pytest.config, "_main")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        runner_pytest.pytest, "main", lambda args, plugins: seen.update(args=args) or 6
+    )
+    assert runner_pytest._pytest_main(["t.py"], plugins=[]) == 6
+    assert seen == {"args": ["t.py"]}
+
+
 def test_usage_error_names_rstest_not_pytest_main(capsys):
     # Real vendored pytest: an unknown flag is a usage error naming rstest.
     assert runner_pytest._pytest_main(["--no-such-flag-xyz"], plugins=[]) == 4
@@ -181,6 +193,39 @@ def test_maybe_start_debugpy_swallows_listen_errors(monkeypatch, capsys):
     assert "could not start debugpy" in capsys.readouterr().err
 
 
+def test_run_adds_maxfail_exemptions_only_with_a_quarantine(monkeypatch):
+    from rstest_worker._internal.retry import MaxfailExemptions
+
+    monkeypatch.delenv("RSTEST_AUTO_QUARANTINE", raising=False)
+    monkeypatch.delenv("RSTEST_QUARANTINE", raising=False)
+    captured = _capture_main(monkeypatch)
+    runner_pytest.run(["t.py"], FakeConn())
+    assert not any(isinstance(p, MaxfailExemptions) for p in captured["plugins"])
+    monkeypatch.setenv("RSTEST_QUARANTINE", "t.py::flaky")
+    runner_pytest.run(["t.py"], FakeConn())
+    assert isinstance(captured["plugins"][-1], MaxfailExemptions)
+
+
+def test_session_collection_done_reports_deselected(monkeypatch):
+    captured = _capture_main(monkeypatch)
+    runner_pytest.run(["t.py"], FakeConn())
+    plugin = captured["plugins"][0]
+    plugin.pytest_deselected([object(), object(), object()])
+    plugin.pytest_collection_finish(type("S", (), {"items": [object()]})())
+    assert plugin._conn.sent == [("collection_done", {"count": 1, "hash": "", "deselected": 3})]
+
+
+def test_session_tells_the_orchestrator_about_a_real_sigint_only():
+    import pytest
+
+    plugin = runner_pytest.SessionStreamPlugin(FakeConn())
+    # pytest's own Interrupted (-x, collection errors) is not a SIGINT.
+    plugin.pytest_keyboard_interrupt(type("E", (), {"type": pytest.Session.Interrupted})())
+    assert plugin._conn.sent == []
+    plugin.pytest_keyboard_interrupt(type("E", (), {"type": KeyboardInterrupt})())
+    assert plugin._conn.sent == [("interrupted", {})]
+
+
 def test_run_session_uses_item_dispatch_plugin(monkeypatch):
     captured = _capture_main(monkeypatch)
     runner_pytest.run_session(["t.py"], FakeConn())
@@ -284,6 +329,18 @@ def test_pool_coverage_args_only_gw0_erases(monkeypatch):
     args = ["--cov=.", "--cov-config", "setup.cfg"]
     assert runner_pytest._pool_coverage_args(args) == ["--cov-append", *args]
     assert erased == ["setup.cfg"]
+
+
+def test_pool_coverage_args_without_coverage_installed_leaves_args(monkeypatch):
+    # gw0 cannot erase without coverage: no --cov-append either, so
+    # pytest-cov reports the missing dependency its own way.
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw0")
+
+    def no_coverage(config_file):
+        raise ImportError("No module named 'coverage'")
+
+    monkeypatch.setattr(runner_pytest, "_erase_coverage_data", no_coverage)
+    assert runner_pytest._pool_coverage_args(["--cov=."]) == ["--cov=."]
 
 
 def test_cov_config_forms():

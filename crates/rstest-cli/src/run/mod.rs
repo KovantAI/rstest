@@ -239,6 +239,9 @@ struct PostRun<'a> {
     /// `--changed`/`--changed-strict` diff base, as resolved for selection.
     changed_base: Option<&'a str>,
     since_green: bool,
+    /// The user narrowed a `--since-green` run (`-k`/`-m`/a path/`--deselect`):
+    /// its green proves nothing about the tests left out, so no baseline.
+    since_green_narrowed: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
     history_commit: Option<&'a str>,
@@ -654,6 +657,8 @@ pub(crate) fn execute_inner(
     // Resolved once: selection and the post-run diff-coverage gate share it, so
     // a base that fails to resolve aborts here, before any test runs.
     let changed_base = resolve_changed_base(cli, &mut sink)?;
+    // Judged on the user's args, before selection swaps in the affected paths.
+    let since_green_narrowed = since_green && crate::since_green::run_narrows_suite(&args, &scope);
     let args = match apply_selection(
         cli,
         args,
@@ -784,6 +789,7 @@ pub(crate) fn execute_inner(
         shard: inc.shard,
         changed_base: changed_base.as_deref(),
         since_green,
+        since_green_narrowed,
         head: &head,
         env_fp: &env_fp,
         history_commit: history_commit.as_deref(),

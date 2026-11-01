@@ -394,6 +394,94 @@ mod tests {
         );
     }
 
+    use super::StatusFooter;
+
+    /// Drive `f` and return what it wrote.
+    fn written(f: &mut StatusFooter, act: impl FnOnce(&mut StatusFooter, &mut Vec<u8>)) -> String {
+        let mut buf = Vec::new();
+        act(f, &mut buf);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn disabled_footer_passes_output_through_untouched() {
+        let mut f = StatusFooter::new(2, false);
+        f.set_total(3);
+        let out = written(&mut f, |f, w| {
+            f.item_started(w, 0, "t::a".into());
+            f.print_inline(w, ".");
+            f.print_inline(w, "F");
+            f.item_finished(w, 0);
+            f.tick(w);
+            f.print_line(w, " [ 33%]");
+            f.finish(w);
+        });
+        assert_eq!(out, ".F [ 33%]\n");
+    }
+
+    #[test]
+    fn live_footer_paints_counter_workers_and_returns_cursor() {
+        let mut f = StatusFooter::new(2, true);
+        // Unknown total: a plain done counter; an idle slot says so.
+        let out = written(&mut f, |f, w| f.item_started(w, 0, "t::a".into()));
+        assert!(
+            out.starts_with("\n\x1b[2m[0 done]\x1b[0m\n\x1b[2mgw0 "),
+            "{out:?}"
+        );
+        assert!(out.contains("s\x1b[0m t::a\n"), "{out:?}");
+        assert!(out.contains("\x1b[2mgw1    idle\x1b[0m\n"), "{out:?}");
+        // Blank + header + 2 workers: back up exactly 4 rows.
+        assert!(out.ends_with("\x1b[4A\r"), "{out:?}");
+
+        // Known total, mid-run: done/total plus an ETA; the old footer is
+        // erased first.
+        f.set_total(4);
+        let out = written(&mut f, |f, w| f.item_finished(w, 0));
+        assert!(out.starts_with("\x1b[0J\n\x1b[2m[1/4 ~"), "{out:?}");
+        assert!(out.contains("s left]\x1b[0m\n"), "{out:?}");
+        assert!(out.contains("gw0    idle"), "{out:?}");
+
+        // Inline output is reprinted after the cursor returns, so the next
+        // char lands after it.
+        let out = written(&mut f, |f, w| f.print_inline(w, ".."));
+        assert!(out.starts_with("\x1b[0J.."), "{out:?}");
+        assert!(out.ends_with("\x1b[4A\r.."), "{out:?}");
+        // A full line ends the pending one: nothing to reprint after it.
+        let out = written(&mut f, |f, w| f.print_line(w, " [ 25%]"));
+        assert!(out.starts_with("\x1b[0J [ 25%]\n\n"), "{out:?}");
+        assert!(out.ends_with("\x1b[4A\r"), "{out:?}");
+
+        // All done: no ETA.
+        let out = written(&mut f, |f, w| {
+            for _ in 0..3 {
+                f.item_finished(w, 1);
+            }
+        });
+        assert!(out.contains("[4/4]\x1b[0m"), "{out:?}");
+
+        // finish() wipes the footer for good; later output is bare.
+        let out = written(&mut f, |f, w| {
+            f.finish(w);
+            f.print_line(w, "summary");
+            f.tick(w);
+        });
+        assert_eq!(out, "\x1b[0Jsummary\n");
+    }
+
+    #[test]
+    fn live_bar_header_fills_with_progress() {
+        let mut f = StatusFooter::new(1, true);
+        f.set_bar(true);
+        f.set_total(4);
+        let out = written(&mut f, |f, w| f.item_finished(w, 0));
+        assert!(out.contains("█"), "{out:?}");
+        assert!(out.contains("░"), "{out:?}");
+        assert!(out.contains("  25% (1/4) ~"), "{out:?}");
+        // A worker slot past the configured count is ignored, not a panic.
+        let out = written(&mut f, |f, w| f.item_started(w, 7, "t::x".into()));
+        assert!(!out.contains("t::x"), "{out:?}");
+    }
+
     #[test]
     fn narrow_footer_lines_fit_the_width() {
         use super::StatusFooter;

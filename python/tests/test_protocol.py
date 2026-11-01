@@ -47,6 +47,30 @@ def test_readable_degrades_to_false_on_a_bad_fd():
     assert protocol._readable(-1) is False
 
 
+def test_readable_falls_back_to_select_without_poll(monkeypatch):
+    # Platforms without select.poll (macOS builds of some Pythons): select().
+    import select
+
+    monkeypatch.delattr(select, "poll", raising=False)
+    r, w = os.pipe()
+    try:
+        assert protocol._readable(r) is False
+        os.write(w, b"x")
+        assert protocol._readable(r) is True
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+def test_readable_on_windows_peeks_the_pipe(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(protocol, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(protocol, "_peek_pipe", lambda fd: fd == 7)
+    assert protocol._readable(7) is True
+    assert protocol._readable(8) is False
+
+
 def test_recv_one_returns_none_on_eof():
     r, w = os.pipe()
     os.close(w)  # writer gone -> os.read yields b"" -> EOF
