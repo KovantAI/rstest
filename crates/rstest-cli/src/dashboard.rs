@@ -38,6 +38,7 @@ fn is_pass(o: &str) -> bool {
 /// One recorded run, from the entries that still point at it.
 #[derive(Debug, PartialEq)]
 struct RunStat {
+    seq: u64,
     epoch: u64,
     commit: Option<String>,
     tests: usize,
@@ -47,13 +48,28 @@ struct RunStat {
     call_seconds: f64,
 }
 
-/// Per-run totals, oldest first. A run's oldest entries are trimmed per test
-/// (`RSTEST_HISTORY_RUNS`), so the earliest runs can be partial.
-fn run_stats(h: &History) -> Vec<RunStat> {
+/// The oldest run no test was trimmed past. A test with a full series (`cap`
+/// entries) lost its entries from the runs before its oldest one, so those
+/// runs undercount. A test that just reached `cap` untrimmed counts too:
+/// the runs before it are hidden though complete, which errs on the safe side.
+fn complete_from(h: &History, cap: usize) -> u64 {
+    h.tests
+        .values()
+        .filter(|s| s.len() >= cap)
+        .filter_map(|s| s.front().map(|e| e.run))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Per-run totals, oldest first, for the runs from [`complete_from`] on: an
+/// older run's counts would be low, a drop that never happened.
+fn run_stats(h: &History, cap: usize) -> Vec<RunStat> {
+    let from = complete_from(h, cap);
     let mut stats: Vec<RunStat> = h
         .runs
         .iter()
         .map(|r: &RunMeta| RunStat {
+            seq: r.seq,
             epoch: r.epoch,
             commit: r.commit.clone(),
             tests: 0,
@@ -74,6 +90,7 @@ fn run_stats(h: &History) -> Vec<RunStat> {
         s.flaky += usize::from(e.outcome_name() == "flaky");
         s.call_seconds += e.call.map_or(0.0, f64::from);
     }
+    stats.retain(|s| s.seq >= from);
     stats.sort_by_key(|s| s.epoch);
     stats
 }
@@ -265,11 +282,13 @@ fn when(epoch: u64, now: u64) -> String {
 #[allow(clippy::write_with_newline)]
 fn render(
     h: &History,
+    cap: usize,
     auto: u32,
     green: Option<&crate::since_green::Snapshot>,
     now: u64,
 ) -> String {
-    let runs = run_stats(h);
+    let runs = run_stats(h, cap);
+    let hidden = h.runs.len() - runs.len();
     let flaky = crate::flaky::gather(h, auto, TOP);
     let caught = h.flippers(auto.max(1)).len() * usize::from(auto > 0);
     let mut html = String::new();
@@ -470,7 +489,16 @@ fn render(
             r.call_seconds,
         );
     }
-    html.push_str("</tbody></table>\n<p class=\"muted\">The oldest runs can be partial: each test keeps only its newest recorded runs.</p>\n</section>\n");
+    html.push_str("</tbody></table>\n");
+    if hidden > 0 {
+        let _ = write!(
+            html,
+            "<p class=\"muted\">{hidden} older run{} not shown: each test keeps only its newest {cap} \
+             runs (<code>RSTEST_HISTORY_RUNS</code>), so their counts would be partial.</p>\n",
+            if hidden == 1 { "" } else { "s" },
+        );
+    }
+    html.push_str("</section>\n");
     let _ = write!(
         html,
         "<div id=\"tip\" role=\"tooltip\" hidden></div>\n<script>\n{DASH_JS}\n</script>\n</body>\n</html>\n"
@@ -493,6 +521,7 @@ pub fn run_report(sink: &mut Sink, out: Option<&Path>) -> Result<i32> {
         .unwrap_or(crate::cli::AUTO_QUARANTINE);
     let html = render(
         &h,
+        crate::reporting::history::cap(),
         auto,
         crate::since_green::load().as_ref(),
         crate::time::now_epoch_secs(),
@@ -603,12 +632,29 @@ mod tests {
     #[test]
     fn run_stats_count_per_run() {
         let h = history(&[("a", "pf~", 1.0), ("b", "ppf", 0.5)]);
-        let s = run_stats(&h);
+        let s = run_stats(&h, 50);
         assert_eq!(s.len(), 3);
         assert_eq!((s[0].tests, s[0].failed, s[0].flaky), (2, 0, 0));
         assert_eq!((s[1].failed, s[1].flaky), (1, 0));
         assert_eq!((s[2].failed, s[2].flaky), (1, 1));
         assert!((s[2].call_seconds - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn runs_a_test_was_trimmed_past_are_hidden() {
+        // Cap 3: "a" ran in all 5 runs and kept the newest 3; "b" only in
+        // the first 2. Runs 0 and 1 lost a's entries, so they'd show 1 test.
+        let mut h = history(&[("a", "ppppp", 1.0), ("b", "pp", 1.0)]);
+        h.tests.get_mut("a").unwrap().drain(..2);
+        let s = run_stats(&h, 3);
+        let epochs: Vec<u64> = s.iter().map(|r| r.epoch).collect();
+        assert_eq!(epochs, [200, 300, 400]);
+        assert!(s.iter().all(|r| r.tests == 1));
+        let doc = render(&h, 3, 3, None, 900);
+        assert!(doc.contains("2 older runs not shown"), "{doc}");
+        // Nothing trimmed: every run shown, no note.
+        assert_eq!(run_stats(&h, 50).len(), 5);
+        assert!(!render(&h, 50, 3, None, 900).contains("not shown"));
     }
 
     #[test]
@@ -660,7 +706,7 @@ mod tests {
             ("t.py::flap", "pfpfpfpfp", 0.2),
             ("t.py::x[<script>]", "ppppppppp", 1.0),
         ]);
-        let doc = render(&h, 3, None, 900);
+        let doc = render(&h, 50, 3, None, 900);
         assert!(doc.contains("<h2>Failing and flaky tests per run</h2>"));
         assert!(doc.contains("<h2>Test call time per run</h2>"));
         assert_eq!(
@@ -700,7 +746,7 @@ mod tests {
         {
             e.call = Some(0.4 + 0.05 * i as f32);
         }
-        let doc = render(&h, 3, None, 2000);
+        let doc = render(&h, 50, 3, None, 2000);
         assert!(doc.contains("<h2>Duration drift</h2>"));
         assert!(doc.contains("t.py::creep"));
     }

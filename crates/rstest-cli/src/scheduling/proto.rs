@@ -126,6 +126,10 @@ pub struct Report {
     /// (`host:port`, with the IP when resolved from a name) the test reached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network: Vec<String>,
+    /// Call report: the test's `@pytest.mark.timeout`, in seconds, when it
+    /// has one (the doctor's TIMEOUTS section skips a test it covers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_timeout: Option<f64>,
     /// Failed report: the test's `@pytest.mark.flaky` `only_rerun` /
     /// `rerun_except` rule out a rerun for this failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -499,6 +503,7 @@ mod tests {
         // Replay journals stay lean: an empty list isn't written.
         let json = serde_json::to_value(Report {
             network: Vec::new(),
+            marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
             ..r
@@ -643,6 +648,7 @@ mod property {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
             }

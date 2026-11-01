@@ -773,6 +773,10 @@ class StreamPlugin:
         report = yield
         if call.excinfo is not None and report.failed:
             report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
+        # The doctor's TIMEOUTS section skips a test whose marker already
+        # covers its suggested limit.
+        if report.when == "call" and item.get_closest_marker("timeout") is not None:
+            report._rstest_marker_timeout = self._effective_timeout(item)
         return report
 
     @pytest.hookimpl(wrapper=True)
@@ -1032,6 +1036,9 @@ class StreamPlugin:
             start = self._config.invocation_params.dir if self._config is not None else Path.cwd()
             for _, fspath, lineno, _ in _folded_skips(start, [report]):
                 payload["skip_location"] = [fspath, lineno]
+        marker_timeout = getattr(report, "_rstest_marker_timeout", None)
+        if marker_timeout is not None:
+            payload["marker_timeout"] = marker_timeout
         if getattr(report, "_rstest_no_rerun", False):
             payload["no_rerun"] = True
         cause = getattr(report, "_rstest_cause", None)
