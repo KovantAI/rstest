@@ -27,6 +27,8 @@ class WarningEntry(TypedDict):
     filename: str
     lineno: int
     count: int
+    location: str  # pytest's summary location line: the nodeid, else relpath:line
+    text: str  # the warning as pytest prints it, source line included
 
 
 class FixtureStat(TypedDict):
@@ -75,6 +77,8 @@ class ReportPayload(_ReportRequired, total=False):
     cause: CauseInfo  # failed reports: what raised and where (grouping by cause)
     network: list[str]  # teardown: outbound destinations ("host:port") the test reached
     marker_timeout: float  # call: the test's @pytest.mark.timeout in seconds, when it has one
+    no_rerun: bool  # failed: the flaky mark's only_rerun / rerun_except rule out a rerun
+    subtest_desc: str  # subtest: its description as pytest prints it ("(i=1)")
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------
@@ -124,8 +128,12 @@ class LazyReadyPayload(TypedDict, total=False):
     maxfail: int  # resolved -x/--maxfail (argv + addopts), only when > 0
 
 
-class DonePayload(TypedDict):
+class _DoneRequired(TypedDict):
     exitstatus: int
+
+
+class DonePayload(_DoneRequired, total=False):
+    peak_rss: int  # the worker's peak RSS in bytes (memory-aware -n auto)
 
 
 class ItemStartPayload(TypedDict):
@@ -147,6 +155,11 @@ class SessionExitPayload(TypedDict):
     # pytest.exit(reason, returncode) in a test: the whole run stops.
     reason: str
     returncode: int
+
+
+class InterruptedPayload(TypedDict):
+    # A SIGINT reached the single session (KeyboardInterrupt); nothing to carry.
+    pass
 
 
 class ItemStartIdPayload(TypedDict):
@@ -179,6 +192,11 @@ class CollectSkipPayload(TypedDict):
     path: str
 
 
+class LfRecollectedPayload(TypedDict):
+    path: str  # collector the previous lastfailed recorded as failed
+    ids: list[str]  # nodeids it yielded now (report.result)
+
+
 class NodeInputPayload(TypedDict):
     workerinput: dict[str, object]  # _wire_safe'd, arbitrary map
 
@@ -200,6 +218,7 @@ EventKind = Literal[
     "report",
     "collect_error",
     "collect_skip",
+    "lf_recollected",
     "doctor_fixtures",
     "warnings",
     "collection_done",
@@ -213,6 +232,7 @@ EventKind = Literal[
     "item_done",
     "stopped",
     "session_exit",
+    "interrupted",
     "done",
     "junit_case",
     "junit_suite",

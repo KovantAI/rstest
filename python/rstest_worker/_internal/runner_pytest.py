@@ -26,7 +26,8 @@ from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
 )
-from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions
+from rstest_worker._internal.isolate import IsolatedTests
+from rstest_worker._internal.retry import FlakyReruns, MaxfailExemptions, PoolMarkReruns
 from rstest_worker._internal.stream import StreamPlugin
 
 fixturecompat.install()
@@ -146,7 +147,12 @@ def run_session(args: list[str], conn) -> int:
     """Item-dispatch session (pool mode)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    plugins = [ItemDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    plugins = [
+        ItemDispatchPlugin(conn),
+        MaxfailExemptions(pool=True),
+        PoolMarkReruns(),
+        IsolatedTests(),
+    ]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
@@ -154,7 +160,12 @@ def run_lazy_session(args: list[str], conn) -> int:
     """Lazy-collection session (pool mode, --collect lazy)."""
     _prime_coverage_core(args)
     args = _pool_coverage_args(args)
-    plugins = [LazyDispatchPlugin(conn), MaxfailExemptions(pool=True)]
+    plugins = [
+        LazyDispatchPlugin(conn),
+        MaxfailExemptions(pool=True),
+        PoolMarkReruns(),
+        IsolatedTests(),
+    ]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
 
@@ -233,7 +244,7 @@ def run(args: list[str], conn) -> int:
     # No orchestrator retry loop here: the session reruns flaky-marked tests
     # itself, and keeps quarantined failures out of -x / --maxfail. Both are
     # inert for a suite without flaky marks or a quarantine list.
-    plugins = [SessionStreamPlugin(conn), FlakyReruns()]
+    plugins = [SessionStreamPlugin(conn), FlakyReruns(), IsolatedTests()]
     exemptions = MaxfailExemptions(pool=False)
     if exemptions.active():
         plugins.append(exemptions)
@@ -250,6 +261,13 @@ class SessionStreamPlugin(StreamPlugin):
         if self._deselected:
             payload["deselected"] = self._deselected
         self._conn.send("collection_done", payload)
+
+    def pytest_keyboard_interrupt(self, excinfo):
+        # A SIGINT reached the session: tell the orchestrator, which
+        # otherwise passes on one sent to its pid alone (`kill -INT PID`).
+        # pytest's own Interrupted (-x, collection errors) is a subclass.
+        if excinfo.type is KeyboardInterrupt:
+            self._conn.send("interrupted", {})
 
 
 def _contained(session_fn, conn) -> int:

@@ -99,6 +99,7 @@ pub(super) enum Verdict {
     OrderDependency, // passes serial + loadfile, fails under load
     WallClock,       // passes serial, fails parallel, wait-bound - load-sensitive timing
     Isolation,       // passes serial, fails under load AND loadfile - co-location
+    Race,            // like OrderDependency, but alone in its file - a cross-file race
     Inconclusive,    // missing from a discriminator run - no evidence either way
 }
 
@@ -110,6 +111,7 @@ impl Verdict {
             Verdict::OrderDependency => "ORDER DEPENDENCY",
             Verdict::WallClock => "WALL-CLOCK / LOAD-SENSITIVE",
             Verdict::Isolation => "ISOLATION / CO-LOCATION",
+            Verdict::Race => "CONCURRENT RACE",
             Verdict::Inconclusive => "INCONCLUSIVE",
         }
     }
@@ -135,6 +137,13 @@ impl Verdict {
             Verdict::Isolation => (
                 "passes serial, fails under both load and loadfile — co-located state leak",
                 "reset the leaked global state per test; stopgap @pytest.mark.serial",
+            ),
+            Verdict::Race => (
+                "passes serial and under --dist loadfile, fails in parallel, and is the only \
+                 test in its file: there is no in-file order to keep, so it races a test in \
+                 another file for a shared resource (file, port, database)",
+                "give each worker its own resource (tmp_path, worker_id); stopgap \
+                 @pytest.mark.serial",
             ),
             Verdict::Inconclusive => (
                 "did not run in a -n 0 / loadfile follow-up run, so it can't be classified",
@@ -242,7 +251,8 @@ pub(super) fn classify_failures(
         // Any loadfile failure counts: an intermittent co-location race that
         // passed one loadfile run is still a co-location race, not ORDER.
         let lf = loadfile.iter().any(|o| fails(o, n));
-        let v = decide(all, any, lf, wait_bound(n));
+        let alone = par.keys().filter(|m| file_of(m) == file_of(n)).count() == 1;
+        let v = decide(all, any, lf, wait_bound(n), alone);
         out.push((n.clone(), v));
     }
     Ok(out)
@@ -304,13 +314,24 @@ fn scoped_selection(
 }
 
 /// The pure classifier decision for a test that failed in parallel, given
-/// whether it also failed the two serial repeats, the loadfile run, and whether
-/// its parallel run was wait-bound. Kept separate from the I/O so it's testable.
-pub(super) fn decide(serial1: bool, serial2: bool, loadfile: bool, wait_bound: bool) -> Verdict {
+/// whether it also failed the two serial repeats, the loadfile run, whether
+/// its parallel run was wait-bound, and whether it is the only test in its
+/// file. Kept separate from the I/O so it's testable.
+pub(super) fn decide(
+    serial1: bool,
+    serial2: bool,
+    loadfile: bool,
+    wait_bound: bool,
+    alone_in_file: bool,
+) -> Verdict {
     if serial1 && serial2 {
         Verdict::NotParallel // fails deterministically even serially
     } else if serial1 || serial2 {
         Verdict::IntrinsicFlake // serial repeats disagree
+    } else if !loadfile && alone_in_file {
+        // loadfile cannot change a lone test's order: it passed that run
+        // because the race went its way.
+        Verdict::Race
     } else if !loadfile {
         Verdict::OrderDependency // passes serial + loadfile, fails only under load
     } else if wait_bound {
@@ -477,25 +498,45 @@ mod tests {
     fn decide_covers_every_branch() {
         // (serial1, serial2, loadfile, wait_bound) -> verdict
         // fails both serial repeats -> not a parallelism issue.
-        assert_eq!(decide(true, true, true, false), Verdict::NotParallel);
-        assert_eq!(decide(true, true, false, false), Verdict::NotParallel);
+        assert_eq!(decide(true, true, true, false, false), Verdict::NotParallel);
+        assert_eq!(
+            decide(true, true, false, false, false),
+            Verdict::NotParallel
+        );
         // serial repeats disagree -> intrinsic flake (either order).
-        assert_eq!(decide(true, false, true, false), Verdict::IntrinsicFlake);
-        assert_eq!(decide(false, true, false, true), Verdict::IntrinsicFlake);
+        assert_eq!(
+            decide(true, false, true, false, false),
+            Verdict::IntrinsicFlake
+        );
+        assert_eq!(
+            decide(false, true, false, true, false),
+            Verdict::IntrinsicFlake
+        );
         // passes serial, passes loadfile -> order dependency (cross-file).
-        assert_eq!(decide(false, false, false, false), Verdict::OrderDependency);
+        assert_eq!(
+            decide(false, false, false, false, false),
+            Verdict::OrderDependency
+        );
         // passes serial, fails loadfile, wait-bound -> wall-clock.
-        assert_eq!(decide(false, false, true, true), Verdict::WallClock);
+        assert_eq!(decide(false, false, true, true, false), Verdict::WallClock);
         // passes serial, fails loadfile, NOT wait-bound -> isolation.
-        assert_eq!(decide(false, false, true, false), Verdict::Isolation);
+        assert_eq!(decide(false, false, true, false, false), Verdict::Isolation);
+        // passes serial and loadfile, but alone in its file -> a cross-file
+        // race (loadfile can't reorder a lone test); only that branch changes.
+        assert_eq!(decide(false, false, false, false, true), Verdict::Race);
+        assert_eq!(decide(false, false, true, false, true), Verdict::Isolation);
+        assert_eq!(decide(true, true, false, false, true), Verdict::NotParallel);
     }
 
     #[test]
     fn decide_wait_bound_only_splits_the_loadfile_failure() {
         // wait_bound must not override the serial/order branches - it only
         // distinguishes WallClock from Isolation once load+loadfile both fail.
-        assert_eq!(decide(true, true, true, true), Verdict::NotParallel);
-        assert_eq!(decide(false, false, false, true), Verdict::OrderDependency);
+        assert_eq!(decide(true, true, true, true, false), Verdict::NotParallel);
+        assert_eq!(
+            decide(false, false, false, true, false),
+            Verdict::OrderDependency
+        );
     }
 
     #[test]
@@ -532,6 +573,7 @@ mod tests {
             Verdict::OrderDependency,
             Verdict::WallClock,
             Verdict::Isolation,
+            Verdict::Race,
             Verdict::Inconclusive,
         ];
         for v in all {
@@ -542,7 +584,7 @@ mod tests {
         }
         // Titles are all distinct (they key the by-verdict grouping in check.rs).
         let titles: std::collections::HashSet<_> = all.iter().map(|v| v.title()).collect();
-        assert_eq!(titles.len(), 6);
+        assert_eq!(titles.len(), 7);
         // Spot-check the semantics carried in the advice text.
         assert!(Verdict::NotParallel.advice().0.contains("-n 0"));
         assert!(Verdict::WallClock.advice().0.contains("wait-bound"));

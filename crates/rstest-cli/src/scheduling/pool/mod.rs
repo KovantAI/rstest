@@ -181,6 +181,9 @@ pub struct PoolOutcome {
     /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
     /// don't spawn a pool (single-worker).
     pub startup_seconds: f64,
+    /// The largest peak RSS any worker reported at its session end (bytes);
+    /// `None` on the single-session path and where workers can't measure it.
+    pub peak_rss: Option<u64>,
     /// Whether the initial pool was actually fork-prewarmed off a zygote (not
     /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
     /// don't spawn a pool). Feeds the `--doctor` report.
@@ -372,6 +375,7 @@ pub fn run_pool(
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
+    let mut peak_rss: Option<u64> = None;
     // Reference collection: (count, hash) from whichever worker reports first.
     let mut reference: Option<(u64, String)> = None;
     // Designate's id list, retained for crash-report nodeids.
@@ -586,6 +590,10 @@ pub fn run_pool(
                 if idx == 0 {
                     run.collect_skips += 1;
                 }
+            }
+            Ok(Event::LfRecollected { path, ids }) => {
+                // Every worker collects the same tree; the map dedups.
+                run.lf_recollected.insert(path, ids);
             }
             Ok(Event::CollectionDone {
                 count,
@@ -918,8 +926,12 @@ pub fn run_pool(
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::Done { exitstatus }) => {
+            Ok(Event::Done {
+                exitstatus,
+                peak_rss: peak,
+            }) => {
                 statuses.push(exitstatus);
+                peak_rss = peak_rss.max(peak);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own (see Stopped) never ran what
@@ -941,7 +953,9 @@ pub fn run_pool(
             | Ok(Event::FileCollected { .. })
             | Ok(Event::ItemStartId { .. })
             | Ok(Event::ItemDoneId { .. })
-            | Ok(Event::StoppedIds { .. }) => {}
+            | Ok(Event::StoppedIds { .. })
+            // Single-session only.
+            | Ok(Event::Interrupted {}) => {}
             Err(e) => {
                 // Name the cause (exit status, stderr tail) before anything below
                 // reaps the worker, which kills first and would hide it.
@@ -1513,6 +1527,7 @@ pub fn run_pool(
         startup_seconds,
         fork_prewarmed,
         sources,
+        peak_rss,
     })
 }
 

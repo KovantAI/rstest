@@ -11,6 +11,8 @@ lcov.info
 htmlcov/
 mutants.out/
 mutants.out.old/
+.fermut/
+coverage.json
 # Dev planning docs and bug notes (kept locally; not shipped source).
 /dev-notes/
 .gate-venv/
@@ -32,3 +34,6 @@ corpus/bench.json
 !.claude/skills/rstest-triage
 plugins/rstest/skills/*-workspace/
 .cursor
+
+.fermut
+coverage.json

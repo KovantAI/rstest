@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import warnings
 from types import SimpleNamespace
 from typing import Any
 
@@ -558,19 +559,36 @@ def test_build_workerinput_seeds_every_direct_seed_crash_key(monkeypatch):
 # ── pytest_warning_recorded: aggregation ───────────────────────────────────
 
 
+def _warning(message, category=DeprecationWarning, filename="f.py", lineno=5, line=None):
+    return warnings.WarningMessage(message, category, filename, lineno, line=line)
+
+
 def test_warning_recorded_aggregates_duplicates():
     p = _plugin()
-    wm = SimpleNamespace(
-        message="deprecated thing",
-        category=SimpleNamespace(__name__="DeprecationWarning"),
-        filename="f.py",
-        lineno=5,
-    )
+    wm = _warning("deprecated thing", line="old_api()")
     p.pytest_warning_recorded(wm, "runtest", "t.py::a", ("f.py", 5, ""))
     p.pytest_warning_recorded(wm, "runtest", "t.py::a", ("f.py", 5, ""))
     assert list(p._warnings.values()) == [2]  # same key -> counted twice
     (key,) = p._warnings
-    assert key == ("runtest", "DeprecationWarning", "deprecated thing", "f.py", 5)
+    # pytest's summary location (the nodeid) and text (with the source line).
+    assert key == (
+        "runtest",
+        "DeprecationWarning",
+        "deprecated thing",
+        "f.py",
+        5,
+        "t.py::a",
+        "f.py:5: DeprecationWarning: deprecated thing\n  old_api()\n",
+    )
+
+
+def test_warning_recorded_outside_a_test_is_located_by_file(tmp_path):
+    p = _plugin()
+    p._config = SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path))
+    wm = _warning("at import", filename=str(tmp_path / "pkg" / "m.py"), lineno=2)
+    p.pytest_warning_recorded(wm, "collect", "", None)
+    (key,) = p._warnings
+    assert key[5] == "pkg/m.py:2"  # relative to the invocation dir, as pytest
 
 
 def test_warning_recorded_uses_message_type_for_nonstring():
@@ -579,12 +597,7 @@ def test_warning_recorded_uses_message_type_for_nonstring():
     class MyWarning(Warning):
         pass
 
-    wm = SimpleNamespace(
-        message=MyWarning("x"),
-        category=SimpleNamespace(__name__="ignored"),
-        filename="g.py",
-        lineno=1,
-    )
+    wm = _warning(MyWarning("x"), category=Warning, filename="g.py", lineno=1)
     p.pytest_warning_recorded(wm, "collect", "t.py", ("g.py", 1, ""))
     (key,) = p._warnings
     assert key[1] == "MyWarning"  # type(message).__name__, not category
@@ -595,7 +608,7 @@ def test_warning_recorded_uses_message_type_for_nonstring():
 
 def test_sessionfinish_emits_warnings():
     p = _plugin()  # _xdist_node None -> node hooks are a no-op
-    p._warnings = {("runtest", "UserWarning", "msg", "f.py", 3): 4}
+    p._warnings = {("runtest", "UserWarning", "msg", "f.py", 3, "t.py::a", "f.py:3: msg\n"): 4}
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     kinds = {k for k, _ in p._conn.sent}
     assert "warnings" in kinds
@@ -608,6 +621,8 @@ def test_sessionfinish_emits_warnings():
             "filename": "f.py",
             "lineno": 3,
             "count": 4,
+            "location": "t.py::a",
+            "text": "f.py:3: msg\n",
         }
     ]
 
@@ -1031,11 +1046,14 @@ def test_logreport_marks_subtest_reports():
 
     p = _plugin()
     rep = mk_report("call", "failed", failed=True)
-    p.pytest_runtest_logreport(FakeSubtestReport(**vars(rep)))
+    context = SimpleNamespace(msg="m", kwargs={"i": 1})
+    p.pytest_runtest_logreport(FakeSubtestReport(**vars(rep), context=context))
     p.pytest_runtest_logreport(mk_report("call", "passed"))
     sub, parent = (payload for _, payload in p._conn.sent)
     assert sub["subtest"] is True
-    assert "subtest" not in parent
+    # pytest's description, for the short summary's `SUBFAILED[m] (i=1)`.
+    assert sub["subtest_desc"] == "[m] (i=1)"
+    assert "subtest" not in parent and "subtest_desc" not in parent
 
 
 def test_logreport_fails_a_subtests_fixture_parent_with_failed_subtests():

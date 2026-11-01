@@ -120,6 +120,9 @@ pythonpath = ["python"]
 source = ["rstest_worker"]
 # The vendored pytest core is third-party; only our worker code is measured.
 omit = ["*/rstest_worker/_vendor/*"]
+# @pytest.mark.isolated runs tests in a forked child that leaves via os._exit;
+# without these the child's lines (isolate.py) are never saved.
+patch = ["_exit"]
 
 [tool.coverage.report]
 omit = ["*/rstest_worker/_vendor/*"]

@@ -1073,6 +1073,8 @@ mod timeout_tests {
                 skip_location: None,
                 network: Vec::new(),
                 marker_timeout: Some(marker),
+                no_rerun: false,
+                subtest_desc: None,
             },
         );
     }
@@ -1224,6 +1226,8 @@ pub(crate) mod testutil {
             skip_location: None,
             network: Vec::new(),
             marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1257,6 +1261,8 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1327,6 +1333,8 @@ mod tests {
                     skip_location: None,
                     network: Vec::new(),
                     marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }
@@ -1697,6 +1705,8 @@ mod tests {
                     skip_location: None,
                     network: Vec::new(),
                     marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }

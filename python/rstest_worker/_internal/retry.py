@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import sys
+import time
 
 import pytest
 
@@ -67,6 +68,121 @@ def flaky_reruns(item) -> int:
     if "condition" in kwargs and not _condition_holds(item, kwargs["condition"]):
         return 0
     return count
+
+
+def _mark_filters(mark, name: str) -> list:
+    """A rerun filter keyword of the flaky mark: a regex or an exception
+    class, or a list of them."""
+    value = getattr(mark, "kwargs", {}).get(name)
+    if not value:
+        return []
+    if isinstance(value, (str, type)):
+        return [value]
+    return list(value)
+
+
+def _exception_chain(exc, follow_context: bool):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        if exc.__cause__ is not None:
+            exc = exc.__cause__
+        elif follow_context and not getattr(exc, "__suppress_context__", False):
+            exc = exc.__context__
+        else:
+            exc = None
+
+
+def _matches(filters: list, excinfo, follow_context: bool) -> bool:
+    """rerunfailures' `_try_match_error`: an exception class matches by
+    isinstance, a regex searches `Type: message`, for every exception in the
+    raised one's chain."""
+    if excinfo is None:
+        return False
+    for exc in _exception_chain(excinfo.value, follow_context):
+        text = f"{type(exc).__name__}: {exc}"
+        for f in filters:
+            if isinstance(f, type):
+                if issubclass(f, BaseException) and isinstance(exc, f):
+                    return True
+                continue
+            # A bad pattern matches nothing rather than crashing the worker.
+            with contextlib.suppress(re.error, TypeError):
+                if re.search(f, text):
+                    return True
+    return False
+
+
+def mark_rules_out_rerun(item, report, excinfo) -> bool:
+    """Whether the flaky mark's own `only_rerun` / `rerun_except` keep this
+    failure from being rerun (rerunfailures' `_should_hard_fail_on_error`):
+    with `only_rerun`, an error matching none of its filters; with
+    `rerun_except`, one matching any of them."""
+    if not report.failed or hasattr(report, "wasxfail"):
+        return False
+    mark = item.get_closest_marker("flaky")
+    if mark is None:
+        return False
+    only = _mark_filters(mark, "only_rerun")
+    unless = _mark_filters(mark, "rerun_except")
+    if not only and not unless:
+        return False
+    if only and not _matches(only, excinfo, follow_context=True):
+        return True
+    return bool(unless) and _matches(unless, excinfo, follow_context=False)
+
+
+def rerun_delay(item) -> float:
+    """The flaky mark's `reruns_delay` in seconds, 0 without one (a negative
+    or unparsable value too, as rerunfailures treats a negative one)."""
+    mark = item.get_closest_marker("flaky")
+    if mark is None:
+        return 0.0
+    try:
+        return max(float(getattr(mark, "kwargs", {}).get("reruns_delay", 0) or 0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class _TagRuledOut:
+    """Tag a failed report the flaky mark rules out of a rerun
+    (`_rstest_no_rerun`); the exception is only reachable here."""
+
+    _retryable = False
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_makereport(self, item, call):
+        report = yield
+        if report.failed and not hasattr(report, "wasxfail"):
+            if mark_rules_out_rerun(item, report, call.excinfo):
+                report._rstest_no_rerun = True
+            else:
+                self._retryable = True
+        return report
+
+
+class PoolMarkReruns(_TagRuledOut):
+    """The flaky mark's rerun keywords in a pool worker, where the
+    orchestrator owns retries: a ruled-out failure is sent as `no_rerun`,
+    which the orchestrator never retries, and after an attempt that may be
+    retried the worker waits the mark's `reruns_delay` before its next item."""
+
+    def __init__(self) -> None:
+        self._reruns = os.environ.get("RSTEST_RERUNS") == "1"
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        self._retryable = False
+        try:
+            return (yield)
+        finally:
+            delay = rerun_delay(item)
+            if delay and self._retryable and (self._reruns or flaky_reruns(item) > 0):
+                # ponytail: the worker can't see the rerun budget, so it also
+                # waits after the last failed attempt; an orchestrator-side
+                # not-before time on the requeued item would avoid that.
+                time.sleep(delay)
 
 
 def _quarantine_patterns() -> list[re.Pattern]:
@@ -205,7 +321,7 @@ def _forget_failed_setup(item) -> None:
                 fixturedef.cached_result = None
 
 
-class FlakyReruns:
+class FlakyReruns(_TagRuledOut):
     """`@pytest.mark.flaky` reruns in the single session (no pool).
 
     The pytest-rerunfailures protocol: a failed attempt with budget left is
@@ -232,7 +348,12 @@ class FlakyReruns:
             reports = runtestprotocol(item, nextitem=nextitem, log=False)
             retry = False
             for report in reports:
-                if attempt < reruns and report.failed and not hasattr(report, "wasxfail"):
+                if (
+                    attempt < reruns
+                    and report.failed
+                    and not hasattr(report, "wasxfail")
+                    and not getattr(report, "_rstest_no_rerun", False)
+                ):
                     report.outcome = "rerun"
                     item.ihook.pytest_runtest_logreport(report=report)
                     retry = True
@@ -240,6 +361,9 @@ class FlakyReruns:
                 item.ihook.pytest_runtest_logreport(report=report)
             if not retry:
                 break
+            delay = rerun_delay(item)
+            if delay:
+                time.sleep(delay)
             _forget_failed_setup(item)
         item.ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
         return True

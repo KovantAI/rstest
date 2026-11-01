@@ -115,10 +115,7 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     let mut known: Vec<(String, f64)> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for f in files {
-        let rel = f
-            .strip_prefix(cwd)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| f.to_string_lossy().into_owned());
+        let rel = crate::scheduling::durations::file_key(&f, cwd);
         match totals.get(&rel) {
             Some(&t) => known.push((rel, t)),
             None => unknown.push(rel),
@@ -200,6 +197,7 @@ pub fn run_lazy_pool(
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
+    let mut peak_rss: Option<u64> = None;
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
@@ -323,6 +321,9 @@ pub fn run_lazy_pool(
             Ok(Event::CollectSkip { .. }) => {
                 // Each skipped collector is seen by exactly one worker.
                 run.collect_skips += 1;
+            }
+            Ok(Event::LfRecollected { path, ids }) => {
+                run.lf_recollected.insert(path, ids);
             }
             Ok(Event::LazyReady {
                 cache_dir: cd,
@@ -466,8 +467,12 @@ pub fn run_lazy_pool(
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::Done { exitstatus }) => {
+            Ok(Event::Done {
+                exitstatus,
+                peak_rss: peak,
+            }) => {
                 statuses.push(exitstatus);
+                peak_rss = peak_rss.max(peak);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own never ran what reached it
@@ -494,7 +499,9 @@ pub fn run_lazy_pool(
             | Ok(Event::NodeInput { .. })
             | Ok(Event::ItemStart { .. })
             | Ok(Event::ItemDone { .. })
-            | Ok(Event::Stopped { .. }) => {}
+            | Ok(Event::Stopped { .. })
+            // Single-session only.
+            | Ok(Event::Interrupted {}) => {}
             Err(e) => {
                 // Name the cause (exit status, stderr tail) before anything below
                 // reaps the worker, which kills first and would hide it.
@@ -596,8 +603,10 @@ pub fn run_lazy_pool(
                 if s.uncollected_files.is_empty() && s.outstanding.len() <= chunk {
                     if let Some(f) = file_queue.pop_front() {
                         s.uncollected_files.push(f.clone());
-                        s.worker
-                            .send(&proto::Command::RunFiles { paths: vec![f] })?;
+                        // Best-effort, as in the eager pool: a worker that died
+                        // (EPIPE) is handled by its reader's error, which puts
+                        // the file back on the queue.
+                        let _ = s.worker.send(&proto::Command::RunFiles { paths: vec![f] });
                         s.finishing = false;
                     }
                 }
@@ -654,7 +663,9 @@ pub fn run_lazy_pool(
                     }
                     let s = &mut states[i];
                     s.outstanding.extend(ids.iter().cloned());
-                    s.worker.send(&proto::Command::RunIds { ids })?;
+                    // Best-effort: a dead worker's `outstanding` is requeued
+                    // when its reader reports the death.
+                    let _ = s.worker.send(&proto::Command::RunIds { ids });
                     s.finishing = false;
                 }
             }
@@ -679,7 +690,8 @@ pub fn run_lazy_pool(
             let ids: Vec<String> = serial.drain(..).collect();
             let s = &mut states[designate];
             s.outstanding.extend(ids.iter().cloned());
-            s.worker.send(&proto::Command::RunIds { ids })?;
+            // Best-effort, as above.
+            let _ = s.worker.send(&proto::Command::RunIds { ids });
             s.finishing = false;
         }
 
@@ -727,18 +739,26 @@ pub fn run_lazy_pool(
         }
     }
 
-    // Every worker able to run the rest died for good: report what never ran
-    // instead of dropping it from the artifacts. Ids are known for collected
-    // files; a file nobody collected can only be named as a collection error.
-    // Not after a -x/--maxfail or collection-error stop, where unrun is expected.
-    if lost_worker && !stopping {
+    // Work left after the last worker ended (every worker able to run it died
+    // for good, or a session ended on its own with ids still handed to it):
+    // report what never ran instead of dropping it from the artifacts. Ids
+    // are known for collected files; a file nobody collected can only be
+    // named as a collection error. Not after a -x/--maxfail or
+    // collection-error stop, where unrun is expected. On a clean finish
+    // every queue is empty and this records nothing.
+    if !stopping {
+        let reason = if lost_worker {
+            orchestrator::LOST_NO_WORKER
+        } else {
+            orchestrator::LOST_SESSION_ENDED
+        };
         let unrun: Vec<String> = requeued
             .drain(..)
             .chain(states.iter_mut().flat_map(|s| s.own_queue.drain(..)))
             .chain(serial.drain(..))
             .collect();
         for id in unrun {
-            let fab = orchestrator::fabricate_lost_report(id, orchestrator::LOST_NO_WORKER);
+            let fab = orchestrator::fabricate_lost_report(id, reason);
             orchestrator::record_fabricated(sink, &mut run, &mut prog, None, fab);
         }
         let uncollected: Vec<String> = file_queue
@@ -751,10 +771,7 @@ pub fn run_lazy_pool(
             )
             .collect();
         for f in uncollected {
-            run.collect_error(
-                f,
-                format!("not collected: {}", orchestrator::LOST_NO_WORKER),
-            );
+            run.collect_error(f, format!("not collected: {reason}"));
         }
     }
     // Files left uncollected (-x/--maxfail or a collection error stopped the
@@ -818,6 +835,7 @@ pub fn run_lazy_pool(
         startup_seconds,
         fork_prewarmed,
         sources,
+        peak_rss,
     })
 }
 
@@ -881,6 +899,22 @@ mod tests {
         ]);
         let ordered = order_files(files, &cache, cwd);
         assert_eq!(ordered, vec!["test_b.py", "test_a.py", "test_c.py"]);
+    }
+
+    #[test]
+    fn order_files_matches_backslash_paths_to_slash_cache_keys() {
+        // Windows paths carry `\`, cached nodeids `/`: they must still match.
+        let cwd = Path::new("/proj");
+        let files = vec![
+            PathBuf::from("/proj/tests\\test_a.py"),
+            PathBuf::from("/proj/tests\\test_b.py"),
+        ];
+        let cache = HashMap::from([
+            ("tests/test_a.py::t".to_string(), 1.0),
+            ("tests/test_b.py::t".to_string(), 5.0),
+        ]);
+        let ordered = order_files(files, &cache, cwd);
+        assert_eq!(ordered, vec!["tests/test_b.py", "tests/test_a.py"]);
     }
 
     #[test]

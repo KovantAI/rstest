@@ -136,6 +136,7 @@ tests of the same file racing. Each failure lands in one class:
 | **INTRINSIC FLAKE** | serial repeats disagree | flaky under any runner; fix the flake (`--reruns` only hides it) |
 | **INCONCLUSIVE** | missing from a follow-up run (for example an unstable parametrize id), so there is no evidence either way; not counted as a pass | make the nodeid stable across collections |
 | **ORDER DEPENDENCY** | passes serial and under `--dist loadfile`, fails under `load` | run with `--dist loadfile`, or fix the in-file coupling |
+| **CONCURRENT RACE** | as ORDER DEPENDENCY, but the only test in its file: `loadfile` can't change a lone test's order, so it passed there only because the race went its way. It contends with another file's test for a shared resource (file, port, database) | give each worker its own resource (`tmp_path`, `worker_id`); stopgap `@pytest.mark.serial` |
 | **WALL-CLOCK / LOAD-SENSITIVE** | passes serial, fails parallel, and is wait-bound (wall ≫ cpu): a real-time deadline that misses under oversubscription | mock the clock / drop the tight upper bound; stopgap `-n 4` or `@pytest.mark.serial` |
 | **ISOLATION / CO-LOCATION** | passes serial, fails under both `load` and `loadfile`, and is *not* wait-bound: a leaked-global-state defect | reset the leaked state per test; stopgap `@pytest.mark.serial` |
 

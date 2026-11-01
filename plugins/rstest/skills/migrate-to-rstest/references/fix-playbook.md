@@ -11,6 +11,7 @@ touch the test now. The deeper background for each class is in the project's
 - NOT PARALLEL-SPECIFIC
 - INTRINSIC FLAKE
 - ORDER DEPENDENCY
+- CONCURRENT RACE
 - WALL-CLOCK / LOAD-SENSITIVE
 - ISOLATION / CO-LOCATION
 - Fixed network port / OS resource
@@ -95,6 +96,23 @@ worker, preserving in-file order); set it in `[tool.rstest]`.
 
 ---
 
+## CONCURRENT RACE
+
+**Cause.** Passes serial and under `--dist loadfile`, fails under `--dist load`,
+and is the **only test in its file**. `loadfile` can't change a lone test's
+order, so it passed there only because the race went its way: the test
+contends with a test in another file for a shared resource (a fixed file path,
+a port, a database) while both run at once.
+
+**Upstream fix.** Give each worker its own copy of the resource: `tmp_path`
+instead of a fixed path, a port from the OS (bind to port 0), a database or
+schema named after `worker_id`.
+
+**Stopgap.** `@pytest.mark.serial` (audit puts it in the paste-ready block).
+`--dist loadfile` does not help.
+
+---
+
 ## WALL-CLOCK / LOAD-SENSITIVE
 
 **Cause.** Passes serial, fails parallel, and is **wait-bound** (wall time ≫ cpu
@@ -140,6 +158,9 @@ resource (below).
 
 **Stopgap.** `@pytest.mark.serial` (the marker is auto-registered): the test
 runs alone after the parallel phase.
+When the report named a polluter, `@pytest.mark.isolated` on the *polluter*
+is the better stopgap (Unix): it runs in a forked process, so what it leaks
+dies with it and both tests stay in the parallel run.
 
 ---
 

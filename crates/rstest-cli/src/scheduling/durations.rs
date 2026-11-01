@@ -147,6 +147,16 @@ fn slash_joined(rel: &Path) -> String {
         .join("/")
 }
 
+/// `file` as a duration-cache file key: relative to `cwd` when under it, with
+/// `/` separators, so it matches the file part of the cached nodeids on
+/// Windows too.
+pub(crate) fn file_key(file: &Path, cwd: &Path) -> String {
+    file.strip_prefix(cwd)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// What the run saw at collection time: pytest's own rootdir and the content
 /// hash of each collected test file, taken as the file was collected. `save`
 /// tags this run's timings with these rather than re-reading the files
@@ -637,6 +647,8 @@ mod tests {
                     skip_location: None,
                     network: Vec::new(),
                     marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }
@@ -672,6 +684,8 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 

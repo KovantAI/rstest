@@ -2,7 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -141,6 +141,9 @@ pub struct Worker {
     /// from here, so a wind-down that sends every Shutdown and then waits the
     /// workers one by one shares one deadline instead of stacking N of them.
     shutdown_sent: Option<std::time::Instant>,
+    /// Set by [`Worker::kill`]: a SIGKILL death is then ours (the hang
+    /// watchdog), not the out-of-memory killer.
+    killed: bool,
 }
 
 /// How a worker's OS process is owned. The plain spawn path makes the worker a
@@ -426,7 +429,7 @@ struct StderrTail {
 }
 
 impl StderrTail {
-    fn capture(stderr: ChildStderr, startup: Option<Arc<StartupStderr>>) -> Self {
+    fn capture(stderr: impl Read + Send + 'static, startup: Option<Arc<StartupStderr>>) -> Self {
         let lines = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let (t_lines, t_done) = (Arc::clone(&lines), Arc::clone(&done));
@@ -625,8 +628,10 @@ fn forward_stderr(
 }
 
 /// Render [`Worker::death_detail`]: an indented exit line and stderr tail.
-fn format_death_detail(status: Option<ExitStatus>, tail: &[String]) -> String {
+fn format_death_detail(status: Option<ExitStatus>, tail: &[String], killed_by_us: bool) -> String {
     use std::fmt::Write as _;
+    #[cfg(not(unix))]
+    let _ = killed_by_us;
     let mut s = String::new();
     if let Some(status) = status {
         match status.code() {
@@ -639,6 +644,14 @@ fn format_death_detail(status: Option<ExitStatus>, tail: &[String]) -> String {
                     use std::os::unix::process::ExitStatusExt;
                     if let Some(sig) = status.signal() {
                         let _ = write!(s, "\n  killed by signal {sig}");
+                        // Nobody here sent it: on Linux the OOM killer and on
+                        // macOS jetsam end a process that way.
+                        if sig == libc::SIGKILL && !killed_by_us {
+                            s.push_str(
+                                " (SIGKILL: likely the out-of-memory killer; lower -n, or \
+                                 let -n auto size the pool by memory)",
+                            );
+                        }
                     }
                 }
             }
@@ -725,6 +738,7 @@ impl Worker {
             reader: Some(reader),
             stderr,
             shutdown_sent: None,
+            killed: false,
         })
     }
 
@@ -741,12 +755,15 @@ impl Worker {
         env: &WorkerEnv,
         fork_prewarm: bool,
     ) -> Result<Vec<Self>> {
+        // One startup-stderr set per pool: a startup error every worker hits
+        // the same way prints once, not n times.
+        let seen = SeenStartupStderr::default();
         #[cfg(unix)]
         if Self::prewarms(fork_prewarm, n) {
             ensure_fd_headroom(n);
-            match Self::spawn_forked_pool(python, n, env) {
-                // The zygote holds both ends of all 2n pipes at once (~4n fds,
-                // vs ~2n for plain spawns, which close each worker's child ends
+            match Self::spawn_forked_pool(python, n, env, &seen) {
+                // The zygote holds both ends of all 3n pipes at once (~6n fds,
+                // vs ~3n for plain spawns, which close each worker's child ends
                 // as they go), so it can hit the fd limit where the plain path
                 // still fits: fall back to plain spawns rather than failing.
                 Err(e) if is_fd_exhaustion(&e) => {}
@@ -756,12 +773,9 @@ impl Worker {
         #[cfg(not(unix))]
         let _ = fork_prewarm;
         // Plain spawns hold ~3 fds per worker (command, event, stderr pipes),
-        // under the zygote's ~4n, so the same headroom covers them.
+        // under the zygote's ~6n, so the same headroom covers them.
         #[cfg(unix)]
         ensure_fd_headroom(n);
-        // One startup-stderr set per pool: a startup error every worker hits
-        // the same way prints once, not n times.
-        let seen = SeenStartupStderr::default();
         (0..n)
             .map(|idx| Self::spawn_inner(python, Some((idx, n)), Stdio::Null, env, Some(&seen)))
             .collect()
@@ -848,7 +862,7 @@ impl Worker {
                 Duration::ZERO
             })
         });
-        format_death_detail(status, &tail)
+        format_death_detail(status, &tail, self.killed)
     }
 
     /// Ask the worker to exit cleanly (send `Shutdown`, then reap it).
@@ -861,6 +875,7 @@ impl Worker {
     /// Hard-kill the worker process (hang watchdog). The reader thread
     /// sees EOF and the normal crash machinery takes over.
     pub fn kill(&mut self) {
+        self.killed = true;
         self.proc.kill();
     }
 
@@ -1194,14 +1209,23 @@ impl Worker {
     /// endpoints via argv, and reads back the forked child pids. Each child is
     /// reparented to init when the zygote exits, so its [`Proc`] is
     /// `Reparented(pid)` — killable by signal, reaped by init.
-    fn spawn_forked_pool(python: &Path, n: usize, env: &WorkerEnv) -> Result<Vec<Self>> {
-        // One cmd + one evt pipe per worker, plus a report pipe the zygote uses
-        // to hand the forked child pids back.
+    fn spawn_forked_pool(
+        python: &Path,
+        n: usize,
+        env: &WorkerEnv,
+        seen: &SeenStartupStderr,
+    ) -> Result<Vec<Self>> {
+        // One cmd, evt and stderr pipe per worker, plus a report pipe the
+        // zygote uses to hand the forked child pids back. Each worker's own
+        // stderr pipe goes through the pool's startup dedupe and keeps a tail
+        // for its death detail, as a spawned worker's does.
         let mut cmds = Vec::with_capacity(n);
         let mut evts = Vec::with_capacity(n);
+        let mut errs = Vec::with_capacity(n);
         for _ in 0..n {
             cmds.push(transport::pipe()?);
             evts.push(transport::pipe()?);
+            errs.push(transport::pipe()?);
         }
         let mut report = transport::pipe()?;
         // Held open until every worker's identity is recorded: the zygote blocks
@@ -1216,7 +1240,7 @@ impl Worker {
             transport::prepare_parent_end(c.write.raw())?;
             transport::prepare_child_end(c.read.raw())?;
         }
-        for e in &evts {
+        for e in evts.iter().chain(&errs) {
             transport::prepare_parent_end(e.read.raw())?;
             transport::prepare_child_end(e.write.raw())?;
         }
@@ -1225,9 +1249,10 @@ impl Worker {
         transport::prepare_parent_end(release.write.raw())?;
         transport::prepare_child_end(release.read.raw())?;
 
-        // argv: --fork-pool <n> <report_write_fd> <release_read_fd> <cmd0> <evt0> ...
-        // where cmd_i is the worker's command-READ end and evt_i its event-WRITE
-        // end (matching _fork_pool in python/rstest_worker/__main__.py).
+        // argv: --fork-pool <n> <report_write_fd> <release_read_fd> <cmd0> <evt0> <err0> ...
+        // where cmd_i is the worker's command-READ end, evt_i its event-WRITE
+        // end and err_i its stderr-WRITE end (matching _fork_pool in
+        // python/rstest_worker/__main__.py).
         let mut command = Command::new(python);
         command.args([
             "-m",
@@ -1240,12 +1265,13 @@ impl Worker {
         for i in 0..n {
             command.arg(cmds[i].read.raw().to_string());
             command.arg(evts[i].write.raw().to_string());
+            command.arg(errs[i].write.raw().to_string());
         }
         apply_shared_worker_env(&mut command, n, env);
         // Same stdio as a plain non-passthrough worker (see build_worker_command):
         // stdout is rendered Rust-side, and stdin must not be inherited because
-        // `--watch` keeps a thread blocked reading it for `q`. Every forked
-        // worker inherits the zygote's stdio.
+        // `--watch` keeps a thread blocked reading it for `q`. The zygote's
+        // own stderr is inherited; each forked worker swaps in its own pipe.
         command
             .stdout(std::process::Stdio::null())
             .stdin(std::process::Stdio::null());
@@ -1259,7 +1285,7 @@ impl Worker {
         for c in &mut cmds {
             c.read.close_now();
         }
-        for e in &mut evts {
+        for e in evts.iter_mut().chain(&mut errs) {
             e.write.close_now();
         }
         report.write.close_now();
@@ -1299,13 +1325,18 @@ impl Worker {
         for (i, tracked) in tracked.into_iter().enumerate() {
             let cmd_w = transport::into_file(cmds[i].write.take_raw());
             let evt_r = transport::into_file(evts[i].read.take_raw());
+            let err_r = transport::into_file(errs[i].read.take_raw());
+            let startup = Arc::new(StartupStderr::new(Arc::clone(seen)));
+            let stderr = StderrTail::capture(err_r, Some(startup));
+            let mut reader = EventReader::new(evt_r);
+            reader.startup = stderr.startup.clone();
             workers.push(Self {
                 proc: Proc::Reparented(tracked),
                 cmd_w,
-                reader: Some(EventReader::new(evt_r)),
-                // Forked workers share the zygote's inherited stderr.
-                stderr: None,
+                reader: Some(reader),
+                stderr: Some(stderr),
                 shutdown_sent: None,
+                killed: false,
             });
         }
         Ok(workers)
@@ -1313,7 +1344,7 @@ impl Worker {
 }
 
 /// Raise the soft `RLIMIT_NOFILE` (never above the hard limit) so the zygote's
-/// ~4n pipe fds fit alongside what the process already holds. Best effort: on
+/// ~6n pipe fds fit alongside what the process already holds. Best effort: on
 /// failure the fork path may still hit EMFILE and fall back to plain spawns.
 #[cfg(unix)]
 // `rlim_t` is u64 on Linux/macOS but signed on some BSDs.
@@ -1322,7 +1353,7 @@ fn ensure_fd_headroom(n: usize) {
     /// Allowance for fds the orchestrator already holds (stdio, caches, the
     /// watcher, ...) on top of the worker pipes.
     const BASELINE: u64 = 256;
-    let want = (4 * n as u64 + 4).saturating_add(BASELINE);
+    let want = (6 * n as u64 + 4).saturating_add(BASELINE);
     // SAFETY: an all-zero rlimit is a valid value of this plain-data struct.
     let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: `lim` is a live rlimit for getrlimit to fill.
@@ -1836,19 +1867,20 @@ mod tests {
         // A collection_done rides even a "not found" usage error (pytest sends
         // it from a finally), and done ends every failed startup.
         assert!(!StartupStderr::ends_startup(&proto::Event::Done {
-            exitstatus: 4
+            exitstatus: 4,
+            peak_rss: None
         }));
     }
 
     #[test]
     fn format_death_detail_renders_status_and_tail() {
-        assert_eq!(format_death_detail(None, &[]), "");
+        assert_eq!(format_death_detail(None, &[], false), "");
         let tail = vec![
             "Traceback".to_string(),
             "ModuleNotFoundError: x".to_string(),
         ];
         assert_eq!(
-            format_death_detail(None, &tail),
+            format_death_detail(None, &tail, false),
             "\n  last lines of its stderr:\n    Traceback\n    ModuleNotFoundError: x"
         );
         #[cfg(unix)]
@@ -1858,13 +1890,25 @@ mod tests {
             // Raw wait statuses: exit code 2 is 2 << 8; signal 9 is 9.
             let exited = ExitStatus::from_raw(2 << 8);
             assert_eq!(
-                format_death_detail(Some(exited), &[]),
+                format_death_detail(Some(exited), &[], false),
                 "\n  exited with code 2"
             );
             let killed = ExitStatus::from_raw(9);
+            // A SIGKILL nobody here sent: name the likely OOM kill.
             assert_eq!(
-                format_death_detail(Some(killed), &[]),
+                format_death_detail(Some(killed), &[], false),
+                "\n  killed by signal 9 (SIGKILL: likely the out-of-memory killer; lower -n, \
+                 or let -n auto size the pool by memory)"
+            );
+            // The watchdog's own kill: no OOM guess.
+            assert_eq!(
+                format_death_detail(Some(killed), &[], true),
                 "\n  killed by signal 9"
+            );
+            // Another signal is never called an OOM kill.
+            assert_eq!(
+                format_death_detail(Some(ExitStatus::from_raw(15)), &[], false),
+                "\n  killed by signal 15"
             );
         }
     }
@@ -2352,6 +2396,8 @@ mod tests {
             let mut pids = Vec::new();
             for w in &workers {
                 assert!(w.is_forked(), "fork-prewarm worker should be Reparented");
+                // Its own stderr pipe: deduped at startup, tailed for a crash.
+                assert!(w.stderr.is_some(), "forked worker should own its stderr");
                 let pid = pid_of(w).expect("fresh forked worker lost its pid");
                 assert!(alive(pid), "forked worker pid {pid} should be alive");
                 pids.push(pid);
@@ -2882,7 +2928,7 @@ mod tests {
     #[cfg(unix)]
     const FD_CHILD: &str = "RSTEST_TEST_FD_EXHAUSTION_CHILD";
 
-    /// When the zygote's ~4n pipe fds don't fit under the fd limit (but the
+    /// When the zygote's ~6n pipe fds don't fit under the fd limit (but the
     /// plain path's ~3n do), `spawn_pool` falls back to plain spawns instead of
     /// failing. Lowering the hard limit can't be undone, so the body runs in a
     /// re-executed copy of this test binary.
@@ -2913,7 +2959,7 @@ mod tests {
             let n = 12;
             // Room for the plain path (3 fds per live worker: command, event and
             // stderr pipes; plus the child ends and spawn's internal pipe while
-            // each spawns), not the zygote's 4n + 4.
+            // each spawns), not the zygote's 6n + 4.
             let open = std::fs::read_dir("/dev/fd").expect("list fds").count() as u64;
             let limit = open + 3 * n as u64 + 10;
             let lim = libc::rlimit {

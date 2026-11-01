@@ -27,7 +27,7 @@ use crate::reporting::sink::Sink;
 /// keeps the file together instead. An intrinsic flake or a pre-existing
 /// (`-n 0` too) failure is a different problem serial can't paper over.
 fn serial_fixable(v: Verdict) -> bool {
-    matches!(v, Verdict::Isolation | Verdict::WallClock)
+    matches!(v, Verdict::Isolation | Verdict::WallClock | Verdict::Race)
 }
 
 /// The classifier verdicts split into the audit buckets.
@@ -490,6 +490,7 @@ mod tests {
             ("f.py::flake".to_string(), Verdict::IntrinsicFlake),
             ("b.py::bug".to_string(), Verdict::NotParallel),
             ("q.py::gone".to_string(), Verdict::Inconclusive),
+            ("r.py::race".to_string(), Verdict::Race),
         ];
         let Buckets {
             serial,
@@ -502,7 +503,7 @@ mod tests {
         // serial-fixable sorted by nodeid.
         assert_eq!(
             serial.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            ["m.py::wall", "z.py::iso"]
+            ["m.py::wall", "r.py::race", "z.py::iso"]
         );
         // Order-dependent tests need their file kept together (loadfile);
         // serial would run them apart from the siblings they depend on.

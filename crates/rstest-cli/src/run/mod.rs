@@ -1606,6 +1606,7 @@ fn dispatch_run(
             // Failed attempts of flaky-marked tests the session retried
             // (outcome `rerun`), per nodeid: see `mark_session_flaky`.
             let mut reruns_seen: Vec<String> = Vec::new();
+            let mut session_peak: Option<u64> = None;
             let exitstatus = loop {
                 let event = match w.recv() {
                     Ok(event) => event,
@@ -1626,6 +1627,15 @@ fn dispatch_run(
                         _ => return Err(e),
                     },
                 };
+                if let proto::Event::Done {
+                    peak_rss: Some(p), ..
+                } = &event
+                {
+                    session_peak = Some(*p);
+                }
+                if let (proto::Event::Interrupted {}, Some(i)) = (&event, &interrupts) {
+                    i.session_got_sigint();
+                }
                 if let proto::Event::Report(r) = &event {
                     if r.outcome == "rerun" {
                         // A retried attempt: pytest's own terminal shows it
@@ -1671,6 +1681,12 @@ fn dispatch_run(
                 // No worker pool spawned here (one passthrough worker).
                 startup_seconds: 0.0,
                 fork_prewarmed: false,
+                // Recorded only when `-n auto` chose this one session (as when
+                // memory capped it at 1): then it is the worker's peak, and a
+                // later run on more memory can size up from it. An explicit
+                // `-n 0` runs the whole suite in one process, a peak that
+                // would undersize the next parallel run.
+                peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
             }
         } else if path == RunPath::Lazy {
             // Auto-picked (neither --collect nor the setting present)? Say so once,
@@ -1788,30 +1804,54 @@ fn interpreter_hint(
 /// While installed, the signal is only recorded (see
 /// [`crate::scheduling::interrupt`]); the orchestrator keeps reading the
 /// session, which ends with pytest's own INTERRUPTED (2), then writes the
-/// reports as usual. SIGINT is not forwarded: Ctrl-C and a CI runner's cancel
-/// signal the whole process group, so pytest already has it, and a second
-/// SIGINT would abort pytest's teardown and summary. SIGTERM is forwarded to
-/// the session as SIGINT: `kill PID` and job timeouts often target only our
-/// pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
+/// reports as usual. SIGINT is forwarded only when the session does not say
+/// it got one within [`SIGINT_GRACE`]: Ctrl-C and a CI runner's cancel signal
+/// the whole process group, so pytest already has it (and reports
+/// `Interrupted` from its KeyboardInterrupt hook), and a second SIGINT would
+/// abort pytest's teardown and summary. Silence means it went to our pid alone
+/// (`kill -INT PID`), even while a test hangs: pass it on. SIGTERM is
+/// forwarded to the session as SIGINT: `kill PID` and job timeouts often
+/// target only our pid, and Python has no clean SIGTERM unwinding. When the group got SIGTERM
 /// too, the child is already gone and the caller winds down from what it
 /// reported. A second signal still exits at once.
 struct SingleWorkerInterrupts {
     _guard: crate::scheduling::interrupt::Guard,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The session reported a SIGINT of its own (see
+    /// [`Self::session_got_sigint`]).
+    got_sigint: std::sync::Arc<std::sync::atomic::AtomicBool>,
     forwarder: Option<std::thread::JoinHandle<()>>,
 }
+
+/// How long after our SIGINT the session has to report one of its own (a
+/// group-wide signal reaches it at the same time) before it is passed on.
+#[cfg(unix)]
+const SIGINT_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl SingleWorkerInterrupts {
     fn install(child: Option<u32>) -> Self {
         use std::sync::atomic::AtomicBool;
         let guard = crate::scheduling::interrupt::Guard::install();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let got_sigint = std::sync::Arc::new(AtomicBool::new(false));
         #[cfg(unix)]
         let forwarder = child.map(|pid| {
             let stop = std::sync::Arc::clone(&stop);
+            let got_sigint = std::sync::Arc::clone(&got_sigint);
             std::thread::spawn(move || {
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    if crate::scheduling::interrupt::requested() == Some(libc::SIGTERM) {
+                use std::sync::atomic::Ordering::SeqCst;
+                // When our SIGINT was seen; None until one arrives.
+                let mut sigint: Option<std::time::Instant> = None;
+                while !stop.load(SeqCst) {
+                    let forward = match crate::scheduling::interrupt::requested() {
+                        Some(libc::SIGTERM) => true,
+                        Some(libc::SIGINT) => {
+                            let at = sigint.get_or_insert_with(std::time::Instant::now);
+                            at.elapsed() >= SIGINT_GRACE && !got_sigint.load(SeqCst)
+                        }
+                        _ => false,
+                    };
+                    if forward {
                         // SAFETY: sending a signal touches no memory. The pid
                         // is our unreaped child (the caller drops this guard,
                         // joining the thread, before reaping it), so it cannot
@@ -1831,8 +1871,15 @@ impl SingleWorkerInterrupts {
         Self {
             _guard: guard,
             stop,
+            got_sigint,
             forwarder,
         }
+    }
+
+    /// The session caught a SIGINT itself: never send it another.
+    fn session_got_sigint(&self) {
+        self.got_sigint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2260,7 +2307,22 @@ fn parse_numprocesses(value: &str, args: &[String]) -> Result<usize> {
 ///
 /// A walk with no Python file at all (an empty folder) means one worker,
 /// unless `args` name a path the walk didn't cover.
+///
+/// Memory caps it last: when the recorded peak worker RSS times the count
+/// would not fit the memory limit, fewer workers (said on stderr, where the
+/// sizing notes go).
 fn auto_workers(args: &[String]) -> usize {
+    let n = auto_workers_by_cpu(args);
+    match crate::scheduling::memory::cap(n) {
+        Some(cap) => {
+            eprintln!("{}", cap.note());
+            cap.workers
+        }
+        None => n,
+    }
+}
+
+fn auto_workers_by_cpu(args: &[String]) -> usize {
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(4);
@@ -2716,6 +2778,10 @@ fn fold_run_event(
             run.collect_skips += 1;
             None
         }
+        proto::Event::LfRecollected { path, ids } => {
+            run.lf_recollected.insert(path, ids);
+            None
+        }
         proto::Event::DoctorFixtures { fixtures: fx } => {
             fixtures.extend(fx);
             None
@@ -2745,7 +2811,9 @@ fn fold_run_event(
         | proto::Event::FileCollected { .. }
         | proto::Event::ItemStartId { .. }
         | proto::Event::ItemDoneId { .. }
-        | proto::Event::StoppedIds { .. } => None,
+        | proto::Event::StoppedIds { .. }
+        // Read by the dispatch loop (`SingleWorkerInterrupts`).
+        | proto::Event::Interrupted {} => None,
         proto::Event::JunitCase { nodeid, cases } => {
             run.junit.record_case(nodeid, cases);
             None
@@ -2761,7 +2829,7 @@ fn fold_run_event(
                 .record_suite(name, timestamp, hostname, properties, extra);
             None
         }
-        proto::Event::Done { exitstatus } => Some(exitstatus),
+        proto::Event::Done { exitstatus, .. } => Some(exitstatus),
     }
 }
 
@@ -3969,6 +4037,8 @@ mod tests {
             skip_location: None,
             network: Vec::new(),
             marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -4052,6 +4122,8 @@ mod tests {
                     filename: "t.py".into(),
                     lineno: 1,
                     count: 1,
+                    location: String::new(),
+                    text: String::new(),
                 }]
             }),
             None
@@ -4065,7 +4137,13 @@ mod tests {
             None
         );
         // Done terminates with the exit status.
-        assert_eq!(fold(proto::Event::Done { exitstatus: 1 }), Some(1));
+        assert_eq!(
+            fold(proto::Event::Done {
+                exitstatus: 1,
+                peak_rss: None
+            }),
+            Some(1)
+        );
 
         assert_eq!(run.collect_skips, 1);
         assert_eq!(warnings.len(), 1);

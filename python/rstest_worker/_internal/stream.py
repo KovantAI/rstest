@@ -314,8 +314,8 @@ class StreamPlugin:
         # frame is [tainted]; a narrower-than-session setup starting inside it
         # (request.getfixturevalue in the body) taints every enclosing frame.
         self._setup_stack: list[list[bool]] = []
-        # (when, category, message, filename, lineno) -> count; aggregated
-        # because big suites emit thousands of duplicate warnings.
+        # (when, category, message, filename, lineno, location, text) -> count;
+        # aggregated because big suites emit thousands of duplicate warnings.
         self._warnings: dict[tuple[Any, ...], int] = {}
         # xdist master-side hook emulation (pytest_configure_node etc.):
         # the shim node standing in for xdist's WorkerController.
@@ -323,6 +323,7 @@ class StreamPlugin:
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
         self._config: Any = None  # set at pytest_configure
         self._deselected = 0  # items pytest deselected (-k/-m, hooks)
+        self._lastfailed: dict[str, bool] | None = None  # cache as of session start
 
     # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
     # `testrun_uid` fixtures; a suite migrating off xdist that removes it from
@@ -842,6 +843,8 @@ class StreamPlugin:
                     entry[2] = False
 
     def pytest_warning_recorded(self, warning_message, when, nodeid, location):
+        from _pytest.warnings import warning_record_to_str
+
         m = warning_message
         key = (
             when,
@@ -849,8 +852,23 @@ class StreamPlugin:
             str(m.message)[:400],
             m.filename,
             m.lineno,
+            # What pytest's warnings summary prints: the location line
+            # (WarningReport.get_location) and the formatted warning with its
+            # source line.
+            nodeid or self._warning_fslocation(m),
+            warning_record_to_str(m)[:2000],
         )
         self._warnings[key] = self._warnings.get(key, 0) + 1
+
+    def _warning_fslocation(self, m) -> str:
+        """pytest's location for a warning outside a test: its file, relative
+        to the invocation directory, and line."""
+        from _pytest.pathlib import absolutepath, bestrelpath
+
+        if self._config is None:
+            return f"{m.filename}:{m.lineno}"
+        start = self._config.invocation_params.dir
+        return f"{bestrelpath(start, absolutepath(m.filename))}:{m.lineno}"
 
     def pytest_sessionfinish(self, session, exitstatus):
         # xdist masters call testnodedown as each worker finishes (sqlalchemy
@@ -866,8 +884,18 @@ class StreamPlugin:
                     "filename": fname,
                     "lineno": lineno,
                     "count": count,
+                    "location": location,
+                    "text": text,
                 }
-                for (when, cat, msg, fname, lineno), count in self._warnings.items()
+                for (
+                    when,
+                    cat,
+                    msg,
+                    fname,
+                    lineno,
+                    location,
+                    text,
+                ), count in self._warnings.items()
             ]
             self._conn.send("warnings", {"entries": entries})
         if self._doctor and self._fixtures:
@@ -914,6 +942,11 @@ class StreamPlugin:
         }
         if is_subtest_report(report):
             payload["subtest"] = True
+            describe = getattr(report, "_sub_test_description", None) or getattr(
+                report, "sub_test_description", None
+            )
+            if callable(describe):
+                payload["subtest_desc"] = str(describe())
         elif self._config is not None and report.when == "call" and report.outcome == "passed":
             # pytest fails a `subtests`-fixture parent with failed subtests
             # only when rendering its status, possibly after this hook ran.
@@ -969,6 +1002,8 @@ class StreamPlugin:
         marker_timeout = getattr(report, "_rstest_marker_timeout", None)
         if marker_timeout is not None:
             payload["marker_timeout"] = marker_timeout
+        if getattr(report, "_rstest_no_rerun", False):
+            payload["no_rerun"] = True
         cause = getattr(report, "_rstest_cause", None)
         if cause is not None and not is_subtest_report(report):
             payload["cause"] = cause
@@ -987,6 +1022,20 @@ class StreamPlugin:
             )
         elif report.skipped:
             self._conn.send("collect_skip", {"path": report.nodeid})
+        # pytest's LFPlugin swaps a once-failing collector's lastfailed key for
+        # the nodeids it yields now; the orchestrator writes the merged cache,
+        # so tell it (only the worker sees the collect report).
+        if not report.failed and report.nodeid in self._previous_lastfailed():
+            self._conn.send(
+                "lf_recollected",
+                {"path": report.nodeid, "ids": [x.nodeid for x in report.result]},
+            )
+
+    def _previous_lastfailed(self) -> dict[str, bool]:
+        if self._lastfailed is None:
+            cache = getattr(self._config, "cache", None)
+            self._lastfailed = cache.get("cache/lastfailed", {}) if cache is not None else {}
+        return self._lastfailed
 
     def pytest_internalerror(self, excrepr):
         self._conn.send(

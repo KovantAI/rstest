@@ -19,6 +19,7 @@ if _vendor not in sys.path:
 # Absolute (not relative) imports: multiprocessing-spawn and anyio
 # to_process re-execute the parent's __main__ file via runpy without
 # package context, where relative imports raise ImportError.
+from rstest_worker._internal import messages as m
 from rstest_worker._internal import protocol, runner_pytest
 
 
@@ -71,20 +72,25 @@ def _fork_pool(argv: list[str]) -> None:
     report_fd = int(argv[1])
     release_fd = int(argv[2])
     fds = [int(a) for a in argv[3:]]
-    # cmd/evt fds are interleaved per worker: [cmd0, evt0, cmd1, evt1, ...].
-    pairs = [(fds[2 * i], fds[2 * i + 1]) for i in range(count)]
+    # cmd/evt/stderr fds are interleaved per worker: [cmd0, evt0, err0, ...].
+    triples = [(fds[3 * i], fds[3 * i + 1], fds[3 * i + 2]) for i in range(count)]
     all_fds = set(fds) | {report_fd, release_fd}
 
     pids = []
-    for idx, (cmd_fd, evt_fd) in enumerate(pairs):
+    for idx, (cmd_fd, evt_fd, err_fd) in enumerate(triples):
         pid = os.fork()
         if pid == 0:
-            # Child: keep only this worker's own pipe pair; a sibling's evt-write
+            # Child: keep only this worker's own pipes; a sibling's evt-write
             # fd left open here would keep the orchestrator's read end from ever
             # seeing EOF when that sibling dies, breaking crash detection.
-            for fd in all_fds - {cmd_fd, evt_fd}:
+            for fd in all_fds - {cmd_fd, evt_fd, err_fd}:
                 with contextlib.suppress(OSError):
                     os.close(fd)
+            # Its own stderr pipe, so the orchestrator prints a startup error
+            # every worker hits once (and keeps a tail for a crash report).
+            sys.stderr.flush()
+            os.dup2(err_fd, 2)
+            os.close(err_fd)
             os.environ["RSTEST_WORKER_ID"] = f"gw{idx}"
             # Exactly worker 0 ships the full id list (matches build_worker_command).
             os.environ["RSTEST_SEND_IDS"] = "1" if idx == 0 else "0"
@@ -119,20 +125,37 @@ def _fork_pool(argv: list[str]) -> None:
     os._exit(0)
 
 
+def _peak_rss() -> int | None:
+    """This process's peak resident set size in bytes, None where it can't be
+    read (no `resource` module on Windows). ru_maxrss is KiB on Linux, bytes
+    on macOS."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak if sys.platform == "darwin" else peak * 1024)
+
+
+def _done(conn, exitstatus: int) -> None:
+    payload: m.DonePayload = {"exitstatus": exitstatus}
+    peak = _peak_rss()
+    if peak is not None:
+        payload["peak_rss"] = peak
+    conn.send("done", payload)
+
+
 def _serve(conn) -> None:
     for cmd in conn.commands():
         kind = cmd["kind"]
         if kind == "shutdown":
             break
         if kind == "run_tests":
-            exitstatus = runner_pytest.run(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run(cmd["payload"]["args"], conn))
         elif kind == "run_items_session":
-            exitstatus = runner_pytest.run_session(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run_session(cmd["payload"]["args"], conn))
         elif kind == "run_lazy_session":
-            exitstatus = runner_pytest.run_lazy_session(cmd["payload"]["args"], conn)
-            conn.send("done", {"exitstatus": exitstatus})
+            _done(conn, runner_pytest.run_lazy_session(cmd["payload"]["args"], conn))
 
 
 # Guarded like multiprocessing requires: child runtimes (multiprocessing

@@ -7,6 +7,26 @@ between 0.x releases and are listed here.
 
 ### Features
 
+- **`@pytest.mark.isolated` runs a test in a forked process.** What the test
+  changes in its worker (module globals, `os.environ`, `sys.modules`, a
+  monkeypatch it never undid, a thread it left running) dies with the fork,
+  so a known polluter stays in the parallel run without breaking the tests
+  after it. Fixtures stay balanced: the worker keeps what it had set up, and
+  the fork tears down only what it added. A fork that dies is one failed
+  test, not a crashed worker. Works at any `-n` and with `--collect lazy`;
+  Unix only (Windows runs the test in its worker, with a warning). `rstest
+  bisect`, the doctor's leak section and `--fail-on-leak` now suggest it.
+
+- **`-n auto` sizes the pool by memory too.** Every worker reports its peak
+  RSS when its session ends, and rstest keeps the largest of each of the last
+  5 runs in `.rstest_cache/memory.json`. The next `-n auto` runs no more
+  workers than fit in 80% of the memory limit (the cgroup limit on Linux, so a
+  container's, else physical RAM) and says so: `rstest: -n auto capped at 3
+  workers by memory (peak worker RSS 2.1 GiB recorded, 8.0 GiB available)`.
+  An explicit `-n` is never capped. A worker killed by a SIGKILL rstest didn't
+  send now reads `killed by signal 9 (SIGKILL: likely the out-of-memory
+  killer; ...)` instead of a bare crash. Not on Windows yet.
+
 - **Per-test run history, shown by `rstest explain`.** rstest now keeps each
   test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
   setup time, commit). `rstest explain`
@@ -152,6 +172,76 @@ between 0.x releases and are listed here.
   `when="???"` report; rstest dropped it, so the test showed no progress
   line and the summary counted an error. Any phase but setup and teardown
   now counts as the test itself, as in pytest.
+
+- **The GitHub Action's `rerun-on` takes a regex with a comma.** Entries are
+  split on commas, so `timeout{1,3}` became two broken patterns. Write a comma
+  inside a regex as `\,` (`timeout{1\,3}`); it reaches `--only-rerun` as a
+  plain comma.
+
+- **At `-n 0`, a SIGINT sent to rstest's pid alone stops the session.**
+  `kill -INT <pid>` was recorded but never reached pytest, which ran every
+  remaining test. The pytest session now tells rstest when it got a SIGINT
+  itself; if it says nothing within half a second, rstest passes the signal
+  on, so a test stuck in a sleep or on a lock stops on the first signal. A
+  Ctrl-C or CI cancel, which reaches the whole process group, is still never
+  sent twice.
+
+- **`@pytest.mark.flaky`'s `only_rerun`, `rerun_except` and `reruns_delay`
+  are honored.** They were ignored, so a failure the mark excluded was still
+  retried. They now filter and delay as pytest-rerunfailures does (each
+  exception in the chain matched as `Type: message`, or an exception class),
+  at every worker count. In a pool the worker waits `reruns_delay` after every
+  failed attempt that may be retried, the last one included.
+
+- **`--collect lazy` collects a file named on the command line whatever its
+  name**, as pytest does. A file outside `python_files` (`check_x.py`) was
+  dropped from the run.
+
+- **A lazy-collection run no longer aborts on a send to a dead worker.** A
+  worker that died between two dispatches made the run exit with
+  `Error: Broken pipe`; its tests are now requeued as they are on any worker
+  crash. And tests still handed to the last worker when its session ended on
+  its own are reported as not run (`not run: its worker's session ended
+  ...`), not silently dropped with exit 0.
+
+- **`--fork-pool` prints a startup error once**, not once per worker. A
+  broken `conftest.py` printed its `ImportError` from every forked worker,
+  which shared the zygote's stderr; each now has its own stderr pipe, deduped
+  as in the plain pool, and a forked worker that dies names its last stderr
+  lines as a spawned one does.
+
+- **`audit` and `migrate-check` no longer call a race an order dependency.**
+  A test alone in its file that passes under `--dist loadfile` has no in-file
+  order for loadfile to keep: it won a race against another file's test for
+  a shared resource. It is now a CONCURRENT RACE (`audit` lists it with the
+  `@pytest.mark.serial` fixes) instead of ORDER DEPENDENCY with
+  `--dist loadfile` advice.
+
+- **The parallel warnings summary and short summary print as pytest's.** Each
+  warning is listed under the tests that raised it (or the file and line, for
+  one outside a test; per-file counts from 10 tests on) with its source line,
+  where it showed only `path:line: Category` and the message. A failed subtest
+  reads `SUBFAILED(i=1) nodeid - message` in the short summary, not `FAILED`.
+
+- **The short test summary matches pytest's markup and width.** With color
+  on, the test part of each nodeid is bold. Messages are trimmed by terminal
+  columns, not characters, so a message with wide characters (CJK, emoji) no
+  longer runs past the terminal edge.
+
+- **A failed subtest shows as pytest's `u` in the progress line** and as
+  `SUBFAILED(<desc>)` under `-v`. It no longer counts as an extra finished
+  test, which gave an early or repeated `[100%]`.
+
+- **`--lf` keeps a recovered file's unrun tests after a parallel run.** When a
+  file that failed to collect last time collects again, its tests that did
+  not run (deselected with `-k` / `-m`, or cut by `-x` / `--maxfail`) stay
+  recorded as failed, as in pytest. The file used to drop out of the
+  last-failed cache, so the next `--lf` skipped them.
+
+- **`--shard` and lazy scheduling use cached durations on Windows.** File
+  paths were matched against the duration cache with backslash separators,
+  so every file looked untimed and shards and file order were not balanced by
+  runtime.
 
 ## 0.9.0 (2026-10-06)
 

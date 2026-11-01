@@ -130,6 +130,14 @@ pub struct Report {
     /// has one (the doctor's TIMEOUTS section skips a test it covers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_timeout: Option<f64>,
+    /// Failed report: the test's `@pytest.mark.flaky` `only_rerun` /
+    /// `rerun_except` rule out a rerun for this failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_rerun: bool,
+    /// A subtest's description as pytest prints it after `SUBFAILED`
+    /// (`(i=1)`, `[msg] (i=1)`); absent on any other report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtest_desc: Option<String>,
 }
 
 /// What a failure raised and where (see [`Report::cause`]).
@@ -155,6 +163,14 @@ pub struct WarningEntry {
     pub filename: String,
     pub lineno: u64,
     pub count: u64,
+    /// pytest's location line for the warnings summary: the test's nodeid,
+    /// else `path:line` relative to the invocation directory.
+    #[serde(default)]
+    pub location: String,
+    /// The warning as pytest prints it: `path:line: Category: message` and
+    /// the source line. Empty from a worker that predates it.
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -201,6 +217,13 @@ pub enum Event {
     CollectSkip {
         #[allow(dead_code)]
         path: String,
+    },
+    /// A collector the previous lastfailed recorded as failed collected now;
+    /// `ids` are the nodeids it yielded (`report.result`), which pytest's
+    /// LFPlugin records as failed in its place until they run.
+    LfRecollected {
+        path: String,
+        ids: Vec<String>,
     },
     /// Doctor mode: per-fixture setup timing, sent at session finish.
     DoctorFixtures {
@@ -352,8 +375,15 @@ pub enum Event {
         reason: String,
         returncode: i32,
     },
+    /// Single session: a SIGINT reached pytest (KeyboardInterrupt), so the
+    /// orchestrator must not pass on the one it caught.
+    Interrupted {},
     Done {
         exitstatus: i32,
+        /// The worker's peak RSS in bytes over its session (memory-aware
+        /// `-n auto`); absent where it can't be read (Windows).
+        #[serde(default)]
+        peak_rss: Option<u64>,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -456,6 +486,8 @@ mod tests {
         let json = serde_json::to_value(Report {
             network: Vec::new(),
             marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
             ..r
         })
         .unwrap();
@@ -519,7 +551,19 @@ mod tests {
         ));
         assert!(matches!(
             from_python(serde_json::json!({"kind": "done", "payload": {"exitstatus": 5}})),
-            Event::Done { exitstatus: 5 }
+            Event::Done {
+                exitstatus: 5,
+                peak_rss: None
+            }
+        ));
+        assert!(matches!(
+            from_python(
+                serde_json::json!({"kind": "done", "payload": {"exitstatus": 0, "peak_rss": 1024}})
+            ),
+            Event::Done {
+                exitstatus: 0,
+                peak_rss: Some(1024)
+            }
         ));
         assert!(matches!(
             from_python(serde_json::json!({"kind": "stopped", "payload": {"unrun": [1, 2]}})),
@@ -587,6 +631,8 @@ mod property {
                 skip_location: None,
                 network: Vec::new(),
                 marker_timeout: None,
+                no_rerun: false,
+                subtest_desc: None,
             }
         }
     }
@@ -607,8 +653,9 @@ mod property {
         fn arb_warning()(
             when in small_str(), category in small_str(), message in small_str(),
             filename in small_str(), lineno in any::<u64>(), count in any::<u64>(),
+            location in small_str(), text in small_str(),
         ) -> WarningEntry {
-            WarningEntry { when, category, message, filename, lineno, count }
+            WarningEntry { when, category, message, filename, lineno, count, location, text }
         }
     }
 
@@ -665,6 +712,7 @@ mod property {
             (small_str(), small_str())
                 .prop_map(|(path, longrepr)| Event::CollectError { path, longrepr }),
             small_str().prop_map(|path| Event::CollectSkip { path }),
+            (small_str(), small_strs()).prop_map(|(path, ids)| Event::LfRecollected { path, ids }),
             prop::collection::vec(arb_fixture(), 0..4)
                 .prop_map(|fixtures| Event::DoctorFixtures { fixtures }),
             prop::collection::vec(arb_warning(), 0..4)
@@ -693,7 +741,12 @@ mod property {
             prop::collection::vec(any::<u64>(), 0..4).prop_map(|unrun| Event::Stopped { unrun }),
             (small_str(), any::<i32>())
                 .prop_map(|(reason, returncode)| Event::SessionExit { reason, returncode }),
-            any::<i32>().prop_map(|exitstatus| Event::Done { exitstatus }),
+            (any::<i32>(), proptest::option::of(any::<u64>())).prop_map(
+                |(exitstatus, peak_rss)| Event::Done {
+                    exitstatus,
+                    peak_rss
+                }
+            ),
             (small_str(), small_strs())
                 .prop_map(|(nodeid, cases)| Event::JunitCase { nodeid, cases }),
             (

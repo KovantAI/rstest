@@ -1,6 +1,7 @@
 """e2e gate sections: flaky."""
 
 import json
+import shutil
 import time
 
 from _harness import CRASHFLAKY, FLAKY, MARKS, check, git, git_commit, git_init_commit
@@ -844,3 +845,54 @@ def gate_flaky_marks_only_rerun(g, args, binary):
         "1 flaky" in r.stdout and cnt.read_text() == "1",
         f"count={cnt.read_text()} " + r.stdout[-160:],
     )
+    # The mark's own only_rerun / rerun_except (R15): the worker rules the
+    # failure out, the orchestrator honors it, at any -n and with lazy.
+    g.write("markfilters/test_filters.py", MARK_FILTERS)
+    for mode in (("-n", "2"), ("-n", "2", "--collect", "lazy")):
+        # One file per test: workers appending to a shared file race on
+        # Windows (CRT "a" mode is seek+write, not atomic), dropping hits.
+        hits = g.tmp / "markfilters_hits"
+        shutil.rmtree(hits, ignore_errors=True)
+        hits.mkdir()
+        g.run(
+            "test_filters.py",
+            *mode,
+            cwd=g.tmp / "markfilters",
+            env_extra={"HITS": str(hits)},
+        )
+        counts = {f.name: len(f.read_text().split()) for f in hits.iterdir()}
+        check(
+            f"flaky mark only_rerun / rerun_except ({' '.join(mode)})",
+            counts == {"nomatch": 1, "match": 3, "except": 1},
+            str(counts),
+        )
+
+
+MARK_FILTERS = """
+import os
+
+import pytest
+
+
+def hit(name):
+    with open(os.path.join(os.environ["HITS"], name), "a") as f:
+        f.write(name + "\\n")
+
+
+@pytest.mark.flaky(reruns=2, only_rerun=["ValueError"])
+def test_nomatch():
+    hit("nomatch")
+    assert False
+
+
+@pytest.mark.flaky(reruns=2, only_rerun="ValueError")
+def test_match():
+    hit("match")
+    raise ValueError("boom")
+
+
+@pytest.mark.flaky(reruns=2, rerun_except=["AssertionError"])
+def test_except():
+    hit("except")
+    assert False
+"""
