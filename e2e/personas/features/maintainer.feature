@@ -621,9 +621,9 @@ Feature: Suite maintainer
       Then the run succeeds
       And stdout contains "5 passed"
       And the report "r.json" has 4 "test_slow" tests
+      # One long pole per worker, not two. Asserted on worker ids, not wall
+      # time: worker spawn on Windows CI alone exceeds a 1.0s pole.
       And the "test_slow" tests in "r.json" each ran on a different worker
-      # One long pole per worker, not two (two would be >= 2.0s of sleep).
-      And the JSON file "r.json" has "meta.duration_seconds" < 1.95
 
   Rule: an order-dependent failure can be reproduced and pinned on its polluter
 
