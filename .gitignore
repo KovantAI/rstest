@@ -34,3 +34,6 @@ corpus/bench.json
 !.claude/skills/rstest-triage
 plugins/rstest/skills/*-workspace/
 .cursor
+
+.fermut
+coverage.json

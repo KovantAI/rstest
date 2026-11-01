@@ -323,6 +323,7 @@ class StreamPlugin:
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
         self._config: Any = None  # set at pytest_configure
         self._deselected = 0  # items pytest deselected (-k/-m, hooks)
+        self._lastfailed: dict[str, bool] | None = None  # cache as of session start
 
     # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
     # `testrun_uid` fixtures; a suite migrating off xdist that removes it from
@@ -1014,6 +1015,20 @@ class StreamPlugin:
             )
         elif report.skipped:
             self._conn.send("collect_skip", {"path": report.nodeid})
+        # pytest's LFPlugin swaps a once-failing collector's lastfailed key for
+        # the nodeids it yields now; the orchestrator writes the merged cache,
+        # so tell it (only the worker sees the collect report).
+        if not report.failed and report.nodeid in self._previous_lastfailed():
+            self._conn.send(
+                "lf_recollected",
+                {"path": report.nodeid, "ids": [x.nodeid for x in report.result]},
+            )
+
+    def _previous_lastfailed(self) -> dict[str, bool]:
+        if self._lastfailed is None:
+            cache = getattr(self._config, "cache", None)
+            self._lastfailed = cache.get("cache/lastfailed", {}) if cache is not None else {}
+        return self._lastfailed
 
     def pytest_internalerror(self, excrepr):
         self._conn.send(

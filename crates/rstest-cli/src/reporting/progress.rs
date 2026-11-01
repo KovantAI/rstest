@@ -18,6 +18,8 @@ enum OutcomeKind {
     Pass,
     XPass,
     Fail,
+    /// A failed subtest: pytest's `u` / `SUBFAILED`.
+    SubFail,
     Skip,
     XFail,
     SetupError,
@@ -39,6 +41,7 @@ impl OutcomeKind {
             Pass => '.',
             XPass => 'X',
             Fail => 'F',
+            SubFail => 'u',
             Skip => 's',
             XFail => 'x',
             // Failed setup/teardown both draw 'E'.
@@ -53,6 +56,7 @@ impl OutcomeKind {
             Pass => "PASSED",
             XPass => "XPASS",
             Fail => "FAILED",
+            SubFail => "SUBFAILED",
             Skip => "SKIPPED",
             XFail => "XFAIL",
             SetupError | TeardownError => "ERROR",
@@ -66,7 +70,7 @@ impl OutcomeKind {
         match self {
             Pass => ("✓", Palette::green),
             XPass => ("X", Palette::yellow),
-            Fail => ("✗", Palette::red),
+            Fail | SubFail => ("✗", Palette::red),
             Skip => ("s", Palette::yellow),
             XFail => ("x", Palette::yellow),
             SetupError | TeardownError => ("E", Palette::red),
@@ -80,9 +84,9 @@ impl OutcomeKind {
 fn outcome_kind(r: &Report) -> Option<OutcomeKind> {
     use OutcomeKind::*;
     // Passing/skipped subtests are not tests of their own (pytest hides them
-    // by default); a failed one shows as a failure.
-    if r.subtest && r.outcome != "failed" {
-        return None;
+    // by default); a failed one shows as pytest's `u`.
+    if r.subtest {
+        return (r.outcome == "failed").then_some(SubFail);
     }
     // Any phase but setup/teardown is the test itself, as pytest shows it
     // (pytest-forked reports a crashed child as `when="???"`).
@@ -159,6 +163,8 @@ pub enum Mode {
 #[derive(Default)]
 pub struct Progress {
     done: usize,
+    /// Tests already counted by a failed subtest, awaiting their own report.
+    subtest_counted: std::collections::HashSet<String>,
     col: usize,
     total: Option<usize>,
     mode: Mode,
@@ -226,6 +232,19 @@ impl Progress {
         }
     }
 
+    /// Advance the finished-test counter once per test, as pytest counts
+    /// nodeids: a test's first failed subtest counts it, and neither its
+    /// later subtests nor its own report count it again.
+    fn count(&mut self, kind: OutcomeKind, r: &Report) {
+        let first = match kind {
+            OutcomeKind::SubFail => self.subtest_counted.insert(r.nodeid.clone()),
+            _ => kind.counts_done() && !self.subtest_counted.remove(&r.nodeid),
+        };
+        if first {
+            self.done += 1;
+        }
+    }
+
     /// The running-percentage suffix ` [ NN%]`, clamped to 100 — reruns push
     /// `done` past `total`, so an unclamped `done*100/t` prints `[103%]`. The
     /// ONE clamp site for every renderer's percentage. `None` when the total is
@@ -274,9 +293,7 @@ impl Progress {
         let Some(kind) = outcome_kind(r) else {
             return;
         };
-        if kind.counts_done() {
-            self.done += 1;
-        }
+        self.count(kind, r);
         let painted = palette.outcome(&kind.dot().to_string());
         self.out_inline(sink, &painted);
         self.col += 1;
@@ -296,15 +313,16 @@ impl Progress {
         let Some(kind) = outcome_kind(r) else {
             return;
         };
-        if kind.counts_done() {
-            self.done += 1;
-        }
+        self.count(kind, r);
         let pct = self.pct_suffix().unwrap_or_default();
         let prefix = worker.map(|w| format!("[gw{w}] ")).unwrap_or_default();
+        // pytest names the subtest: `SUBFAILED(i=1)`.
+        let desc = r.subtest_desc.as_deref().unwrap_or_default();
+        let word = format!("{}{desc}", kind.word());
         let line = format!(
             "{prefix}{} {}{pct}",
             r.nodeid,
-            sink.palette().outcome(kind.word())
+            sink.palette().outcome(&word)
         );
         self.out_line(sink, &line);
     }
@@ -317,9 +335,7 @@ impl Progress {
             return;
         };
         let (sym, color) = kind.symbol();
-        if kind.counts_done() {
-            self.done += 1;
-        }
+        self.count(kind, r);
         let pct = self.pct_suffix().unwrap_or_default();
         let dur = if r.duration >= 0.0005 {
             format!("  {:.2}s", r.duration)
@@ -513,7 +529,7 @@ fn tap_result_line(n: usize, r: &Report) -> Option<String> {
             r.nodeid,
             directive("TODO", Some("unexpectedly passed"))
         ),
-        Fail => format!("not ok {n} - {}", r.nodeid),
+        Fail | SubFail => format!("not ok {n} - {}", r.nodeid),
         XFail => format!(
             "not ok {n} - {}{}",
             r.nodeid,
@@ -545,7 +561,7 @@ fn teamcity_messages(r: &Report) -> Option<String> {
     let middle = match kind {
         // xpass rides through as a plain pass (TeamCity has no xpass concept).
         Pass | XPass => None,
-        Fail | SetupError | TeardownError => {
+        Fail | SubFail | SetupError | TeardownError => {
             let details = r.longrepr.as_deref().unwrap_or("");
             Some(format!(
                 "##teamcity[testFailed name='{name}' message='{} failed' details='{}']",
@@ -677,8 +693,38 @@ mod tests {
         assert!(outcome_kind(&sub("skipped")).is_none());
         assert!(matches!(
             outcome_kind(&sub("failed")),
-            Some(OutcomeKind::Fail)
+            Some(OutcomeKind::SubFail)
         ));
+    }
+
+    #[test]
+    fn a_failed_subtest_draws_u_and_counts_its_test_once_like_pytest() {
+        let sub = |desc: &str| Report {
+            subtest: true,
+            subtest_desc: Some(desc.into()),
+            ..report("call", "failed")
+        };
+        let (mut sink, buf) = Sink::captured();
+        let mut p = Progress::default();
+        p.set_total(2);
+        p.on_report(&mut sink, None, &sub("(i=1)"));
+        p.on_report(&mut sink, None, &sub("(i=2)"));
+        p.on_report(&mut sink, None, &report("call", "failed"));
+        assert_eq!(buf.out(), "uuF");
+        assert_eq!(p.done, 1, "one test, counted once");
+
+        // -v: the subtest's line is named and sits at the test's percentage.
+        let (mut sink, buf) = Sink::captured();
+        let mut p = Progress::default();
+        p.set_mode(Mode::Verbose);
+        p.set_total(2);
+        p.on_report(&mut sink, None, &sub("(i=1)"));
+        p.on_report(&mut sink, None, &report("call", "failed"));
+        assert_eq!(
+            buf.out(),
+            "tests/test_a.py::test_x SUBFAILED(i=1) [ 50%]\n\
+             tests/test_a.py::test_x FAILED [ 50%]\n"
+        );
     }
 
     #[test]

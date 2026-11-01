@@ -591,6 +591,10 @@ pub fn run_pool(
                     run.collect_skips += 1;
                 }
             }
+            Ok(Event::LfRecollected { path, ids }) => {
+                // Every worker collects the same tree; the map dedups.
+                run.lf_recollected.insert(path, ids);
+            }
             Ok(Event::CollectionDone {
                 count,
                 hash,
@@ -949,7 +953,9 @@ pub fn run_pool(
             | Ok(Event::FileCollected { .. })
             | Ok(Event::ItemStartId { .. })
             | Ok(Event::ItemDoneId { .. })
-            | Ok(Event::StoppedIds { .. }) => {}
+            | Ok(Event::StoppedIds { .. })
+            // Single-session only.
+            | Ok(Event::Interrupted {}) => {}
             Err(e) => {
                 // Name the cause (exit status, stderr tail) before anything below
                 // reaps the worker, which kills first and would hide it.
