@@ -21,6 +21,7 @@ site/
 corpus/work/
 corpus/lock.json
 corpus/results.json
+corpus/history/
 # bench.py's latest run; published runs are archived in corpus/bench-results/.
 corpus/bench.json
 .claude/*

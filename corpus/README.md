@@ -38,6 +38,12 @@ Two strict phases:
 2. **execute**, fully offline: baseline run, rstest run, diff. Results
    land in `results.json` and a markdown table on stdout.
 
+`results.json` holds the latest row per suite: an `--only`/`--skip` run
+replaces just its suites' rows, and each row's `run` names the run it came
+from. Every run also writes `history/<run id>.json` (both gitignored): its
+rows plus the rstest commit, whether the tree was dirty, the wheel and argv,
+so results can be compared over time.
+
 Reproducibility measures:
 
 - checkouts pinned to `lock.json` SHAs (written on first clone),
@@ -48,7 +54,11 @@ Reproducibility measures:
   before counting missing/extra,
 - a suite's `noisy` node-ID prefixes in `suites.toml` (outcomes that move
   between any two runs: live network, GC timing, upstream order pollution)
-  are left out of the score and counted under `noisy_excluded`,
+  are left out of the score and counted under `noisy_excluded`; its
+  `noisy_failures` markers (e.g. `PytestUnraisableExceptionWarning`, a
+  resource leaked by an earlier test) do the same by cause, for any test or
+  session error whose failure text carries one (`noisy_failure_excluded`,
+  `noisy_session_errors`),
 - the two runs' exit codes are compared too (`pytest_exit`/`rstest_exit`): a
   suite at 100% parity whose exit codes differ is `exit-diff`, not `ok`. Each
   runner's output is kept next to its snapshot (`pytest.log`, `rstest.log`).

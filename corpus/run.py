@@ -24,12 +24,15 @@ Requires: git, uv, python >= 3.11 (tomllib).
 """
 
 import argparse
+import contextlib
 import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -40,6 +43,9 @@ REPO = HERE.parent
 WORK = HERE / "work"
 LOCK = HERE / "lock.json"
 RESULTS = HERE / "results.json"
+# One file per run (its suites only, plus what it ran against): results.json
+# is the latest row per suite, this is the record over time.
+HISTORY = HERE / "history"
 
 PHASE_TIMEOUT = 2400  # seconds, per pytest/rstest run
 # Baseline pytest is PINNED to the version rstest vendors: a newer pytest
@@ -65,6 +71,85 @@ def sh(args, cwd=None, env=None, timeout=PHASE_TIMEOUT):
         capture_output=True,
         text=True,
     )
+
+
+def _wipe(path):
+    """rmtree that also clears mode-000 dirs some suites leave behind."""
+    for root, dirs, _ in os.walk(path):  # top-down: chmod before descending
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o700)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _private_tmp(env):
+    """A fresh TMPDIR for one runner invocation. Both runners otherwise share
+    $TMPDIR/pytest-of-<user>, whose numbered-dir cleanup runs at every session
+    end: a mode-000 dir one suite leaves there (flask's
+    test_static_directory_without_*) makes pytest's rm_rf warn, and under a
+    LATER suite's `filterwarnings = error` that crashes its session exit 1,
+    pytest and rstest alike (2026-11-02: flask, click, jinja2). Made under
+    /tmp, shorter than macOS's /var/folders/.../T: AF_UNIX socket paths cap at
+    104 bytes, and anyio's socket tests broke under the longer root.
+    """
+    path = tempfile.mkdtemp(prefix="rsc-", dir="/tmp" if os.path.isdir("/tmp") else None)
+    env["TMPDIR"] = path
+    try:
+        yield
+    finally:
+        _wipe(path)
+
+
+def _run_meta(wheel, argv):
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=REPO, capture_output=True, text=True).stdout.strip()
+
+    return {
+        "id": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        "rstest_commit": git("rev-parse", "--short=12", "HEAD"),
+        "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+        "wheel": Path(wheel).name,
+        "argv": argv,
+    }
+
+
+def _save(results, order, run, history=True):
+    """Merge this run's rows into results.json (other suites keep their last
+    row, so `--only` no longer wipes them) and write the run's history file.
+    A row is replaced whole; `history=False` (prepare-only) merges its fields
+    into the existing row instead, keeping that row's parity."""
+    try:
+        prior = {r["suite"]: r for r in json.loads(RESULTS.read_text())}
+    except (FileNotFoundError, json.JSONDecodeError):
+        prior = {}
+    for name, row in results.items():
+        prior[name] = {**row, "run": run["id"]} if history else {**prior.get(name, {}), **row}
+    RESULTS.write_text(json.dumps([prior[n] for n in order if n in prior], indent=1))
+    if history:
+        HISTORY.mkdir(exist_ok=True)
+        doc = {"run": run, "results": list(results.values())}
+        (HISTORY / f"{run['id']}.json").write_text(json.dumps(doc, indent=1))
+
+
+_EDITABLES = """
+import json, importlib.metadata as m
+out = []
+for d in m.distributions():
+    t = d.read_text("direct_url.json")
+    if t and json.loads(t).get("dir_info", {}).get("editable"):
+        out.append(json.loads(t)["url"])
+print(json.dumps(out))
+"""
+
+
+def _editable_dirs(python, env=None):
+    """Directories the venv has installed editable (PEP 610 direct_url.json)."""
+    from urllib.parse import unquote, urlparse
+
+    r = subprocess.run([str(python), "-c", _EDITABLES], capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        raise RuntimeError(f"editable probe failed: {r.stderr[-400:]}")
+    return {Path(unquote(urlparse(u).path)).resolve() for u in json.loads(r.stdout)}
 
 
 def _strip_opt(args, opt):
@@ -220,6 +305,7 @@ class Suite:
                 if last:
                     raise last
         self.pip(PYTEST_PIN, str(self.wheel))
+        self.check_editables()
         # Optional compat shim: a rootdir conftest.py written into the checkout,
         # loaded before collection by BOTH runners (same src), so parity holds.
         # Used to re-provide a private pytest symbol a pinned suite still imports
@@ -230,6 +316,40 @@ class Suite:
             (self.src / "conftest.py").write_text(shim)
             log(f"  {self.name}: wrote compat conftest.py")
         log(f"  {self.name}: prepared")
+
+    def expected_editables(self):
+        """Checkouts the install steps put in editable. A later step can
+        silently swap one for a PyPI release when the checkout's version
+        doesn't satisfy a dependency's floor (python-dateutil: tagless shallow
+        clone -> setuptools_scm 0.1.devN < freezegun's >=2.7), and the suite
+        then tests PyPI code, not the pinned commit."""
+        if self.mode == "pyargs":
+            return []
+        if self.mode == "mono":
+            return [self.src / proj for proj in self.cfg["projects"]]
+        steps = self.cfg.get("install")
+        if steps is None:  # the fallback attempts all install `-e .`
+            return [self.src]
+        pairs = [
+            (a, b) for step in steps for a, b in zip(step.split(), step.split()[1:], strict=False)
+        ]
+        # `-r file` pulls its own `-e .` lines (httpx's requirements.txt).
+        for a, b in list(pairs):
+            if a == "-r" and (self.src / b).is_file():
+                lines = (self.src / b).read_text().splitlines()
+                pairs += [tuple(ln.split()[:2]) for ln in lines if len(ln.split()) >= 2]
+        editable = any(a == "-e" and b.split("[")[0] == "." for a, b in pairs)
+        return [self.src] if editable else []
+
+    def check_editables(self):
+        installed = _editable_dirs(self.venv / "bin" / "python", self.env())
+        lost = [d for d in self.expected_editables() if d.resolve() not in installed]
+        if lost:
+            raise RuntimeError(
+                f"editable checkout replaced by a PyPI release: {', '.join(map(str, lost))}. "
+                "A later install step's version floor rejected the checkout's "
+                "version; pin it via env SETUPTOOLS_SCM_PRETEND_VERSION (see python-dateutil)"
+            )
 
     def apply_mono_policy(self):
         # Per-project policy, applied to the cloned pyprojects so BOTH the
@@ -288,20 +408,21 @@ class Suite:
         label = "pytest" if xdist_workers is None else f"xdist -n {xdist_workers}"
         log(f"  {self.name}: {label} starting")
         t0 = time.monotonic()
-        r = sh(
-            [
-                str(self.venv / "bin" / "python"),
-                "-m",
-                "pytest",
-                "-p",
-                "recorder",
-                "-q",
-                *xdist,
-                *self.target_args(),
-            ],
-            cwd=self.cwd(),
-            env=env,
-        )
+        with _private_tmp(env):
+            r = sh(
+                [
+                    str(self.venv / "bin" / "python"),
+                    "-m",
+                    "pytest",
+                    "-p",
+                    "recorder",
+                    "-q",
+                    *xdist,
+                    *self.target_args(),
+                ],
+                cwd=self.cwd(),
+                env=env,
+            )
         wall = time.monotonic() - t0
         log(f"  {self.name}: {label} done in {wall:.1f}s (rc={r.returncode})")
         snap.with_suffix(".log").write_text((r.stdout or "") + (r.stderr or ""))
@@ -346,11 +467,12 @@ class Suite:
             # target_args() (the suite's `args`, e.g. a `-W` filter) must ride
             # the mono baseline too, or it diverges from the rstest candidate
             # (which always forwards them) and reads as a false parity drop.
-            r = sh(
-                [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
-                cwd=proj_dir,
-                env=env,
-            )
+            with _private_tmp(env):
+                r = sh(
+                    [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+                    cwd=proj_dir,
+                    env=env,
+                )
             wall = time.monotonic() - t0
             total += wall
             log(f"  {self.name}: pytest {proj} done in {wall:.1f}s (rc={r.returncode})")
@@ -400,7 +522,9 @@ class Suite:
         nlabel = f"-n {workers}" if workers is not None else "-n auto"
         log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=self.env())
+        env = self.env()
+        with _private_tmp(env):
+            r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=env)
         wall = time.monotonic() - t0
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
         # The snapshot keeps only collect-error paths; the terminal summary has
@@ -442,11 +566,23 @@ def _norm(nodeid):
     return nodeid
 
 
-def diff(baseline_path, candidate_path, noisy=()):
+def _noisy_failure(entries, markers):
+    """Every failing side failed only with a `noisy_failures` marker in its
+    text (e.g. PytestUnraisableExceptionWarning: a resource leaked by an
+    EARLIER test, GC'd during this one; which test catches it is co-location).
+    ponytail: substring match on the failure text; a real failure whose text
+    also carries a marker is excluded too. Structured causes if that bites."""
+    failing = [e for e in entries if "failed" in (e.get("setup"), e.get("call"), e.get("teardown"))]
+    return bool(failing) and all(any(m in e.get("longrepr", "") for m in markers) for e in failing)
+
+
+def diff(baseline_path, candidate_path, noisy=(), noisy_failures=()):
     """Per-test outcome diff. `noisy` is a suite's node-ID prefixes whose
     outcome depends on the machine (live network, GC timing, upstream order
     pollution) and moves between any two runs; they are left out of the score
-    and only counted."""
+    and only counted. `noisy_failures` does the same by cause: error-type
+    markers in the failure text (see `_noisy_failure`), for per-test
+    mismatches and for session errors alike."""
     # Read each snapshot ONCE: the bench's gate needs collect-error counts too,
     # so surface them here rather than re-parsing the same files downstream.
     da = json.loads(Path(baseline_path).read_text())
@@ -459,11 +595,15 @@ def diff(baseline_path, candidate_path, noisy=()):
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
     mismatch = []
+    noisy_failed = 0
     for nid in set(a) & set(b):
         pa = {k: v for k, v in a[nid].items() if k in keys}
         pb = {k: v for k, v in b[nid].items() if k in keys}
         if pa != pb:
-            mismatch.append(nid)
+            if noisy_failures and _noisy_failure((a[nid], b[nid]), noisy_failures):
+                noisy_failed += 1
+            else:
+                mismatch.append(nid)
     # Second pass: pair leftover missing/extra whose normalized IDs match
     # and whose outcomes agree — count those as agreement, not diff.
     norm_b = {}
@@ -485,8 +625,11 @@ def diff(baseline_path, candidate_path, noisy=()):
         still_a.append(nid)
     only_a = still_a
     only_b = [nid for c in norm_b.values() for nid in c]
-    agree = len(set(a) & set(b)) - len(mismatch) + unstable_pairs
-    denom = max(len(set(a) | set(b)) - unstable_pairs, 1)
+    agree = len(set(a) & set(b)) - noisy_failed - len(mismatch) + unstable_pairs
+    denom = max(len(set(a) | set(b)) - unstable_pairs - noisy_failed, 1)
+    reprs = db.get("collect_error_reprs", {})
+    session = [c for c in db.get("collect_errors", []) if c.startswith("<session: ")]
+    noisy_session = [c for c in session if any(m in reprs.get(c, "") for m in noisy_failures)]
     # Of the candidate-only ("extra") tests, how many come from a module the
     # BASELINE failed to collect? Those are explained: rstest rescued a module
     # the drifting baseline dropped. Any extra from a module the baseline DID
@@ -505,8 +648,14 @@ def diff(baseline_path, candidate_path, noisy=()):
         "mismatch_count": len(mismatch),
         "unstable_id_pairs": unstable_pairs,
         "noisy_excluded": noisy_excluded,
+        "noisy_failure_excluded": noisy_failed,
+        "noisy_session_errors": len(noisy_session),
         # Per-test parity can't see a run-level failure: a session error that
         # escapes pytest.main exits 1 with every test passed.
+        # An error that escaped rstest's whole pytest session. Exit codes miss
+        # it when the suite already fails (httpx/pydantic/urllib3, 2026-11-02),
+        # and the recorder has no pytest-side equivalent to pair it with.
+        "session_errors": [c for c in session if c not in noisy_session],
         "pytest_exit": da.get("meta", {}).get("exitstatus"),
         "rstest_exit": db.get("meta", {}).get("exitstatus"),
         "baseline_collect_errors": len(da.get("collect_errors", [])),
@@ -517,10 +666,13 @@ def diff(baseline_path, candidate_path, noisy=()):
 
 
 def _status(res):
-    """`diff` (per-test outcomes differ) wins over `exit-diff` (same outcomes,
-    different exit code). A snapshot without an exit code can't be judged."""
+    """`diff` (per-test outcomes differ) wins over `session-error` (rstest's
+    session itself crashed) and `exit-diff` (same outcomes, different exit
+    code). A snapshot without an exit code can't be judged."""
     if res["score"] != 100.0:
         return "diff"
+    if res.get("session_errors"):
+        return "session-error"
     pe, re_ = res.get("pytest_exit"), res.get("rstest_exit")
     if pe is not None and re_ is not None and pe != re_:
         return "exit-diff"
@@ -554,6 +706,8 @@ def main():
         glob.glob(str(REPO / "target" / "wheels" / "rstest-*.whl")), key=os.path.getmtime
     )
     suites_cfg = tomllib.loads((HERE / "suites.toml").read_text())
+    order = list(suites_cfg)
+    run = _run_meta(wheel, sys.argv[1:])
     if args.only:
         keep = set(args.only.split(","))
         suites_cfg = {k: v for k, v in suites_cfg.items() if k in keep}
@@ -588,7 +742,7 @@ def main():
         prepared = [n for n, r in results.items() if r.get("prepared")]
         log(f"=== PREPARE done: {len(prepared)}/{len(suites)} ready ===")
         if args.prepare_only:
-            RESULTS.write_text(json.dumps(list(results.values()), indent=1))
+            _save(results, order, run, history=False)
             return
 
     # ---------- PHASE 2: EXECUTE (offline) ----------
@@ -609,7 +763,9 @@ def main():
             res["pytest_wall"] = round(base_wall, 1)
             cand, cand_wall = suite.run_rstest()
             res["rstest_wall"] = round(cand_wall, 1)
-            res.update(diff(base, cand, suite.cfg.get("noisy", ())))
+            res.update(
+                diff(base, cand, suite.cfg.get("noisy", ()), suite.cfg.get("noisy_failures", ()))
+            )
             res["status"] = _status(res)
             log(
                 f"  {name}: parity {res['score']}% ({res['baseline_tests']} tests), "
@@ -621,7 +777,7 @@ def main():
         except Exception as e:
             res.update(status="error", error=str(e)[:600])
             log(f"  {name}: EXECUTE FAILED: {str(e)[:200]}")
-        RESULTS.write_text(json.dumps(list(results.values()), indent=1))
+        _save(results, order, run)
 
     # ---------- report ----------
     rows = list(results.values())
@@ -631,6 +787,8 @@ def main():
         status = str(r.get("status", "-"))
         if status == "exit-diff":
             status += f" (pytest {r['pytest_exit']}, rstest {r['rstest_exit']})"
+        elif status == "session-error" and isinstance(errs := r.get("session_errors"), list):
+            status += f" ({', '.join(map(str, errs))}, see work/{r['suite']}/rstest.log)"
         print(
             f"| {r['suite']} | {r.get('baseline_tests', '-')} | "
             f"{r.get('score', '-')}% | {r.get('pytest_wall', '-')}s | "

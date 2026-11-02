@@ -109,10 +109,13 @@ impl Rec {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Phase {
     Pass,
     Fail, // failed or errored in any phase
+    /// Skipped (or xfailed) in some phase, failed in none: it didn't run, so
+    /// a skip on one side and a pass on the other is a difference.
+    Skip,
 }
 
 /// Build the per-test [`Outcomes`] map from a run's `--report-json` document
@@ -129,6 +132,8 @@ pub(super) fn parse_outcomes(doc: &serde_json::Value, with_cpu: bool) -> Option<
             Rec {
                 phase: if is_fail(entry) {
                     Phase::Fail
+                } else if is_skip(entry) {
+                    Phase::Skip
                 } else {
                     Phase::Pass
                 },
@@ -163,6 +168,12 @@ pub(super) fn is_fail(entry: &serde_json::Value) -> bool {
             Some("failed") | Some("error")
         )
     })
+}
+
+fn is_skip(entry: &serde_json::Value) -> bool {
+    ["setup", "call", "teardown"]
+        .iter()
+        .any(|p| entry.get(p).and_then(|v| v.as_str()) == Some("skipped"))
 }
 
 /// The test file of a nodeid (everything before the first `::`).

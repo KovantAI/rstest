@@ -57,8 +57,8 @@ pub struct RemovalFinding {
     /// The suggested fix.
     pub fix: String,
     /// Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,
-    /// `ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip`,
-    /// `plugin_import`, or `plugin_gate`.
+    /// `ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip` (also a
+    /// skip under a guarded `import xdist`), `plugin_import`, or `plugin_gate`.
     pub kind: String,
     /// Where it is: a config source (`pytest.ini addopts`, `PYTEST_ADDOPTS`)
     /// or `path:line`.
@@ -85,8 +85,8 @@ pub struct TrialReport {
     pub compared: bool,
     /// Tests that failed with xdist hidden.
     pub failed: usize,
-    /// Tests that pass with pytest-xdist loaded but fail (or are no longer
-    /// collected) with it hidden.
+    /// Tests that pass with pytest-xdist loaded but fail, skip, or are no
+    /// longer collected with it hidden.
     pub regressions: Vec<String>,
     /// Whether the session with xdist hidden started and reported outcomes.
     pub started: bool,
@@ -458,7 +458,8 @@ fn trial_report(
         .into_iter()
         .flatten()
         .filter(|(id, rec)| {
-            rec.phase == Phase::Pass && hidden.get(*id).is_none_or(|h| h.phase == Phase::Fail)
+            // Failing or skipping without it: either way the uninstall loses it.
+            rec.phase == Phase::Pass && hidden.get(*id).is_none_or(|h| h.phase != Phase::Pass)
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -505,7 +506,7 @@ fn render_trial(t: &TrialReport, sink: &mut Sink) {
         return;
     }
     sink.out_line(&format!(
-        "TRIAL: {} test(s) pass with pytest-xdist loaded but fail without it:",
+        "TRIAL: {} test(s) pass with pytest-xdist loaded but fail or skip without it:",
         t.regressions.len()
     ));
     for id in t.regressions.iter().take(10) {
@@ -818,6 +819,45 @@ fn re_hasplugin() -> &'static Regex {
 fn re_importorskip() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r#"\bimportorskip\(\s*["']xdist(?:\.[\w.]+)?["']"#).unwrap())
+}
+
+fn re_skip() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(?:pytest\.)?skip\(").unwrap())
+}
+
+/// Whether line `idx` sits in the `except ImportError` (or bare `except`)
+/// branch of a `try:` whose body imports xdist: a skip there fires exactly
+/// when pytest-xdist is gone.
+fn skips_without_xdist(lines: &[&str], idx: usize) -> bool {
+    let code = |j: usize| {
+        let t = lines[j].trim();
+        !t.is_empty() && !t.starts_with('#')
+    };
+    let level = indent(lines[idx]);
+    let Some(head) = (0..idx)
+        .rev()
+        .find(|&j| code(j) && indent(lines[j]) < level)
+    else {
+        return false;
+    };
+    let h = lines[head].trim();
+    let catches = h == "except:"
+        || (h.starts_with("except")
+            && (h.contains("ImportError") || h.contains("ModuleNotFoundError")));
+    if !catches {
+        return false;
+    }
+    let at = indent(lines[head]);
+    let Some(start) = (0..head)
+        .rev()
+        .find(|&j| code(j) && indent(lines[j]) == at && lines[j].trim() == "try:")
+    else {
+        return false;
+    };
+    lines[start + 1..head]
+        .iter()
+        .any(|l| re_import().is_match(l))
 }
 
 fn re_hook() -> &'static Regex {
@@ -1201,12 +1241,14 @@ fn scan_source(
                 text: snippet,
                 why: "always false once pytest-xdist is gone, so this branch changes".to_string(),
             });
-        } else if re_importorskip().is_match(line) {
+        } else if re_importorskip().is_match(line)
+            || (re_skip().is_match(line) && skips_without_xdist(&lines, idx))
+        {
             // `-p no:xdist` keeps the module importable, so only the scan sees it.
             out.push(RemovalFinding {
                 allowed: false,
                 blocking: false,
-                fix: "drop the importorskip if the tests don't need xdist itself, or keep \
+                fix: "drop the skip if the tests don't need xdist itself, or keep \
                       pytest-xdist installed for them"
                     .to_string(),
                 kind: "importorskip".to_string(),
@@ -1783,6 +1825,53 @@ class XDistHooks:
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, "hasplugin_gate");
         assert!(!f[0].blocking);
+    }
+
+    #[test]
+    fn trial_counts_pass_to_skip_as_a_regression() {
+        // Regression: a test that passed with pytest-xdist loaded and skipped
+        // with it hidden (a fixture skipping on `has_plugin("xdist")`) read
+        // as "none regressed", though the uninstall drops it from the run.
+        let doc = |t: serde_json::Value| {
+            crate::migrate::parse_outcomes(&serde_json::json!({"tests": {"t.py::t": t}}), false)
+                .unwrap()
+        };
+        let base = doc(serde_json::json!({"setup": "passed", "call": "passed"}));
+        let hidden = doc(serde_json::json!({"setup": "skipped", "teardown": "passed"}));
+        let r = trial_report(Some(&base), Some(&hidden), "");
+        assert_eq!(r.regressions, ["t.py::t"]);
+        // Skipped either way is no regression.
+        assert!(trial_report(Some(&hidden), Some(&hidden), "")
+            .regressions
+            .is_empty());
+    }
+
+    #[test]
+    fn source_guarded_import_that_skips_is_a_behavior_change() {
+        // Regression: a guarded `import xdist` whose except branch skips was
+        // fine to the scan, and the trial can't see it (`-p no:xdist` leaves
+        // xdist importable): after the uninstall the module silently skips.
+        let src = "import pytest\n\
+                   try:\n\
+                   \x20   import xdist\n\
+                   except ImportError:\n\
+                   \x20   pytest.skip('needs pytest-xdist', allow_module_level=True)\n";
+        let f = scan(src, "tests/test_x.py");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "importorskip");
+        assert!(!f[0].blocking);
+        assert_eq!(f[0].location, "tests/test_x.py:5");
+        // A guarded import that falls back instead of skipping stays fine.
+        let fallback = "try:\n    import xdist\nexcept ImportError:\n    xdist = None\n";
+        assert!(scan(fallback, "conftest.py").is_empty());
+        // A skip under an unrelated import's guard is not about xdist.
+        let other = "import pytest\ntry:\n    import numpy\nexcept ImportError:\n    \
+                     pytest.skip('no numpy', allow_module_level=True)\nimport xdist.plugin  # noqa\n";
+        assert!(
+            scan(other, "t.py").iter().all(|f| f.kind != "importorskip"),
+            "{:?}",
+            scan(other, "t.py")
+        );
     }
 
     #[test]

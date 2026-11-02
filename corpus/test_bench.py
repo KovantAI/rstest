@@ -217,6 +217,82 @@ def test_exit_code_divergence_fails_a_full_parity_suite(tmp_path):
     assert _status(d) == "ok"
 
 
+def test_session_error_flagged_even_when_exit_codes_match(tmp_path):
+    # httpx 2026-11-02: both runners exit 1 on real failures, so the exit check
+    # passed while rstest's session had crashed after them.
+    t = {"t.py::a": {"call": "failed"}}
+    base = _snap_exit(tmp_path / "b.json", t, 1)
+    cand = tmp_path / "c.json"
+    cand.write_text(
+        json.dumps(
+            {"tests": t, "collect_errors": ["<session: PytestWarning>"], "meta": {"exitstatus": 1}}
+        )
+    )
+    d = diff(base, str(cand))
+    assert d["session_errors"] == ["<session: PytestWarning>"]
+    assert _status(d) == "session-error"
+
+
+NOISY = ["PytestUnraisableExceptionWarning"]
+
+
+def test_noisy_failure_cause_is_left_out_of_the_score(tmp_path):
+    # urllib3 2026-11-02: a socket leaked by an earlier test was GC'd during
+    # test_preserve_chunked_on_retry_after under rstest only.
+    leak = "E   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <ssl.SSLSocket>"
+    p = {"t.py::leak": {"call": "passed"}, "t.py::real": {"call": "passed"}}
+    c = {
+        "t.py::leak": {"call": "failed", "longrepr": leak},
+        "t.py::real": {"call": "failed", "longrepr": "E   AssertionError"},
+    }
+    b, cand = _write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c)
+    d = diff(b, cand, noisy_failures=NOISY)
+    assert d["noisy_failure_excluded"] == 1
+    assert d["mismatch"] == ["t.py::real"]  # a real failure still counts
+    assert d["score"] == 0.0  # 0 of the 1 judged test agrees
+
+
+def test_noisy_failure_session_error_does_not_fail_the_suite(tmp_path):
+    t = {"t.py::a": {"call": "passed"}}
+    err = "<session: PytestUnraisableExceptionWarning>"
+    cand = tmp_path / "c.json"
+    cand.write_text(
+        json.dumps(
+            {
+                "tests": t,
+                "collect_errors": [err],
+                "collect_error_reprs": {err: "PytestUnraisableExceptionWarning: <ssl.SSLSocket>"},
+                "meta": {"exitstatus": 1},
+            }
+        )
+    )
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), str(cand), noisy_failures=NOISY)
+    assert (d["session_errors"], d["noisy_session_errors"]) == ([], 1)
+    assert _status(d) == "ok"
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), str(cand))  # no rule: still flagged
+    assert _status(d) == "session-error"
+
+
+def test_recorder_keeps_failure_text(tmp_path):
+    # diff() can only judge the pytest side's cause if the recorder kept it.
+    import types
+
+    from recorder import Recorder
+
+    rec = Recorder()
+    rep = types.SimpleNamespace(
+        nodeid="t.py::a",
+        when="call",
+        outcome="failed",
+        failed=True,
+        skipped=False,
+        duration=0.1,
+        longrepr="E   PytestUnraisableExceptionWarning",
+    )
+    rec.pytest_runtest_logreport(rep)
+    assert "PytestUnraisableExceptionWarning" in rec.tests["t.py::a"]["longrepr"]
+
+
 def test_status_outcome_diff_wins_and_missing_exit_is_not_judged():
     assert _status({"score": 99.0, "pytest_exit": 0, "rstest_exit": 1}) == "diff"
     assert _status({"score": 100.0, "pytest_exit": None, "rstest_exit": 1}) == "ok"
@@ -415,6 +491,132 @@ def test_run_rstest_keeps_output_next_to_snapshot(tmp_path, monkeypatch):
     assert snap.with_suffix(".log").read_text() == (
         "ERROR collecting <session: PytestWarning>\ntb\n"
     )
+
+
+def test_each_runner_gets_a_private_tmpdir_wiped_after(tmp_path, monkeypatch):
+    # flask leaves a mode-000 dir in $TMPDIR/pytest-of-<user>; the NEXT session
+    # to clean that shared root crashed exit 1 under `filterwarnings = error`.
+    import os
+    import types
+
+    import run
+
+    seen = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        tmp = Path(env["TMPDIR"])
+        seen.append(tmp)
+        (tmp / "pytest-of-u" / "my_dir").mkdir(parents=True)
+        os.chmod(tmp / "pytest-of-u" / "my_dir", 0)
+        snap = env.get("RSTEST_RECORD") or argv[argv.index("--report-json") + 1]
+        Path(snap).write_text('{"tests": {}, "collect_errors": []}')
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    suite.run_pytest()
+    suite.run_rstest()
+    assert len(set(seen)) == 2 and os.environ.get("TMPDIR") not in {str(p) for p in seen}
+    assert not any(p.exists() for p in seen)
+    # anyio 2026-11-02: under macOS's long $TMPDIR the private root pushed its
+    # AF_UNIX socket paths past 104 bytes.
+    if os.path.isdir("/tmp"):
+        assert all(str(p).startswith("/tmp/") for p in seen)
+
+
+def test_save_merges_rows_and_records_history(tmp_path, monkeypatch):
+    # `--only flask` used to overwrite results.json with flask alone.
+    import run
+
+    monkeypatch.setattr(run, "RESULTS", tmp_path / "results.json")
+    monkeypatch.setattr(run, "HISTORY", tmp_path / "history")
+    order = ["rich", "flask", "click"]
+    run.RESULTS.write_text(
+        json.dumps(
+            [{"suite": "rich", "score": 100.0}, {"suite": "flask", "score": 1.0, "error": "x"}]
+        )
+    )
+    meta = {"id": "20261102T120000Z", "rstest_commit": "abc", "dirty": False}
+    run._save(
+        {"click": {"suite": "click", "score": 99.0}, "flask": {"suite": "flask", "score": 100.0}},
+        order,
+        meta,
+    )
+    rows = json.loads(run.RESULTS.read_text())
+    assert [r["suite"] for r in rows] == order
+    assert rows[0] == {"suite": "rich", "score": 100.0}  # untouched
+    assert rows[1] == {"suite": "flask", "score": 100.0, "run": meta["id"]}  # replaced whole
+    hist = json.loads((run.HISTORY / "20261102T120000Z.json").read_text())
+    assert hist["run"] == meta
+    assert [r["suite"] for r in hist["results"]] == ["click", "flask"]
+
+
+def test_save_prepare_only_keeps_parity_and_skips_history(tmp_path, monkeypatch):
+    import run
+
+    monkeypatch.setattr(run, "RESULTS", tmp_path / "results.json")
+    monkeypatch.setattr(run, "HISTORY", tmp_path / "history")
+    run.RESULTS.write_text(json.dumps([{"suite": "flask", "score": 100.0}]))
+    run._save(
+        {"flask": {"suite": "flask", "prepared": True}}, ["flask"], {"id": "r1"}, history=False
+    )
+    assert json.loads(run.RESULTS.read_text()) == [
+        {"suite": "flask", "score": 100.0, "prepared": True}
+    ]
+    assert not run.HISTORY.exists()
+
+
+def test_expected_editables_follows_install_steps(tmp_path):
+    def exp(cfg):
+        s = Suite("x", cfg, "w.whl", "rstest")
+        s.src = tmp_path
+        return s.expected_editables()
+
+    (tmp_path / "req.txt").write_text("pytest\n-e .[socks]\n")
+    assert exp({"install": ["--group dev", "-e ."]}) == [tmp_path]
+    assert exp({}) == [tmp_path]  # fallback attempts are all editable
+    assert exp({"install": ["-r req.txt"]}) == [tmp_path]  # httpx
+    assert exp({"install": ["-r requirements-dev.txt"]}) == []  # missing file: nothing known
+    assert exp({"install": [". pytest"]}) == []
+    assert exp({"mode": "mono", "projects": ["libs/a"]}) == [tmp_path / "libs/a"]
+    assert exp({"mode": "pyargs", "package": "p"}) == []
+
+
+def test_check_editables_fails_prepare_when_checkout_swapped(tmp_path, monkeypatch):
+    # pluggy 2026-11-02: the pinned pytest's `pluggy>=1.5` replaced the 0.1.devN
+    # checkout with PyPI 1.7.0, and the corpus silently tested the release.
+    import pytest
+    import run
+
+    s = Suite("x", {"install": ["-e ."]}, "w.whl", "rstest")
+    s.src = tmp_path
+    monkeypatch.setattr(run, "_editable_dirs", lambda py, env=None: set())
+    with pytest.raises(RuntimeError, match="replaced by a PyPI release"):
+        s.check_editables()
+    monkeypatch.setattr(run, "_editable_dirs", lambda py, env=None: {tmp_path.resolve()})
+    s.check_editables()
+
+
+def test_editable_dirs_reads_pep610_direct_url(tmp_path):
+    import os
+    import sys
+
+    import run
+
+    site = tmp_path / "site"
+    for name, editable in (("ed", True), ("plain", False)):
+        info = site / f"{name}-1.0.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
+        url = (tmp_path / name).as_uri()
+        (info / "direct_url.json").write_text(
+            json.dumps({"url": url, "dir_info": {"editable": editable}})
+        )
+    env = dict(os.environ, PYTHONPATH=str(site))
+    assert (tmp_path / "ed").resolve() in run._editable_dirs(sys.executable, env)
+    assert (tmp_path / "plain").resolve() not in run._editable_dirs(sys.executable, env)
 
 
 def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):

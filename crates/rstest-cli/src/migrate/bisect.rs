@@ -144,7 +144,7 @@ pub(super) fn pinned_inifile(inifile: Option<&str>, work: &Path) -> Result<PathB
 fn victim_failed(out: &Outcomes, victim: &str) -> Result<bool> {
     match out.get(victim).map(|r| r.phase) {
         Some(Phase::Fail) => Ok(true),
-        Some(Phase::Pass) => Ok(false),
+        Some(Phase::Pass | Phase::Skip) => Ok(false),
         None => bail!(
             "rstest bisect: {victim} did not run in the child session (deselected \
              by a pytest option such as -k/-m, a collection error, a crashed \
