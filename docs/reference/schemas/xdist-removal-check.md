@@ -33,7 +33,7 @@ One thing that breaks or changes when pytest-xdist is removed.
 | `allowed` | boolean | yes | Whether this location is on the `--migrate-allow` list. |
 | `blocking` | boolean | yes | Whether it breaks the run once xdist is gone (`false`: a behavior change or a warning). |
 | `fix` | string | yes | The suggested fix. |
-| `kind` | string | yes | Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`, `ini_key`, `import`, `hook`, `hasplugin_gate`, `plugin_import`, or `plugin_gate`. |
+| `kind` | string | yes | Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`, `ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip`, `plugin_import`, or `plugin_gate`. |
 | `location` | string | yes | Where it is: a config source (`pytest.ini addopts`, `PYTEST_ADDOPTS`) or `path:line`. |
 | `text` | string | yes | The offending flag, key, or source line. |
 | `why` | string | yes | What happens once pytest-xdist is gone. |

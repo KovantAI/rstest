@@ -330,7 +330,7 @@ pub fn run_migrate_check(
     let verdicts = classify_failures(python, args, &par, 1, sink)?;
     if verdicts.is_empty() {
         sink.out_line(&format!(
-            "PARALLEL: ready — {} tests pass in parallel.",
+            "PARALLEL: ready — none of {} tests fails in parallel.",
             par.len()
         ));
         return finish(true, Some(ParallelReport::ready(0)), 0);

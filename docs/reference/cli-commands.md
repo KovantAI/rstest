@@ -191,7 +191,9 @@ finding whose nodeid or unstable-id site **contains** SUBSTRING is still
 reported (marked `(allowed)` in the human output and `"allowed": true` in the
 JSON) but excluded from the exit-code gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
-findings, and the build only goes red when a fresh one appears.
+findings, and the build only goes red when a fresh one appears. An empty
+SUBSTRING (`--migrate-allow "$UNSET_VAR"`) is ignored rather than matching
+every finding.
 
 ### `xdist-removal-check`
 
@@ -218,6 +220,7 @@ the fix:
 | unguarded `import xdist` / `from xdist... import` | yes | `ImportError` | the native `worker_id` / `testrun_uid` fixtures, `config.workerinput`, or `PYTEST_XDIST_WORKER` |
 | an xdist hook (`pytest_configure_node`, `pytest_testnode*`, `pytest_xdist_*`) in a conftest or plugin module, not marked `optionalhook=True` | yes (no for a hook class the file never registers) | `PluginValidationError: unknown hook` | `@pytest.hookimpl(optionalhook=True)` |
 | `hasplugin("xdist")` in your code | no | the branch flips | gate on `config.workerinput` or `PYTEST_XDIST_WORKER` |
+| `pytest.importorskip("xdist")` in your code | no | the tests skip silently (a module-level call skips the whole file); `--xdist-trial` can't show it, since `-p no:xdist` leaves xdist importable | drop it if the tests don't need xdist itself |
 | unguarded module-level `import xdist` in an installed plugin | yes in the entry-point module and its packages' `__init__.py`, no elsewhere | `ImportError` at startup (entry module) or when that module is imported | upgrade or drop the plugin, or keep pytest-xdist |
 | `hasplugin("xdist")` in an installed plugin | no | the plugin takes its non-xdist path | check that plugin's behavior |
 | `rsyncdirs` / `rsyncignore` / `looponfailroots` | no | a `PytestConfigWarning` (an error under `--strict-config`) | remove the key |

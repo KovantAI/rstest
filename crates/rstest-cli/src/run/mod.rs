@@ -816,6 +816,14 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     // interpreter-free modes never probe one.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = || discover::resolve(&scope, cli.python.as_deref());
+    // An empty entry (`--migrate-allow "$UNSET"`) is a substring of every id:
+    // it would allow every finding, so it allows none.
+    let migrate_allow: Vec<String> = cli
+        .migrate_allow
+        .iter()
+        .filter(|p| !p.is_empty())
+        .cloned()
+        .collect();
     let result = match command {
         Command::CacheCompact { keep_last, max_age } => {
             run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
@@ -847,7 +855,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &py,
                 args,
                 cli.migrate_check_json.as_deref(),
-                &cli.migrate_allow,
+                &migrate_allow,
                 &mut sink,
             )
         }),
@@ -857,7 +865,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &py,
                 args,
                 cli.xdist_removal_json.as_deref(),
-                &cli.migrate_allow,
+                &migrate_allow,
                 cli.xdist_trial,
                 &mut sink,
             )

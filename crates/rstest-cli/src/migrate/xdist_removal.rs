@@ -57,8 +57,8 @@ pub struct RemovalFinding {
     /// The suggested fix.
     pub fix: String,
     /// Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,
-    /// `ini_key`, `import`, `hook`, `hasplugin_gate`, `plugin_import`, or
-    /// `plugin_gate`.
+    /// `ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip`,
+    /// `plugin_import`, or `plugin_gate`.
     pub kind: String,
     /// Where it is: a config source (`pytest.ini addopts`, `PYTEST_ADDOPTS`)
     /// or `path:line`.
@@ -815,6 +815,11 @@ fn re_hasplugin() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"\b(?:has_?plugin|getplugin)\(\s*["']xdist["']\s*\)"#).unwrap())
 }
 
+fn re_importorskip() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\bimportorskip\(\s*["']xdist(?:\.[\w.]+)?["']"#).unwrap())
+}
+
 fn re_hook() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1196,6 +1201,21 @@ fn scan_source(
                 text: snippet,
                 why: "always false once pytest-xdist is gone, so this branch changes".to_string(),
             });
+        } else if re_importorskip().is_match(line) {
+            // `-p no:xdist` keeps the module importable, so only the scan sees it.
+            out.push(RemovalFinding {
+                allowed: false,
+                blocking: false,
+                fix: "drop the importorskip if the tests don't need xdist itself, or keep \
+                      pytest-xdist installed for them"
+                    .to_string(),
+                kind: "importorskip".to_string(),
+                location: at,
+                text: snippet,
+                why: "skips silently once pytest-xdist is gone: a module-level call skips \
+                      every test in the file"
+                    .to_string(),
+            });
         }
     }
     out
@@ -1461,10 +1481,12 @@ mod tests {
             "import os, xdistlike",
             "# import xdist",
             "x = 'import xdist'",
-            "pytest.importorskip(\"xdist\")",
         ] {
             assert!(scan(line, "c.py").is_empty(), "{line}");
         }
+        // Not an import (it can't raise ImportError): its own, non-blocking kind.
+        let f = scan("pytest.importorskip(\"xdist\")", "c.py");
+        assert!(f.iter().all(|f| f.kind != "import" && !f.blocking), "{f:?}");
     }
 
     #[test]
@@ -1761,6 +1783,30 @@ class XDistHooks:
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].kind, "hasplugin_gate");
         assert!(!f[0].blocking);
+    }
+
+    #[test]
+    fn source_importorskip_xdist_is_a_behavior_change() {
+        // Regression: `-p no:xdist` leaves xdist importable, so the trial
+        // can't see this, and the scan missed it: after the uninstall the
+        // whole module silently skips. Guarded by nothing, it is not an
+        // `import` statement either.
+        for src in [
+            "import pytest\nxdist = pytest.importorskip(\"xdist\")\n",
+            "import pytest\nsched = pytest.importorskip('xdist.scheduler')\n",
+        ] {
+            let f = scan(src, "tests/test_x.py");
+            assert_eq!(f.len(), 1, "{src}: {f:?}");
+            assert_eq!(f[0].kind, "importorskip");
+            assert!(!f[0].blocking);
+            assert_eq!(f[0].location, "tests/test_x.py:2");
+        }
+        // Another module's importorskip is not ours to report.
+        assert!(scan(
+            "import pytest\nx = pytest.importorskip('xdistlike')\n",
+            "t.py"
+        )
+        .is_empty());
     }
 
     #[test]

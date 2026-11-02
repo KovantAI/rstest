@@ -54,6 +54,23 @@ between 0.x releases and are listed here.
   fix it. When anything fails in parallel, one more `-n 0` run now covers the
   whole selection, and a test that fails there is NOT PARALLEL-SPECIFIC.
 
+- **An empty `--migrate-allow` allows nothing.** `--migrate-allow ""` (an
+  unset CI variable) matched every finding as a substring, so `migrate-check`
+  and `xdist-removal-check` passed the gate whatever they found. Empty entries
+  are now ignored.
+
+- **`audit`'s parallel-safe line counts only tests that pass at `-n 0`.** "all
+  N tests that pass at -n 0" included the tests already failing there.
+
+- **`migrate-check`'s ready line no longer counts skipped tests as passing.**
+  It now reads "none of N tests fails in parallel".
+
+- **`xdist-removal-check` reports `pytest.importorskip("xdist")`.** It printed
+  `ready` for a test module that skips itself without pytest-xdist, so the
+  uninstall silently skipped those tests. `--xdist-trial` can't show it either
+  (`-p no:xdist` leaves xdist importable). It is now a non-blocking finding,
+  like a `hasplugin("xdist")` gate.
+
 ## 0.10.0 (2026-11-01)
 
 ### Features

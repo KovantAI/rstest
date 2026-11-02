@@ -636,3 +636,47 @@ fn audit_counts_a_plain_pytest_failure_as_preexisting() {
     );
     assert_eq!(code, 0, "only a pre-existing failure: parallel-safe\n{out}");
 }
+
+#[test]
+fn empty_migrate_allow_allows_nothing() {
+    // Regression: `--migrate-allow ""` (an unset CI variable) matched every
+    // finding as a substring, so a WILL-bail blocker passed the gate.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("allowempty");
+    std::fs::write(
+        dir.join("test_u.py"),
+        "import uuid, pytest\n\
+         @pytest.mark.parametrize('u', [str(uuid.uuid4())])\n\
+         def test_uuid(u):\n    pass\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["migrate-check", "--migrate-allow", ""]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        code, 1,
+        "an empty allow entry must not allow the blocker\n{out}"
+    );
+    assert!(!out.contains("allow-listed"), "{out}");
+}
+
+#[test]
+fn ready_line_does_not_count_skipped_tests_as_passing() {
+    // Regression: "ready — N tests pass in parallel" counted skipped tests.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("readyskip");
+    std::fs::write(
+        dir.join("test_s.py"),
+        "import pytest\n\
+         def test_ok():\n    pass\n\n\
+         @pytest.mark.skip\n\
+         def test_skipped():\n    pass\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("PARALLEL: ready") && !out.contains("2 tests pass"),
+        "a skipped test did not pass:\n{out}"
+    );
+}
