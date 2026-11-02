@@ -352,3 +352,137 @@ fn try_reports_time_saved_when_parallel_wins() {
         );
     }
 }
+
+/// A suite whose `tests/test_b_victim.py::test_victim` fails in any pool
+/// worker (a deterministic stand-in for a parallel-only leak) and after
+/// `tests/test_y_polluter.py` ran in the same process. Plain pytest runs the
+/// victim first, so it passes serially; the bisect can only find the polluter
+/// by running it before the victim.
+fn polluter_suite(tag: &str, addopts: &str) -> PathBuf {
+    let dir = fresh_dir(tag);
+    let tests = dir.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        format!("[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\naddopts = \"{addopts}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        tests.join("conftest.py"),
+        "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n",
+    )
+    .unwrap();
+    std::fs::write(tests.join("state.py"), "FLAG = []\n").unwrap();
+    std::fs::write(
+        tests.join("test_y_polluter.py"),
+        "import state\ndef test_pollute():\n    state.FLAG.append(1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tests.join("test_b_victim.py"),
+        "import os, state\n\
+         def test_victim():\n\
+         \x20   assert 'PYTEST_XDIST_WORKER' not in os.environ and not state.FLAG\n",
+    )
+    .unwrap();
+    for i in 0..4 {
+        std::fs::write(
+            tests.join(format!("test_m{i}.py")),
+            "def test_ok():\n    pass\n",
+        )
+        .unwrap();
+    }
+    dir
+}
+
+#[test]
+fn polluter_bisect_from_a_subdirectory_names_the_polluter() {
+    // Regression: bisect_polluter passed rootdir-relative files to children
+    // that resolve them from the cwd, so from `tests/` it selected
+    // `tests/tests/test_b_victim.py`, collected nothing, and called every
+    // victim "not reproducible serially".
+    let Some(venv) = pytest_env() else { return };
+    let dir = polluter_suite("polsub", "");
+    let (_, out) = run(&venv, &dir.join("tests"), &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("POLLUTED BY: tests/test_y_polluter.py"),
+        "the bisect should find the polluter from a subdirectory:\n{out}"
+    );
+}
+
+#[test]
+fn polluter_bisect_lifts_exitfirst() {
+    // Regression: bisect_polluter kept `-x` from addopts, so an unrelated
+    // failing file run before the victim ended the session early and the
+    // victim read as "not reproducible serially".
+    let Some(venv) = pytest_env() else { return };
+    let dir = polluter_suite("polx", "-x");
+    std::fs::write(
+        dir.join("tests/test_c_broken.py"),
+        "def test_broken():\n    assert False\n",
+    )
+    .unwrap();
+    let (_, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("POLLUTED BY: tests/test_y_polluter.py"),
+        "the bisect should run past an unrelated -x failure:\n{out}"
+    );
+}
+
+#[test]
+fn try_lifts_exitfirst_on_both_sides() {
+    // Regression: with `-x`, pytest stopped at the first failure while the
+    // rstest workers had already run the rest, so `try` reported those as
+    // "only in rstest" and exited 1 on a suite where both runners agree.
+    // Needs a multi-worker pool to show; on one core both sides stop alike.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("tryx");
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[tool.pytest.ini_options]\naddopts = \"-x\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("test_a.py"), "def test_bad():\n    assert False\n").unwrap();
+    for i in 0..6 {
+        std::fs::write(
+            dir.join(format!("test_o{i}.py")),
+            "import time\ndef test_ok():\n    time.sleep(0.1)\n",
+        )
+        .unwrap();
+    }
+    let (code, out) = run(&venv, &dir, &["try"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("7 tests — identical outcomes"),
+        "both runners should run all 7 tests and agree:\n{out}"
+    );
+    assert_eq!(code, 0, "identical outcomes should exit 0\n{out}");
+}
+
+#[test]
+fn try_pins_reruns_off() {
+    // Regression: `try` let `[tool.rstest] reruns` apply to its rstest run, so
+    // a failure pytest reported was rerun into a pass and read as a parity
+    // difference, or, for a parallel-only failure, as "identical".
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("tryrr");
+    std::fs::write(dir.join("pyproject.toml"), "[tool.rstest]\nreruns = 2\n").unwrap();
+    std::fs::write(
+        dir.join("test_flaky.py"),
+        "ATTEMPTS = []\n\
+         def test_first_attempt_fails():\n\
+         \x20   ATTEMPTS.append(1)\n\
+         \x20   assert len(ATTEMPTS) > 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("test_ok.py"), "def test_ok():\n    pass\n").unwrap();
+    let (code, out) = run(&venv, &dir, &["try"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("identical outcomes"),
+        "with reruns off, rstest fails the test exactly as pytest does:\n{out}"
+    );
+    assert_eq!(code, 0, "identical outcomes should exit 0\n{out}");
+}

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::bisect::MAXFAIL_LIFT;
 use super::{Outcomes, Phase};
 use crate::reporting::sink::Sink;
 use crate::scheduling::worker;
@@ -197,6 +198,9 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     let mut py = std::process::Command::new(python);
     py.args(["-m", "pytest", "-p", "rstest_worker.recorder", "-q"])
         .args(args)
+        // `-x` would stop pytest at the first failure while the rstest
+        // workers run on: lift it on both sides so they run the same tests.
+        .arg(MAXFAIL_LIFT)
         .env("RSTEST_RECORD", &py_json)
         .env("PYTHONPATH", worker::worker_pythonpath())
         .stdout(std::process::Stdio::null())
@@ -228,7 +232,11 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         .arg(python)
         .arg("-n")
         .arg("auto")
+        // A passing rerun would hide a failure pytest reports (see
+        // `run_session`): parity compares first attempts.
+        .args(["--reruns", "0"])
         .args(args)
+        .arg(MAXFAIL_LIFT)
         .arg("--report-json")
         .arg(&rs_json)
         .args(["-q", "--output", "dots"])

@@ -191,7 +191,8 @@ pub(super) fn classify_failures(
     // Holds the blank stand-in config (when none was loaded) until the
     // discriminators finish.
     let work = workdir()?;
-    let mut scoped = scoped_selection(&files, collected.as_ref(), work.path())?;
+    let file_list: Vec<&str> = files.iter().copied().collect();
+    let mut scoped = scoped_selection(&file_list, collected.as_ref(), work.path())?;
     scoped.extend_from_slice(args);
     // After the user's args and addopts (the last --maxfail wins): an `-x`
     // run stopping at an earlier failure would leave the rest missing, and so
@@ -285,12 +286,12 @@ fn loadfile_selection(
     (whole, all_files)
 }
 
-/// The discriminator selection for the failing `files`: anchored at the
-/// rootdir and followed by the rootdir/config/cutoff pins when the collection
-/// reported one, or the bare rootdir-relative paths when it did not. `work`
-/// holds the blank stand-in config when none was loaded.
+/// The child selection for `files` (in order): anchored at the rootdir and
+/// followed by the rootdir/config/cutoff pins when the collection reported
+/// one, or the bare rootdir-relative paths when it did not. `work` holds the
+/// blank stand-in config when none was loaded.
 fn scoped_selection(
-    files: &std::collections::BTreeSet<&str>,
+    files: &[&str],
     collected: Option<&super::Collected>,
     work: &Path,
 ) -> Result<Vec<String>> {
@@ -360,13 +361,19 @@ pub(super) fn bisect_polluter(
     all: &Outcomes,
 ) -> Result<Polluter> {
     let vfile = file_of(victim).to_string();
+    // Anchor the rootdir-relative files and pin the config, as the
+    // discriminators do: a child resolves bare paths from the cwd.
+    let collected = super::collect_session(python, args).ok();
+    let work = workdir()?;
 
     // reproduce(subset): run `-n 0 <subset…> <vfile>` (vfile last so the
     // candidate files run first) - does the victim fail?
     let reproduce = |subset: &[String]| -> Result<bool> {
-        let mut sel: Vec<String> = subset.to_vec();
-        sel.push(vfile.clone());
+        let files: Vec<&str> = subset.iter().chain([&vfile]).map(String::as_str).collect();
+        let mut sel = scoped_selection(&files, collected.as_ref(), work.path())?;
         sel.extend_from_slice(args);
+        // An unrelated failure before the victim must not end the run (`-x`).
+        sel.push(MAXFAIL_LIFT.into());
         // Order is the whole point here: keep pytest-randomly from shuffling
         // the candidates after the victim.
         let o = run_session(python, &["-n", "0", "-p", "no:randomly"], &sel)?;
@@ -607,7 +614,7 @@ mod tests {
     fn scoped_selection_without_a_rootdir_keeps_bare_paths() {
         // A failed collection, or one that reported no rootdir, leaves the
         // paths as-is and adds no pins (best effort; misses go INCONCLUSIVE).
-        let files: std::collections::BTreeSet<&str> = ["b.py", "a.py"].into();
+        let files = ["a.py", "b.py"];
         let work = workdir().unwrap();
         for c in [None, Some(collected(None))] {
             let scoped = scoped_selection(&files, c.as_ref(), work.path()).unwrap();
@@ -617,7 +624,7 @@ mod tests {
 
     #[test]
     fn scoped_selection_anchors_at_the_rootdir_and_pins_it() {
-        let files: std::collections::BTreeSet<&str> = ["tests/a.py"].into();
+        let files = ["tests/a.py"];
         let work = workdir().unwrap();
         let root = work.path().join("root");
         let c = collected(Some(root.to_str().unwrap()));
