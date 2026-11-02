@@ -262,10 +262,13 @@ class SessionStreamPlugin(StreamPlugin):
             payload["deselected"] = self._deselected
         self._conn.send("collection_done", payload)
 
+    @pytest.hookimpl(tryfirst=True)
     def pytest_keyboard_interrupt(self, excinfo):
         # A SIGINT reached the session: tell the orchestrator, which
         # otherwise passes on one sent to its pid alone (`kill -INT PID`).
         # pytest's own Interrupted (-x, collection errors) is a subclass.
+        # First, so a slow hook ahead of it (the terminal reporter formatting
+        # the traceback) cannot outlast the orchestrator's grace period.
         if excinfo.type is KeyboardInterrupt:
             self._conn.send("interrupted", {})
 
