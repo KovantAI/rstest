@@ -32,6 +32,28 @@ between 0.x releases and are listed here.
   an empty suite, so `rstest --pyargs pkg` ran on one worker: pandas took
   321s instead of 51s. An import-path selection now skips that shortcut.
 
+- **`migrate-check` says why the parallel pass didn't run.** When the two
+  collections agreed but the pool still refused to dispatch (ids that differ
+  per worker, or a set order both collections happened to share), it printed
+  only "could not capture outcomes (no snapshot)". It now shows the run's
+  error, which names the cause.
+
+- **`migrate-check` on an empty selection says so.** A `-k`/`-m` matching no
+  test was reported as "no snapshot", as if the run had failed. It now reads
+  "no tests were selected".
+
+- **`migrate-check`'s UNSTABLE NODEIDS header counts only per-process ids.**
+  Its "N per-process" figure also counted the order-unstable ids, which have
+  their own UNSTABLE ORDER section.
+
+- **`audit` and `migrate-check` count a failure plain pytest has too as
+  pre-existing.** Their `-n 0` check ran only the files with parallel
+  failures, so a test polluted by another file passed it, and a test that
+  `pytest` and `rstest -n 0` both fail read as failing "only under
+  parallelism"; `audit` even listed it in its serial fix-list, which can't
+  fix it. When anything fails in parallel, one more `-n 0` run now covers the
+  whole selection, and a test that fails there is NOT PARALLEL-SPECIFIC.
+
 ## 0.10.0 (2026-11-01)
 
 ### Features

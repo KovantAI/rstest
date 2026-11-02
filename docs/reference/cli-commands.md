@@ -128,7 +128,11 @@ small suite, or any suite after one run, on a single worker, where nothing
 runs concurrently. The discriminator reruns (`-n 0` twice and `--dist
 loadfile`) are **scoped to the files containing failures**, so cost scales
 with the number of failing files, not the suite size; a clean suite runs no
-discriminators at all. One exception: with only one or two failing files the
+discriminators at all. When anything failed, one more `-n 0` run covers the
+whole selection, as plain pytest runs it: a test that fails there was already
+failing (for example polluted by a test in another file) and counts as NOT
+PARALLEL-SPECIFIC, even though it passes with its own files alone. One
+exception: with only one or two failing files the
 `--dist loadfile` run covers the whole selection, because each worker is
 handed two files to start with, so one or two files would run one after the
 other on a single worker and a cross-file race would never show. A selection
@@ -162,7 +166,9 @@ resource (a fixed port, one shared database, one shared home directory), a
 Each finding prints the upstream fix and the rstest stopgap. Exits `1` if
 any WILL-bail id or parallelism-specific failure is found, and `2` when it
 couldn't judge: the parallel pass produced no outcomes (`parallel` is
-`{"ran": false}` in the JSON), or rstest hit an error (an `Error:` line on
+`{"ran": false}` in the JSON; the report then shows the run's own error, such
+as workers that collected different ids), the selection matched no tests, or
+rstest hit an error (an `Error:` line on
 stderr). `0` means ready. Usable as a CI gate (see `--migrate-check-json` and `--migrate-allow` below for the
 machine-readable form and the known-issue allow-list).
 
@@ -271,7 +277,7 @@ aren't parallel-safe, and how do I fix them?" It **runs the suite in parallel**
 as `migrate-check` does; repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
 probabilistic), then diffs against the `-n 0` oracle and classifies every test
 that fails **only** under parallelism, reusing `migrate-check`'s discriminators
-(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files) and verdicts
+(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files, plus one `-n 0` run of the whole selection) and verdicts
 (ISOLATION / WALL-CLOCK / ORDER-DEPENDENCY / INTRINSIC FLAKE / pre-existing).
 
 Where `migrate-check` is the onboarding preflight (unstable ids first, verbose

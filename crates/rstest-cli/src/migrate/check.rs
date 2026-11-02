@@ -21,7 +21,7 @@ use super::bisect::MAXFAIL_LIFT;
 use super::classify::{
     bisect_polluter, classify, classify_failures, split_param, Kind, Polluter, Verdict,
 };
-use super::{collect_ids, run_session};
+use super::{collect_ids, run_session_capture};
 use crate::reporting::sink::Sink;
 
 /// The `--migrate-check-json` document (schema 1). Field order is alphabetical
@@ -220,10 +220,10 @@ pub fn run_migrate_check(
         sink.out_line("  UNSTABLE NODEIDS: none — collection is reproducible.\n");
     } else if !unstable.is_empty() {
         sink.out_line(&format!(
-            "  UNSTABLE NODEIDS: {} across {} sites ({} per-process => WILL bail at -n auto)\n",
+            "  UNSTABLE NODEIDS: {} across {} sites ({id_will_bail} per-process => WILL bail \
+             at -n auto)\n",
             unstable.len(),
             by_site.len(),
-            will_bail_total
         ));
         for (site, acc) in &by_site {
             let kinds: Vec<String> = acc.counts.iter().map(|(k, n)| format!("{k}:{n}")).collect();
@@ -308,10 +308,22 @@ pub fn run_migrate_check(
         .cloned()
         .chain([MAXFAIL_LIFT.to_string()])
         .collect();
-    let par = run_session(python, &["-n", &n], &par_args)?;
+    let (par, stderr) = run_session_capture(python, &["-n", &n], &par_args)?;
+    let Some(par) = par else {
+        // The child refused to dispatch or crashed: its own error names why
+        // (often ids that differ per worker, which two collections that
+        // happened to agree can't show).
+        sink.out_line("PARALLEL: the parallel run produced no outcomes. rstest said:");
+        // The tail: a crashed worker's traceback can run long.
+        let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+        for line in &lines[lines.len().saturating_sub(20)..] {
+            sink.out_line(&format!("  {line}"));
+        }
+        return finish(false, Some(ParallelReport::not_run()), 2);
+    };
     if par.is_empty() {
         sink.out_line(
-            "PARALLEL: could not capture outcomes (no snapshot) — run `rstest` manually.",
+            "PARALLEL: no tests were selected (check your -k/-m/path args); nothing to judge.",
         );
         return finish(false, Some(ParallelReport::not_run()), 2);
     }

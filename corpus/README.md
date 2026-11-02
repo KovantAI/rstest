@@ -48,7 +48,10 @@ Reproducibility measures:
   before counting missing/extra,
 - a suite's `noisy` node-ID prefixes in `suites.toml` (outcomes that move
   between any two runs: live network, GC timing, upstream order pollution)
-  are left out of the score and counted under `noisy_excluded`.
+  are left out of the score and counted under `noisy_excluded`,
+- the two runs' exit codes are compared too (`pytest_exit`/`rstest_exit`): a
+  suite at 100% parity whose exit codes differ is `exit-diff`, not `ok`. Each
+  runner's output is kept next to its snapshot (`pytest.log`, `rstest.log`).
 
 ### Speed ramp (`bench.py`)
 

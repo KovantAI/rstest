@@ -487,3 +487,152 @@ fn try_pins_reruns_off() {
     );
     assert_eq!(code, 0, "identical outcomes should exit 0\n{out}");
 }
+
+#[test]
+fn parallel_refusal_names_the_cause() {
+    // Regression: when the two collections agreed but the pool still refused
+    // (ids that differ per worker, or a set order both collections happened
+    // to share), migrate-check printed only "could not capture outcomes (no
+    // snapshot)" and dropped the pool's error naming the cause. An id built
+    // from the worker id matches across the two collections (one process
+    // each, same id) but differs on every pool worker, so the pool always
+    // refuses.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("refused");
+    std::fs::write(
+        dir.join("test_w.py"),
+        "import os, pytest\n\
+         @pytest.mark.parametrize('w', [os.environ.get('PYTEST_XDIST_WORKER', 'none')])\n\
+         def test_w(w):\n    pass\n",
+    )
+    .unwrap();
+    for i in 0..3 {
+        std::fs::write(
+            dir.join(format!("test_o{i}.py")),
+            "def test_ok():\n    pass\n",
+        )
+        .unwrap();
+    }
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 2, "a refused parallel pass can't be judged\n{out}");
+    assert!(
+        out.contains("workers collected different test sets"),
+        "the pool's refusal should be shown:\n{out}"
+    );
+}
+
+#[test]
+fn empty_selection_says_nothing_was_selected() {
+    // Regression: a selection matching no test wrote a report with zero
+    // tests, yet migrate-check said "no snapshot", as if the run had failed.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("empty");
+    std::fs::write(dir.join("test_a.py"), "def test_a():\n    pass\n").unwrap();
+    let (code, out) = run(&venv, &dir, &["migrate-check", "-k", "nomatch"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 2, "nothing selected is nothing to judge\n{out}");
+    assert!(
+        out.contains("no tests were selected") && !out.contains("no snapshot"),
+        "an empty selection should say so:\n{out}"
+    );
+}
+
+#[test]
+fn unstable_header_counts_only_per_process_ids() {
+    // Regression: the UNSTABLE NODEIDS header's "N per-process" counted the
+    // order-unstable ids too. A uuid id (a new one per collection, so two
+    // per-process ids across the two) plus ten ids shuffled by pid (same ids,
+    // a new order in every process) must read "2", not 12.
+    let Some(venv) = pytest_env() else { return };
+    let dir = fresh_dir("header");
+    std::fs::write(
+        dir.join("test_u.py"),
+        "import os, random, uuid, pytest\n\
+         @pytest.mark.parametrize('u', [str(uuid.uuid4())])\n\
+         def test_uuid(u):\n    pass\n\n\
+         _ORDER = list(range(10))\n\
+         random.Random(os.getpid()).shuffle(_ORDER)\n\
+         @pytest.mark.parametrize('n', _ORDER)\n\
+         def test_order(n):\n    pass\n",
+    )
+    .unwrap();
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "both sites block\n{out}");
+    assert!(
+        out.contains("UNSTABLE ORDER"),
+        "the shuffled site should be order-unstable:\n{out}"
+    );
+    assert!(
+        out.contains("(2 per-process => WILL bail"),
+        "only the uuid ids are per-process:\n{out}"
+    );
+}
+
+/// A suite whose victim already fails under plain pytest: 100 files each
+/// leave state behind, and `test_z_victim.py` (collected last) asserts there
+/// is none. In parallel the victim shares a worker with some of them (more
+/// files than cores), so it fails there too.
+fn preexisting_pollution_suite(tag: &str) -> PathBuf {
+    let dir = fresh_dir(tag);
+    let tests = dir.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(
+        dir.join("pyproject.toml"),
+        "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tests.join("conftest.py"),
+        "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n",
+    )
+    .unwrap();
+    std::fs::write(tests.join("state.py"), "FLAG = []\n").unwrap();
+    for i in 0..100 {
+        std::fs::write(
+            tests.join(format!("test_a_pol{i:03}.py")),
+            "import state\ndef test_pollute():\n    state.FLAG.append(1)\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        tests.join("test_z_victim.py"),
+        "import state\ndef test_victim():\n    assert not state.FLAG\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn migrate_check_counts_a_plain_pytest_failure_as_preexisting() {
+    // Regression: the -n 0 oracle ran only the failing files, so a victim
+    // polluted by another file passed it, and a test plain pytest already
+    // fails was reported as failing "only under parallelism". On a machine
+    // with more cores than files the victim passes in parallel and there is
+    // nothing to classify; the assertions still hold.
+    let Some(venv) = pytest_env() else { return };
+    let dir = preexisting_pollution_suite("mcpre");
+    let (code, out) = run(&venv, &dir, &["migrate-check"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.contains("fail only under parallelism"),
+        "a failure plain pytest has too is not parallel-only:\n{out}"
+    );
+    assert_eq!(code, 0, "only a pre-existing failure: ready\n{out}");
+}
+
+#[test]
+fn audit_counts_a_plain_pytest_failure_as_preexisting() {
+    // Regression: as above for audit, which also listed the victim in its
+    // serial fix-list, a fix that can't work (it fails at -n 0 as well).
+    let Some(venv) = pytest_env() else { return };
+    let dir = preexisting_pollution_suite("auditpre");
+    let (code, out) = run(&venv, &dir, &["audit"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.contains("mark them serial"),
+        "a failure plain pytest has too gets no serial fix:\n{out}"
+    );
+    assert_eq!(code, 0, "only a pre-existing failure: parallel-safe\n{out}");
+}

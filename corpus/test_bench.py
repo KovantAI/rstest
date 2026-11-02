@@ -25,7 +25,7 @@ import json
 
 from bench import _baseline_unusable, _parity_row, _render_sweep, _row_status, render
 from procmem import linear_fit, suspended
-from run import Suite, diff
+from run import Suite, _status, diff
 
 FLOOR = 99.5
 
@@ -199,6 +199,50 @@ def test_diff_pairing_still_reports_outcome_divergence(tmp_path):
     assert d["mismatch_count"] == 1 and d["score"] < 100.0
 
 
+def _snap_exit(path, tests, exitstatus):
+    path.write_text(
+        json.dumps({"tests": tests, "collect_errors": [], "meta": {"exitstatus": exitstatus}})
+    )
+    return str(path)
+
+
+def test_exit_code_divergence_fails_a_full_parity_suite(tmp_path):
+    # flask 2026-11-02: 491/491 passed under both, but a `<session: PytestWarning>`
+    # made rstest exit 1. Per-test parity alone read that as "ok".
+    t = {"t.py::a": {"call": "passed"}}
+    d = diff(_snap_exit(tmp_path / "b.json", t, 0), _snap_exit(tmp_path / "c.json", t, 1))
+    assert (d["score"], d["pytest_exit"], d["rstest_exit"]) == (100.0, 0, 1)
+    assert _status(d) == "exit-diff"
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), _snap_exit(tmp_path / "c.json", t, 1))
+    assert _status(d) == "ok"
+
+
+def test_status_outcome_diff_wins_and_missing_exit_is_not_judged():
+    assert _status({"score": 99.0, "pytest_exit": 0, "rstest_exit": 1}) == "diff"
+    assert _status({"score": 100.0, "pytest_exit": None, "rstest_exit": 1}) == "ok"
+
+
+def test_mono_baseline_exit_is_worst_project_ignoring_empty(tmp_path, monkeypatch):
+    import types
+
+    import run
+
+    exits = iter([0, 5, 1])
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        Path(env["RSTEST_RECORD"]).write_text(
+            json.dumps({"tests": {}, "collect_errors": [], "meta": {"exitstatus": next(exits)}})
+        )
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("m", {"mode": "mono", "projects": ["a", "b", "c"]}, "w.whl", "rstest")
+    suite.dir = suite.src = tmp_path
+    snap, _ = suite.run_pytest()
+    assert json.loads(Path(snap).read_text())["meta"]["exitstatus"] == 1
+
+
 def test_diff_excludes_noisy_prefixes_from_score(tmp_path):
     p = {"a.py::test_net[x]": {"call": "failed"}, "a.py::test_ok": {"call": "passed"}}
     c = {"a.py::test_net[x]": {"call": "skipped"}, "a.py::test_ok": {"call": "passed"}}
@@ -347,6 +391,30 @@ def test_run_pytest_passes_xdist_args_only_with_workers(tmp_path, monkeypatch):
     suite.run_pytest()
     assert argvs[0][-4:] == ["-n", "8", "--dist", "worksteal"]
     assert "--dist" not in argvs[1] and "-n" not in argvs[1]
+
+
+def test_run_rstest_keeps_output_next_to_snapshot(tmp_path, monkeypatch):
+    # The snapshot records a `<session: X>` collect error by path only; its
+    # traceback lives in the terminal summary, so that output must be kept.
+    import types
+
+    import run
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        Path(argv[argv.index("--report-json") + 1]).write_text(
+            '{"tests": {}, "collect_errors": ["<session: PytestWarning>"]}'
+        )
+        return types.SimpleNamespace(
+            returncode=1, stdout="ERROR collecting <session: PytestWarning>\n", stderr="tb\n"
+        )
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    snap, _ = suite.run_rstest()
+    assert snap.with_suffix(".log").read_text() == (
+        "ERROR collecting <session: PytestWarning>\ntb\n"
+    )
 
 
 def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):

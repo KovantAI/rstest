@@ -176,7 +176,8 @@ pub(super) fn classify_failures(
         return Ok(Vec::new());
     }
     // M2: scope the discriminators to the FILES containing failures, not the
-    // whole suite - cost ∝ failing files. A cross-file polluter in a
+    // whole suite - cost ∝ failing files (plus one whole-selection serial run,
+    // below, for failures plain pytest has too). A cross-file polluter in a
     // non-failing file may round ISOLATION down to ORDER-DEPENDENCY.
     let files: std::collections::BTreeSet<&str> = failed.iter().map(|n| file_of(n)).collect();
     // Nodeids (and so these file paths) are rootdir-relative, but a child
@@ -213,11 +214,18 @@ pub(super) fn classify_failures(
         ""
     };
     sink.warn(&format!(
-        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×{serial_runs} \
-         scoped to those files, loadfile ×{loadfile_runs}{lf_scope})…",
+        "  {} parallel failure(s) in {} file(s); running discriminators (serial ×1 over the \
+         whole selection, serial ×{serial_runs} scoped to those files, loadfile \
+         ×{loadfile_runs}{lf_scope})…",
         failed.len(),
         files.len(),
     ));
+    // One serial run of the whole selection, as plain pytest runs it: the
+    // scoped runs leave out the other files, so a victim of a polluter in one
+    // of them passes there though plain pytest fails it too.
+    let mut whole = args.to_vec();
+    whole.push(MAXFAIL_LIFT.into());
+    let full = run_session(python, &["-n", "0"], &whole)?;
     let serial: Vec<Outcomes> = (0..serial_runs)
         .map(|_| run_session(python, &["-n", "0"], &scoped))
         .collect::<Result<_>>()?;
@@ -253,7 +261,8 @@ pub(super) fn classify_failures(
         // passed one loadfile run is still a co-location race, not ORDER.
         let lf = loadfile.iter().any(|o| fails(o, n));
         let alone = par.keys().filter(|m| file_of(m) == file_of(n)).count() == 1;
-        let v = decide(all, any, lf, wait_bound(n), alone);
+        // Absent from the whole-selection run is no evidence: read as a pass.
+        let v = decide(all, any, fails(&full, n), lf, wait_bound(n), alone);
         out.push((n.clone(), v));
     }
     Ok(out)
@@ -315,12 +324,14 @@ fn scoped_selection(
 }
 
 /// The pure classifier decision for a test that failed in parallel, given
-/// whether it also failed the two serial repeats, the loadfile run, whether
-/// its parallel run was wait-bound, and whether it is the only test in its
-/// file. Kept separate from the I/O so it's testable.
+/// whether it also failed the two scoped serial repeats, the serial run of the
+/// whole selection, the loadfile run, whether its parallel run was wait-bound,
+/// and whether it is the only test in its file. Kept separate from the I/O so
+/// it's testable.
 pub(super) fn decide(
     serial1: bool,
     serial2: bool,
+    full_serial: bool,
     loadfile: bool,
     wait_bound: bool,
     alone_in_file: bool,
@@ -329,6 +340,10 @@ pub(super) fn decide(
         Verdict::NotParallel // fails deterministically even serially
     } else if serial1 || serial2 {
         Verdict::IntrinsicFlake // serial repeats disagree
+    } else if full_serial {
+        // Passes its own files serially but fails the whole suite serially: a
+        // polluter in another file, which plain pytest hits too.
+        Verdict::NotParallel
     } else if !loadfile && alone_in_file {
         // loadfile cannot change a lone test's order: it passed that run
         // because the race went its way.
@@ -505,43 +520,85 @@ mod tests {
     fn decide_covers_every_branch() {
         // (serial1, serial2, loadfile, wait_bound) -> verdict
         // fails both serial repeats -> not a parallelism issue.
-        assert_eq!(decide(true, true, true, false, false), Verdict::NotParallel);
         assert_eq!(
-            decide(true, true, false, false, false),
+            decide(true, true, false, true, false, false),
+            Verdict::NotParallel
+        );
+        assert_eq!(
+            decide(true, true, false, false, false, false),
             Verdict::NotParallel
         );
         // serial repeats disagree -> intrinsic flake (either order).
         assert_eq!(
-            decide(true, false, true, false, false),
+            decide(true, false, false, true, false, false),
             Verdict::IntrinsicFlake
         );
         assert_eq!(
-            decide(false, true, false, true, false),
+            decide(false, true, false, false, true, false),
             Verdict::IntrinsicFlake
         );
         // passes serial, passes loadfile -> order dependency (cross-file).
         assert_eq!(
-            decide(false, false, false, false, false),
+            decide(false, false, false, false, false, false),
             Verdict::OrderDependency
         );
         // passes serial, fails loadfile, wait-bound -> wall-clock.
-        assert_eq!(decide(false, false, true, true, false), Verdict::WallClock);
+        assert_eq!(
+            decide(false, false, false, true, true, false),
+            Verdict::WallClock
+        );
         // passes serial, fails loadfile, NOT wait-bound -> isolation.
-        assert_eq!(decide(false, false, true, false, false), Verdict::Isolation);
+        assert_eq!(
+            decide(false, false, false, true, false, false),
+            Verdict::Isolation
+        );
         // passes serial and loadfile, but alone in its file -> a cross-file
         // race (loadfile can't reorder a lone test); only that branch changes.
-        assert_eq!(decide(false, false, false, false, true), Verdict::Race);
-        assert_eq!(decide(false, false, true, false, true), Verdict::Isolation);
-        assert_eq!(decide(true, true, false, false, true), Verdict::NotParallel);
+        assert_eq!(
+            decide(false, false, false, false, false, true),
+            Verdict::Race
+        );
+        assert_eq!(
+            decide(false, false, false, true, false, true),
+            Verdict::Isolation
+        );
+        assert_eq!(
+            decide(true, true, false, false, false, true),
+            Verdict::NotParallel
+        );
+    }
+
+    #[test]
+    fn decide_whole_suite_serial_failure_is_not_parallel() {
+        // Passes the scoped serial runs but fails the whole selection
+        // serially: plain pytest fails it too, whatever the parallel signals.
+        for (lf, wait, alone) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                decide(false, false, true, lf, wait, alone),
+                Verdict::NotParallel
+            );
+        }
+        // Scoped serial disagreement still reads as a flake.
+        assert_eq!(
+            decide(true, false, true, false, false, false),
+            Verdict::IntrinsicFlake
+        );
     }
 
     #[test]
     fn decide_wait_bound_only_splits_the_loadfile_failure() {
         // wait_bound must not override the serial/order branches - it only
         // distinguishes WallClock from Isolation once load+loadfile both fail.
-        assert_eq!(decide(true, true, true, true, false), Verdict::NotParallel);
         assert_eq!(
-            decide(false, false, false, true, false),
+            decide(true, true, false, true, true, false),
+            Verdict::NotParallel
+        );
+        assert_eq!(
+            decide(false, false, false, false, true, false),
             Verdict::OrderDependency
         );
     }
