@@ -532,6 +532,26 @@ def gate_auto_worker_capping(g, args, binary):
         "test session starts" in r.stdout.splitlines()[0],
         r.stdout[:100],
     )
+    # --pyargs names an import path, not a file: run from a folder with no
+    # Python files (the corpus' pandas/sklearn shape) the walk is empty, and
+    # that must not read as "nothing to run" -> one worker.
+    g.write("pyargs_src/pyagate/__init__.py", "")
+    for i in range(6):
+        g.write(f"pyargs_src/pyagate/test_m{i}.py", "def test_a(): assert True\n")
+    g.write("pyargs_cwd/README", "no python here\n")
+    r = g.run(
+        "--pyargs",
+        "pyagate",
+        cwd=g.tmp / "pyargs_cwd",
+        env_extra={"PYTHONPATH": str(g.tmp / "pyargs_src")},
+    )
+    check(
+        "auto scales a --pyargs run from a folder with no Python files",
+        r.returncode == 0
+        and "6 passed" in r.stdout
+        and "workers (parallel" in r.stdout.splitlines()[0],
+        f"rc={r.returncode} " + r.stdout[:100] + r.stdout[-100:],
+    )
 
 
 def gate_shuffle(g, args, binary):

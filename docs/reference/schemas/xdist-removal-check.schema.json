@@ -92,7 +92,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,\n`ini_key`, `import`, `hook`, `hasplugin_gate`, `plugin_import`, or\n`plugin_gate`.",
+          "description": "Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,\n`ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip`,\n`plugin_import`, or `plugin_gate`.",
           "type": "string"
         },
         "location": {

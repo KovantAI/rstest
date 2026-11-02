@@ -43,8 +43,15 @@ Reproducibility measures:
 - checkouts pinned to `lock.json` SHAs (written on first clone),
 - baseline pytest pinned to the vendored version (no version-skew diffs),
 - `PYTHONHASHSEED=0` for both runs (stable set/dict-repr parametrize IDs),
-- run-dependent parametrize IDs (memory addresses, `uuid4()`) are
-  normalized and paired before counting missing/extra.
+- run-dependent parametrize IDs (memory addresses, `uuid4()`, wall-clock
+  times and dates, multi-line reprs in hash order) are normalized and paired
+  before counting missing/extra,
+- a suite's `noisy` node-ID prefixes in `suites.toml` (outcomes that move
+  between any two runs: live network, GC timing, upstream order pollution)
+  are left out of the score and counted under `noisy_excluded`,
+- the two runs' exit codes are compared too (`pytest_exit`/`rstest_exit`): a
+  suite at 100% parity whose exit codes differ is `exit-diff`, not `ok`. Each
+  runner's output is kept next to its snapshot (`pytest.log`, `rstest.log`).
 
 ### Speed ramp (`bench.py`)
 

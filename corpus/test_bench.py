@@ -25,7 +25,7 @@ import json
 
 from bench import _baseline_unusable, _parity_row, _render_sweep, _row_status, render
 from procmem import linear_fit, suspended
-from run import Suite, diff
+from run import Suite, _status, diff
 
 FLOOR = 99.5
 
@@ -174,6 +174,84 @@ def test_diff_extra_from_dropped_module_is_explained(tmp_path):
     assert _row_status(row, FLOOR) == "investigate"
 
 
+def test_diff_pairs_wall_clock_param_ids(tmp_path):
+    # marshmallow builds IDs from datetime.now(); the runs straddled a minute.
+    p = {"t.py::test_dt[01:46:59 2026-11-02]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00 2026-11-02]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairs_multiline_ids_in_any_line_order(tmp_path):
+    # pydantic-core pretty-prints its fields map in per-process hash order;
+    # pytest escapes the newlines to a literal backslash-n.
+    nl = "\\n"
+    p = {f"t.py::test_any[{nl.join(['M {', '  a: 1,', '  b: 2,', '}'])}]": {"call": "passed"}}
+    c = {f"t.py::test_any[{nl.join(['M {', '  b: 2,', '  a: 1,', '}'])}]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairing_still_reports_outcome_divergence(tmp_path):
+    p = {"t.py::test_dt[01:46:59]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00]": {"call": "failed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert d["mismatch_count"] == 1 and d["score"] < 100.0
+
+
+def _snap_exit(path, tests, exitstatus):
+    path.write_text(
+        json.dumps({"tests": tests, "collect_errors": [], "meta": {"exitstatus": exitstatus}})
+    )
+    return str(path)
+
+
+def test_exit_code_divergence_fails_a_full_parity_suite(tmp_path):
+    # flask 2026-11-02: 491/491 passed under both, but a `<session: PytestWarning>`
+    # made rstest exit 1. Per-test parity alone read that as "ok".
+    t = {"t.py::a": {"call": "passed"}}
+    d = diff(_snap_exit(tmp_path / "b.json", t, 0), _snap_exit(tmp_path / "c.json", t, 1))
+    assert (d["score"], d["pytest_exit"], d["rstest_exit"]) == (100.0, 0, 1)
+    assert _status(d) == "exit-diff"
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), _snap_exit(tmp_path / "c.json", t, 1))
+    assert _status(d) == "ok"
+
+
+def test_status_outcome_diff_wins_and_missing_exit_is_not_judged():
+    assert _status({"score": 99.0, "pytest_exit": 0, "rstest_exit": 1}) == "diff"
+    assert _status({"score": 100.0, "pytest_exit": None, "rstest_exit": 1}) == "ok"
+
+
+def test_mono_baseline_exit_is_worst_project_ignoring_empty(tmp_path, monkeypatch):
+    import types
+
+    import run
+
+    exits = iter([0, 5, 1])
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        Path(env["RSTEST_RECORD"]).write_text(
+            json.dumps({"tests": {}, "collect_errors": [], "meta": {"exitstatus": next(exits)}})
+        )
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("m", {"mode": "mono", "projects": ["a", "b", "c"]}, "w.whl", "rstest")
+    suite.dir = suite.src = tmp_path
+    snap, _ = suite.run_pytest()
+    assert json.loads(Path(snap).read_text())["meta"]["exitstatus"] == 1
+
+
+def test_diff_excludes_noisy_prefixes_from_score(tmp_path):
+    p = {"a.py::test_net[x]": {"call": "failed"}, "a.py::test_ok": {"call": "passed"}}
+    c = {"a.py::test_net[x]": {"call": "skipped"}, "a.py::test_ok": {"call": "passed"}}
+    b, cand = _write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c)
+    assert diff(b, cand)["score"] < 100.0
+    d = diff(b, cand, noisy=["a.py::test_net"])
+    assert (d["score"], d["noisy_excluded"], d["baseline_tests"]) == (100.0, 1, 2)
+
+
 def test_diff_extra_from_healthy_module_is_unexplained(tmp_path):
     # rstest collected an extra from a module the baseline collected FINE (only
     # mod_x errored) -> unexplained -> _row_status gates it.
@@ -313,6 +391,57 @@ def test_run_pytest_passes_xdist_args_only_with_workers(tmp_path, monkeypatch):
     suite.run_pytest()
     assert argvs[0][-4:] == ["-n", "8", "--dist", "worksteal"]
     assert "--dist" not in argvs[1] and "-n" not in argvs[1]
+
+
+def test_run_rstest_keeps_output_next_to_snapshot(tmp_path, monkeypatch):
+    # The snapshot records a `<session: X>` collect error by path only; its
+    # traceback lives in the terminal summary, so that output must be kept.
+    import types
+
+    import run
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        Path(argv[argv.index("--report-json") + 1]).write_text(
+            '{"tests": {}, "collect_errors": ["<session: PytestWarning>"]}'
+        )
+        return types.SimpleNamespace(
+            returncode=1, stdout="ERROR collecting <session: PytestWarning>\n", stderr="tb\n"
+        )
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    snap, _ = suite.run_rstest()
+    assert snap.with_suffix(".log").read_text() == (
+        "ERROR collecting <session: PytestWarning>\ntb\n"
+    )
+
+
+def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):
+    # A tagless shallow clone versions as 0.1.devN under setuptools_scm, so
+    # freezegun's `python-dateutil>=2.7` swapped the editable checkout for PyPI's
+    # newest (3.0.0 broke collection). Every install step must carry a real
+    # pretend version that satisfies that floor.
+    import types
+
+    import run
+    import tomllib
+
+    envs = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        envs.append(env)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    cfg = tomllib.loads((Path(__file__).parent / "suites.toml").read_text())["python-dateutil"]
+    suite = Suite("python-dateutil", cfg, "w.whl", "rstest")
+    for step in cfg["install"]:
+        suite.pip(*step.split())
+    assert len(envs) == len(cfg["install"])
+    for env in envs:
+        major, minor = map(int, env["SETUPTOOLS_SCM_PRETEND_VERSION"].split(".")[:2])
+        assert (major, minor) >= (2, 7)
 
 
 # ---- main(): what a result file records, and how each point is run -----------

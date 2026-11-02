@@ -304,6 +304,7 @@ class Suite:
         )
         wall = time.monotonic() - t0
         log(f"  {self.name}: {label} done in {wall:.1f}s (rc={r.returncode})")
+        snap.with_suffix(".log").write_text((r.stdout or "") + (r.stderr or ""))
         if not snap.exists():
             raise RuntimeError(
                 f"pytest produced no snapshot (rc={r.returncode})\n"
@@ -330,6 +331,7 @@ class Suite:
         # root-relative keys rstest emits for the merged run.
         self.write_mono_projects()  # keep on-disk projects in sync (execute-only safe)
         combined = {"meta": {}, "collect_errors": [], "tests": {}}
+        exits = []
         total = 0.0
         py = str(self.venv / "bin" / "python")
         for proj in self.cfg["projects"]:
@@ -361,6 +363,11 @@ class Suite:
             for nid, v in data["tests"].items():
                 combined["tests"][f"{proj}/{nid}"] = v
             combined["collect_errors"] += [f"{proj}/{p}" for p in data["collect_errors"]]
+            exits.append(data.get("meta", {}).get("exitstatus"))
+        # One root rstest run vs N pytest runs: the worst exit stands for the
+        # set, but 5 (no tests collected) only when every project had none.
+        real = [e for e in exits if e not in (None, 5)]
+        combined["meta"]["exitstatus"] = max(real) if real else (5 if 5 in exits else None)
         merged = self.dir / "pytest.json"
         merged.write_text(json.dumps(combined, sort_keys=True))
         return merged, total
@@ -396,6 +403,9 @@ class Suite:
         r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=self.env())
         wall = time.monotonic() - t0
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
+        # The snapshot keeps only collect-error paths; the terminal summary has
+        # their tracebacks (a `<session: ...>` error is otherwise undiagnosable).
+        snap.with_suffix(".log").write_text((r.stdout or "") + (r.stderr or ""))
         if not snap.exists():
             raise RuntimeError(
                 f"rstest produced no snapshot (rc={r.returncode})\n"
@@ -407,6 +417,10 @@ class Suite:
 _UNSTABLE = [
     (re.compile(r"0x[0-9a-fA-F]{6,}"), "<addr>"),
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "<uuid>"),
+    # Wall-clock params (marshmallow builds IDs from `datetime.now()`): the two
+    # runs straddle a second/minute boundary.
+    (re.compile(r"\b\d{2}:\d{2}:\d{2}\b"), "<time>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{2}-\d{2}-\d{4}\b"), "<date>"),
 ]
 
 
@@ -418,16 +432,29 @@ def _norm(nodeid):
     """
     for rx, repl in _UNSTABLE:
         nodeid = rx.sub(repl, nodeid)
+    # Multi-line IDs are pretty-printed reprs (pytest escapes the newlines to a
+    # literal `\n`); pydantic-core dumps its fields map in per-process hash
+    # order, so compare the lines as a multiset.
+    # ponytail: line-sort, not a repr parser; pairs only leftovers whose
+    # outcomes also agree, so a rare false pairing can't hide a diff.
+    if "\\n" in nodeid:
+        nodeid = "\\n".join(sorted(nodeid.split("\\n")))
     return nodeid
 
 
-def diff(baseline_path, candidate_path):
+def diff(baseline_path, candidate_path, noisy=()):
+    """Per-test outcome diff. `noisy` is a suite's node-ID prefixes whose
+    outcome depends on the machine (live network, GC timing, upstream order
+    pollution) and moves between any two runs; they are left out of the score
+    and only counted."""
     # Read each snapshot ONCE: the bench's gate needs collect-error counts too,
     # so surface them here rather than re-parsing the same files downstream.
     da = json.loads(Path(baseline_path).read_text())
     db = json.loads(Path(candidate_path).read_text())
-    a = da["tests"]
-    b = db["tests"]
+    noisy = tuple(noisy)
+    a = {k: v for k, v in da["tests"].items() if not k.startswith(noisy)}
+    b = {k: v for k, v in db["tests"].items() if not k.startswith(noisy)}
+    noisy_excluded = len((set(da["tests"]) | set(db["tests"])) - set(a) - set(b))
     keys = ("setup", "call", "teardown", "wasxfail")
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
@@ -468,8 +495,8 @@ def diff(baseline_path, candidate_path):
     base_ce_modules = {c.split("::", 1)[0] for c in da.get("collect_errors", [])}
     extra_unexplained = sum(1 for nid in only_b if nid.split("::", 1)[0] not in base_ce_modules)
     return {
-        "baseline_tests": len(a),
-        "candidate_tests": len(b),
+        "baseline_tests": len(da["tests"]),
+        "candidate_tests": len(db["tests"]),
         "missing": only_a[:20],
         "missing_count": len(only_a),
         "extra": only_b[:20],
@@ -477,11 +504,27 @@ def diff(baseline_path, candidate_path):
         "mismatch": sorted(mismatch)[:20],
         "mismatch_count": len(mismatch),
         "unstable_id_pairs": unstable_pairs,
+        "noisy_excluded": noisy_excluded,
+        # Per-test parity can't see a run-level failure: a session error that
+        # escapes pytest.main exits 1 with every test passed.
+        "pytest_exit": da.get("meta", {}).get("exitstatus"),
+        "rstest_exit": db.get("meta", {}).get("exitstatus"),
         "baseline_collect_errors": len(da.get("collect_errors", [])),
         "candidate_collect_errors": len(db.get("collect_errors", [])),
         "extra_unexplained_count": extra_unexplained,
         "score": round(100.0 * agree / denom, 2),
     }
+
+
+def _status(res):
+    """`diff` (per-test outcomes differ) wins over `exit-diff` (same outcomes,
+    different exit code). A snapshot without an exit code can't be judged."""
+    if res["score"] != 100.0:
+        return "diff"
+    pe, re_ = res.get("pytest_exit"), res.get("rstest_exit")
+    if pe is not None and re_ is not None and pe != re_:
+        return "exit-diff"
+    return "ok"
 
 
 def _record_plugins(suite, res):
@@ -566,9 +609,12 @@ def main():
             res["pytest_wall"] = round(base_wall, 1)
             cand, cand_wall = suite.run_rstest()
             res["rstest_wall"] = round(cand_wall, 1)
-            res.update(diff(base, cand))
-            res["status"] = "ok" if res["score"] == 100.0 else "diff"
-            log(f"  {name}: parity {res['score']}% ({res['baseline_tests']} tests)")
+            res.update(diff(base, cand, suite.cfg.get("noisy", ())))
+            res["status"] = _status(res)
+            log(
+                f"  {name}: parity {res['score']}% ({res['baseline_tests']} tests), "
+                f"exit pytest={res['pytest_exit']} rstest={res['rstest_exit']}"
+            )
         except subprocess.TimeoutExpired as e:
             res.update(status="timeout", error=str(e.cmd[:3]))
             log(f"  {name}: EXECUTE TIMEOUT")
@@ -582,13 +628,16 @@ def main():
     print("\n| suite | tests | parity | pytest | rstest | status |")
     print("|---|---|---|---|---|---|")
     for r in rows:
+        status = str(r.get("status", "-"))
+        if status == "exit-diff":
+            status += f" (pytest {r['pytest_exit']}, rstest {r['rstest_exit']})"
         print(
             f"| {r['suite']} | {r.get('baseline_tests', '-')} | "
             f"{r.get('score', '-')}% | {r.get('pytest_wall', '-')}s | "
-            f"{r.get('rstest_wall', '-')}s | {r.get('status', '-')} |"
+            f"{r.get('rstest_wall', '-')}s | {status} |"
         )
     ok = sum(1 for r in rows if r.get("status") == "ok")
-    log(f"=== {ok}/{len(rows)} suites at 100% parity ===")
+    log(f"=== {ok}/{len(rows)} suites at 100% parity with matching exit codes ===")
 
 
 if __name__ == "__main__":
