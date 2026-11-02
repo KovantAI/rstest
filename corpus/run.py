@@ -24,12 +24,15 @@ Requires: git, uv, python >= 3.11 (tomllib).
 """
 
 import argparse
+import contextlib
 import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,6 +68,32 @@ def sh(args, cwd=None, env=None, timeout=PHASE_TIMEOUT):
         capture_output=True,
         text=True,
     )
+
+
+def _wipe(path):
+    """rmtree that also clears mode-000 dirs some suites leave behind."""
+    for root, dirs, _ in os.walk(path):  # top-down: chmod before descending
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o700)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _private_tmp(env):
+    """A fresh TMPDIR for one runner invocation. Both runners otherwise share
+    $TMPDIR/pytest-of-<user>, whose numbered-dir cleanup runs at every session
+    end: a mode-000 dir one suite leaves there (flask's
+    test_static_directory_without_*) makes pytest's rm_rf warn, and under a
+    LATER suite's `filterwarnings = error` that crashes its session exit 1,
+    pytest and rstest alike (2026-11-02: flask, click, jinja2). Kept under the
+    system temp root, not the work dir: AF_UNIX socket paths cap at 104 bytes.
+    """
+    path = tempfile.mkdtemp(prefix="rsc-")
+    env["TMPDIR"] = path
+    try:
+        yield
+    finally:
+        _wipe(path)
 
 
 def _strip_opt(args, opt):
@@ -288,20 +317,21 @@ class Suite:
         label = "pytest" if xdist_workers is None else f"xdist -n {xdist_workers}"
         log(f"  {self.name}: {label} starting")
         t0 = time.monotonic()
-        r = sh(
-            [
-                str(self.venv / "bin" / "python"),
-                "-m",
-                "pytest",
-                "-p",
-                "recorder",
-                "-q",
-                *xdist,
-                *self.target_args(),
-            ],
-            cwd=self.cwd(),
-            env=env,
-        )
+        with _private_tmp(env):
+            r = sh(
+                [
+                    str(self.venv / "bin" / "python"),
+                    "-m",
+                    "pytest",
+                    "-p",
+                    "recorder",
+                    "-q",
+                    *xdist,
+                    *self.target_args(),
+                ],
+                cwd=self.cwd(),
+                env=env,
+            )
         wall = time.monotonic() - t0
         log(f"  {self.name}: {label} done in {wall:.1f}s (rc={r.returncode})")
         snap.with_suffix(".log").write_text((r.stdout or "") + (r.stderr or ""))
@@ -346,11 +376,12 @@ class Suite:
             # target_args() (the suite's `args`, e.g. a `-W` filter) must ride
             # the mono baseline too, or it diverges from the rstest candidate
             # (which always forwards them) and reads as a false parity drop.
-            r = sh(
-                [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
-                cwd=proj_dir,
-                env=env,
-            )
+            with _private_tmp(env):
+                r = sh(
+                    [py, "-m", "pytest", "-p", "recorder", "-q", *self.target_args()],
+                    cwd=proj_dir,
+                    env=env,
+                )
             wall = time.monotonic() - t0
             total += wall
             log(f"  {self.name}: pytest {proj} done in {wall:.1f}s (rc={r.returncode})")
@@ -400,7 +431,9 @@ class Suite:
         nlabel = f"-n {workers}" if workers is not None else "-n auto"
         log(f"  {self.name}: rstest starting ({nlabel}, --worker-timeout 120)")
         t0 = time.monotonic()
-        r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=self.env())
+        env = self.env()
+        with _private_tmp(env):
+            r = sh(self.rstest_argv(snap, workers), cwd=self.cwd(), env=env)
         wall = time.monotonic() - t0
         log(f"  {self.name}: rstest done in {wall:.1f}s (rc={r.returncode})")
         # The snapshot keeps only collect-error paths; the terminal summary has

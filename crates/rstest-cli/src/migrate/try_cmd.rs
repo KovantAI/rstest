@@ -443,6 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn compute_parity_tells_skipped_from_passed() {
+        // Regression: a skip read as a pass, so a test that ran under pytest
+        // but skipped under rstest (a skipif on PYTEST_XDIST_WORKER, which
+        // only rstest sets), and the reverse, showed as identical outcomes.
+        let doc = |a: serde_json::Value, b: serde_json::Value| {
+            crate::migrate::parse_outcomes(&serde_json::json!({"tests": {"a": a, "b": b}}), false)
+                .unwrap()
+        };
+        let ran = || serde_json::json!({"setup": "passed", "call": "passed"});
+        let skipped = || serde_json::json!({"setup": "skipped", "teardown": "passed"});
+        let py = doc(ran(), skipped());
+        let rs = doc(skipped(), ran());
+        let p = compute_parity(&py, &rs);
+        assert!(!p.identical);
+        assert_eq!(p.diffs, 2);
+        // Skipped on both sides is parity.
+        assert!(compute_parity(&py, &py).identical);
+    }
+
+    #[test]
     fn compute_parity_flags_phase_divergence() {
         // Same id, opposite phase -> one differing outcome, not identical.
         let py = outcomes(&[("a", Phase::Pass)]);

@@ -417,6 +417,35 @@ def test_run_rstest_keeps_output_next_to_snapshot(tmp_path, monkeypatch):
     )
 
 
+def test_each_runner_gets_a_private_tmpdir_wiped_after(tmp_path, monkeypatch):
+    # flask leaves a mode-000 dir in $TMPDIR/pytest-of-<user>; the NEXT session
+    # to clean that shared root crashed exit 1 under `filterwarnings = error`.
+    import os
+    import types
+
+    import run
+
+    seen = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        tmp = Path(env["TMPDIR"])
+        seen.append(tmp)
+        (tmp / "pytest-of-u" / "my_dir").mkdir(parents=True)
+        os.chmod(tmp / "pytest-of-u" / "my_dir", 0)
+        snap = env.get("RSTEST_RECORD") or argv[argv.index("--report-json") + 1]
+        Path(snap).write_text('{"tests": {}, "collect_errors": []}')
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    suite.run_pytest()
+    suite.run_rstest()
+    assert len(set(seen)) == 2 and os.environ.get("TMPDIR") not in {str(p) for p in seen}
+    assert not any(p.exists() for p in seen)
+
+
 def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):
     # A tagless shallow clone versions as 0.1.devN under setuptools_scm, so
     # freezegun's `python-dateutil>=2.7` swapped the editable checkout for PyPI's

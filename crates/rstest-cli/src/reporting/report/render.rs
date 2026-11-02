@@ -122,6 +122,23 @@ impl Run {
         }
     }
 
+    /// Errors that escaped the worker's whole pytest session (`<session: X>`,
+    /// e.g. a warning raised at unconfigure under `filterwarnings = error`).
+    /// They land after pytest's own summary, so in pytest-output mode nothing
+    /// else shows them; plain pytest dumps the same traceback to stderr.
+    pub fn print_session_errors(&self, sink: &mut Sink) {
+        let palette = sink.palette();
+        for (nodeid, longrepr) in &self.collect_errors {
+            if nodeid.starts_with("<session: ") {
+                sink.out_line(&format!(
+                    "\n{}",
+                    palette.bold_red(&format!("--- ERROR {nodeid} ---"))
+                ));
+                sink.out_line(longrepr.trim_end());
+            }
+        }
+    }
+
     /// The "failures by cause" block: failures sharing an exception, message
     /// and project frame, one entry per group (see [`Run::failure_groups`]),
     /// so a broken dependency failing dozens of tests reads as one cause.
@@ -725,6 +742,24 @@ mod tests {
         );
         assert!(out.contains("c.py"), "collect error shown:\n{out}");
         assert!(out.contains("ImportError"), "collect repr shown:\n{out}");
+    }
+
+    #[test]
+    fn print_session_errors_shows_only_escaped_session_errors() {
+        // pytest's own reporter already showed module collect errors; only a
+        // session-level escape needs rstest to print it.
+        let mut run = Run::default();
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        run.collect_error(
+            "<session: PytestWarning>".into(),
+            "PytestWarning: at unconfigure".into(),
+        );
+        let (mut sink, cap) = Sink::captured();
+        run.print_session_errors(&mut sink);
+        let out = cap.out();
+        assert!(out.contains("ERROR <session: PytestWarning>"), "{out}");
+        assert!(out.contains("at unconfigure"), "{out}");
+        assert!(!out.contains("ImportError"), "{out}");
     }
 
     #[test]

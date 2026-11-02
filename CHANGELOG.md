@@ -32,6 +32,12 @@ between 0.x releases and are listed here.
   an empty suite, so `rstest --pyargs pkg` ran on one worker: pandas took
   321s instead of 51s. An import-path selection now skips that shortcut.
 
+- **A single-worker run shows errors raised after the test session.** A
+  warning raised at session end under `filterwarnings = error` (for example
+  pytest failing to clean an old temp dir) made rstest exit 1 below a "491
+  passed" summary, with no word of why. Plain pytest prints that traceback;
+  rstest now prints it too, as `ERROR <session: ...>`.
+
 - **`migrate-check` says why the parallel pass didn't run.** When the two
   collections agreed but the pool still refused to dispatch (ids that differ
   per worker, or a set order both collections happened to share), it printed
@@ -70,6 +76,22 @@ between 0.x releases and are listed here.
   uninstall silently skipped those tests. `--xdist-trial` can't show it either
   (`-p no:xdist` leaves xdist importable). It is now a non-blocking finding,
   like a `hasplugin("xdist")` gate.
+
+- **`rstest try` tells a skipped test from a passed one.** A test that ran
+  under pytest but skipped under rstest (a `skipif` on `PYTEST_XDIST_WORKER`,
+  which only rstest sets), or the reverse, counted as identical outcomes.
+  A skip on one side and a pass on the other is now a parity difference.
+
+- **`xdist-removal-check --xdist-trial` counts a test that only skips without
+  pytest-xdist as a regression.** A test that passed with xdist loaded and
+  skipped with it hidden read as "none regressed", though the uninstall
+  drops it from the run.
+
+- **`xdist-removal-check` reports a skip under a guarded `import xdist`.** A
+  `try: import xdist` whose `except ImportError` branch calls `pytest.skip`
+  was fine to the scan, and the trial can't show it, so the uninstall
+  silently skipped those tests. It is reported like
+  `pytest.importorskip("xdist")`.
 
 ## 0.10.0 (2026-11-01)
 

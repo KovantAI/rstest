@@ -974,6 +974,7 @@ pub(super) fn finalize_output(
     } else if !passthrough && mode == progress::Mode::Pytest {
         // pytest already printed failures, warnings, durations and the summary
         // line itself. Only rstest's own additions follow.
+        outcome.run.print_session_errors(sink);
         outcome.run.print_quarantined(sink, &flake_history);
         // pytest's summary counted them as failed; say what rstest did instead.
         if let Some(note) = quarantine_note(outcome.run.counts()["quarantined"]) {

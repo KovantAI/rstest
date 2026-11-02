@@ -92,7 +92,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,\n`ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip`,\n`plugin_import`, or `plugin_gate`.",
+          "description": "Finding kind: `addopts_flag`, `addopts_ignored`, `required_plugin`,\n`ini_key`, `import`, `hook`, `hasplugin_gate`, `importorskip` (also a\nskip under a guarded `import xdist`), `plugin_import`, or `plugin_gate`.",
           "type": "string"
         },
         "location": {
@@ -147,7 +147,7 @@
           "minimum": 0
         },
         "regressions": {
-          "description": "Tests that pass with pytest-xdist loaded but fail (or are no longer\ncollected) with it hidden.",
+          "description": "Tests that pass with pytest-xdist loaded but fail, skip, or are no\nlonger collected with it hidden.",
           "type": "array",
           "items": {
             "type": "string"
