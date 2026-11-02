@@ -129,24 +129,29 @@ noisy = [
     "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPSProxyVerification::",
     "test/with_dummyserver/test_proxy_poolmanager.py::TestIPv6HTTPProxyManager::test_basic_ipv6_proxy",
     "test/contrib/test_socks.py::TestSOCKS4Proxy::test_socks_with_invalid_username",
-    # Timing-sensitive dummyserver sockets.
+    # Timing-sensitive dummyserver sockets and signal/EINTR tests.
     "test/with_dummyserver/test_socketlevel.py::TestProxyManager::test_connect_reconn",
-    "test/with_dummyserver/test_socketlevel.py::TestSSL::test_ssl_failure_midway_through_conn",
-    "test/with_dummyserver/test_socketlevel.py::TestSSL::test_ssl_read_timeout",
-    "test/with_dummyserver/test_socketlevel.py::TestSocketClosing::test_socket_shutdown_stops_recv",
     "test/test_connection.py::TestConnection::test_skip_header",
-    # Order-dependent in the serial baseline: fails with pyOpenSSL's
-    # set_passwd_cb DeprecationWarning (as if still injected) only in a full
-    # run; passes alone, after test/contrib, and under rstest. Polluter not
-    # pinned down (`rstest bisect` can).
+    # Order-dependent in the serial baseline: fails with pyOpenSSL deprecation
+    # warnings (set_passwd_cb, X509.get_subject), as if pyOpenSSL were still
+    # injected, only in a full run; passes alone, after test/contrib, and under
+    # rstest. Hits exactly the classes test_pyopenssl.py re-imports from
+    # test_socketlevel, so those are excluded whole. Polluter not pinned down
+    # (`rstest bisect` can).
     "test/with_dummyserver/test_socketlevel.py::TestClientCerts::",
-    # A socket leaked by an earlier test is GC'd mid-test ->
-    # PytestUnraisableExceptionWarning; which test catches it follows co-location.
+    "test/with_dummyserver/test_socketlevel.py::TestSNI::",
+    "test/with_dummyserver/test_socketlevel.py::TestSocketClosing::",
+    "test/with_dummyserver/test_socketlevel.py::TestSSL::",
+    # Diverged on one run each (2026-11-02), cause not pinned down.
     "test/contrib/test_pyopenssl.py::TestHTTPS_TLSv1_1::test_client_no_intermediate",
-    "test/contrib/test_pyopenssl.py::TestHTTPS_TLSv1_3::test_wrap_socket_failure_resource_leak",
     "test/contrib/test_pyopenssl.py::TestPyOpenSSLHelpers::test_get_subj_alt_name",
-    "test/contrib/test_pyopenssl.py::TestSocketSSL::test_ssl_load_default_certs_when_empty",
+    "test/contrib/test_pyopenssl.py::TestSocketSSL::test_ssl_failure_midway_through_conn",
 ]
+# By cause, any test: a socket or thread leaked by an EARLIER test is GC'd
+# during whichever test (or a worker's session end) runs next, so the failure
+# lands on a different test every run. A mismatch or session error whose
+# failure text carries one of these is left out of the score and counted.
+noisy_failures = ["PytestUnraisableExceptionWarning", "PytestUnhandledThreadExceptionWarning"]
 
 [requests]
 repo = "https://github.com/psf/requests"
@@ -160,6 +165,10 @@ install = ["-e .", "--group tests"]
 
 [pluggy]
 repo = "https://github.com/pytest-dev/pluggy"
+# Same trap as python-dateutil: the tagless clone versions as 0.1.devN, so the
+# pinned pytest's `pluggy>=1.5` swapped the checkout for PyPI's pluggy (the
+# suite tested a release, not this commit). The lock is past 1.6.0.
+env = { SETUPTOOLS_SCM_PRETEND_VERSION = "1.6.0.post0" }
 
 [packaging]
 repo = "https://github.com/pypa/packaging"

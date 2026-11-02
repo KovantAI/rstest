@@ -36,7 +36,9 @@ between 0.x releases and are listed here.
   warning raised at session end under `filterwarnings = error` (for example
   pytest failing to clean an old temp dir) made rstest exit 1 below a "491
   passed" summary, with no word of why. Plain pytest prints that traceback;
-  rstest now prints it too, as `ERROR <session: ...>`.
+  rstest now prints it too, as `ERROR <session: ...>`. `--report-json` also
+  gains `collect_error_reprs`, each collect error's traceback keyed by its
+  path, so CI can show why without the terminal log.
 
 - **`migrate-check` says why the parallel pass didn't run.** When the two
   collections agreed but the pool still refused to dispatch (ids that differ

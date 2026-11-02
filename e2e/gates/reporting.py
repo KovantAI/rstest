@@ -329,7 +329,7 @@ def gate_session_error_output(g, args, binary):
     )
     g.write("sesserr/pytest.ini", "[pytest]\nfilterwarnings = error\n")
     g.write("sesserr/test_ok.py", "def test_ok(): pass\n")
-    r = g.run(cwd=g.tmp / "sesserr")
+    r = g.run("--report-json", "report.json", cwd=g.tmp / "sesserr")
     check(
         "session error: exits 1 and shows the escaped traceback",
         r.returncode == 1
@@ -337,6 +337,14 @@ def gate_session_error_output(g, args, binary):
         and "ERROR <session: PytestWarning>" in r.stdout
         and "boom at unconfigure" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-200:],
+    )
+    # CI reads the report, not the terminal: the traceback must ride along.
+    doc = json.loads((g.tmp / "sesserr" / "report.json").read_text())
+    check(
+        "session error: report-json carries the traceback",
+        "boom at unconfigure"
+        in doc.get("collect_error_reprs", {}).get("<session: PytestWarning>", ""),
+        json.dumps(doc.get("collect_error_reprs"))[:200],
     )
 
 
