@@ -436,7 +436,8 @@ fn try_lifts_exitfirst_on_both_sides() {
     // Regression: with `-x`, pytest stopped at the first failure while the
     // rstest workers had already run the rest, so `try` reported those as
     // "only in rstest" and exited 1 on a suite where both runners agree.
-    // Needs a multi-worker pool to show; on one core both sides stop alike.
+    // The pytest side alone ran 1 test, so the 7-test assertion fails on any
+    // core count, even where a single worker stopped rstest early too.
     let Some(venv) = pytest_env() else { return };
     let dir = fresh_dir("tryx");
     std::fs::write(

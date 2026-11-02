@@ -2504,10 +2504,13 @@ pub(crate) fn check_workers() -> usize {
 }
 
 /// Whether the args select something on disk: a path, or a nodeid
-/// (`file.py::test`) whose file exists. Over-matching only keeps the
-/// empty-walk shortcut off, which is the safe direction.
+/// (`file.py::test`) whose file exists. `--pyargs` counts too: its positionals
+/// are import paths the walk never sees, so an empty walk proves nothing.
+/// Over-matching only keeps the empty-walk shortcut off, which is the safe
+/// direction.
 fn names_existing_path(args: &[String]) -> bool {
-    !crate::cli::path_args(args).is_empty()
+    args.iter().any(|a| a == "--pyargs")
+        || !crate::cli::path_args(args).is_empty()
         || args.iter().any(|a| {
             a.split_once("::")
                 .is_some_and(|(file, _)| std::path::Path::new(file).exists())
@@ -3960,6 +3963,7 @@ mod tests {
         // Cargo runs unit tests from the crate root, where Cargo.toml exists.
         assert!(names_existing_path(&s(&["Cargo.toml"])));
         assert!(names_existing_path(&s(&["Cargo.toml::test_x"])));
+        assert!(names_existing_path(&s(&["--pyargs", "some.pkg"])));
         assert!(!names_existing_path(&s(&["-q", "--maxfail=1"])));
         assert!(!names_existing_path(&s(&[
             "nope.py::test_x",

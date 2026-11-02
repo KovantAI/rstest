@@ -407,6 +407,10 @@ class Suite:
 _UNSTABLE = [
     (re.compile(r"0x[0-9a-fA-F]{6,}"), "<addr>"),
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), "<uuid>"),
+    # Wall-clock params (marshmallow builds IDs from `datetime.now()`): the two
+    # runs straddle a second/minute boundary.
+    (re.compile(r"\b\d{2}:\d{2}:\d{2}\b"), "<time>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{2}-\d{2}-\d{4}\b"), "<date>"),
 ]
 
 
@@ -418,16 +422,29 @@ def _norm(nodeid):
     """
     for rx, repl in _UNSTABLE:
         nodeid = rx.sub(repl, nodeid)
+    # Multi-line IDs are pretty-printed reprs (pytest escapes the newlines to a
+    # literal `\n`); pydantic-core dumps its fields map in per-process hash
+    # order, so compare the lines as a multiset.
+    # ponytail: line-sort, not a repr parser; pairs only leftovers whose
+    # outcomes also agree, so a rare false pairing can't hide a diff.
+    if "\\n" in nodeid:
+        nodeid = "\\n".join(sorted(nodeid.split("\\n")))
     return nodeid
 
 
-def diff(baseline_path, candidate_path):
+def diff(baseline_path, candidate_path, noisy=()):
+    """Per-test outcome diff. `noisy` is a suite's node-ID prefixes whose
+    outcome depends on the machine (live network, GC timing, upstream order
+    pollution) and moves between any two runs; they are left out of the score
+    and only counted."""
     # Read each snapshot ONCE: the bench's gate needs collect-error counts too,
     # so surface them here rather than re-parsing the same files downstream.
     da = json.loads(Path(baseline_path).read_text())
     db = json.loads(Path(candidate_path).read_text())
-    a = da["tests"]
-    b = db["tests"]
+    noisy = tuple(noisy)
+    a = {k: v for k, v in da["tests"].items() if not k.startswith(noisy)}
+    b = {k: v for k, v in db["tests"].items() if not k.startswith(noisy)}
+    noisy_excluded = len((set(da["tests"]) | set(db["tests"])) - set(a) - set(b))
     keys = ("setup", "call", "teardown", "wasxfail")
     only_a = sorted(set(a) - set(b))
     only_b = sorted(set(b) - set(a))
@@ -468,8 +485,8 @@ def diff(baseline_path, candidate_path):
     base_ce_modules = {c.split("::", 1)[0] for c in da.get("collect_errors", [])}
     extra_unexplained = sum(1 for nid in only_b if nid.split("::", 1)[0] not in base_ce_modules)
     return {
-        "baseline_tests": len(a),
-        "candidate_tests": len(b),
+        "baseline_tests": len(da["tests"]),
+        "candidate_tests": len(db["tests"]),
         "missing": only_a[:20],
         "missing_count": len(only_a),
         "extra": only_b[:20],
@@ -477,6 +494,7 @@ def diff(baseline_path, candidate_path):
         "mismatch": sorted(mismatch)[:20],
         "mismatch_count": len(mismatch),
         "unstable_id_pairs": unstable_pairs,
+        "noisy_excluded": noisy_excluded,
         "baseline_collect_errors": len(da.get("collect_errors", [])),
         "candidate_collect_errors": len(db.get("collect_errors", [])),
         "extra_unexplained_count": extra_unexplained,
@@ -566,7 +584,7 @@ def main():
             res["pytest_wall"] = round(base_wall, 1)
             cand, cand_wall = suite.run_rstest()
             res["rstest_wall"] = round(cand_wall, 1)
-            res.update(diff(base, cand))
+            res.update(diff(base, cand, suite.cfg.get("noisy", ())))
             res["status"] = "ok" if res["score"] == 100.0 else "diff"
             log(f"  {name}: parity {res['score']}% ({res['baseline_tests']} tests)")
         except subprocess.TimeoutExpired as e:

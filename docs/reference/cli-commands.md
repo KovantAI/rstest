@@ -57,6 +57,12 @@ The speed line names the worker count `-n auto` resolved to for this suite
 saved at least one second. In a git checkout it also projects the saving over
 the last 30 days, counting each commit in that window as one CI run.
 
+Both runs cover the whole suite: `-x`/`--maxfail` from your args or `addopts`
+is lifted on each side, since pytest would stop at the first failure while
+rstest's other workers run on. The rstest run also has reruns off
+(`[tool.rstest] reruns` included), so a failure pytest reports can't pass on a
+retry and read as parity.
+
 Parity needs something to compare. If either run hit a collection error, or
 ran no tests at all (an empty directory, everything deselected), `try` gives
 no verdict:
@@ -145,7 +151,10 @@ For ORDER-DEPENDENCY and ISOLATION findings it then **bisects the polluter**
 serially before the victim, reproduce the failure, and reports `POLLUTED BY:
 <file>` (cross-file), `SAME-FILE co-location (inspect <file>)`, or (when no
 serial ordering reproduces) that the failure is likely a concurrent-resource
-race rather than state pollution. When a finding's error text names a shared
+race rather than state pollution. The bisect runs pin pytest's rootdir and
+config file, so it finds the polluter from a subdirectory too, and lift
+`-x`/`--maxfail`, so an unrelated failing test can't end a run before the
+victim. When a finding's error text names a shared
 resource (a fixed port, one shared database, one shared home directory), a
 `CAUSE:` line under it names the resource and the per-worker fix, as in
 [`audit`](#audit).

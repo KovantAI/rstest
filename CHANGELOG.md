@@ -3,6 +3,35 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **`migrate-check` finds the polluter from a subdirectory.** The polluter
+  bisect passed rootdir-relative file paths to child runs, which resolved
+  them from the current directory. From `tests/` it selected
+  `tests/tests/...`, collected nothing, and reported every victim as "not
+  reproducible serially". The bisect now anchors the paths at the rootdir and
+  pins the config, as the discriminator runs already did.
+
+- **`migrate-check`'s polluter bisect lifts `-x`.** With `-x` or `--maxfail`
+  in `addopts`, an unrelated failing test run before the victim ended the
+  session, and the victim again read as "not reproducible serially".
+
+- **`rstest try` compares whole runs under `-x`.** pytest stopped at the
+  first failure while rstest's other workers ran on, so `try` reported the
+  rest as "only in rstest" and exited 1 on a suite where both runners agree.
+  `-x`/`--maxfail` is now lifted on both sides.
+
+- **`rstest try` turns reruns off.** `[tool.rstest] reruns` applied to its
+  rstest run, so a failure could pass on a retry: a parallel-only failure
+  then read as "identical outcomes ... drop-in ready".
+
+- **`-n auto` parallelizes `--pyargs` runs.** Run from a folder with no
+  Python files, the test-file walk found nothing and auto sizing read that as
+  an empty suite, so `rstest --pyargs pkg` ran on one worker: pandas took
+  321s instead of 51s. An import-path selection now skips that shortcut.
+
 ## 0.10.0 (2026-11-01)
 
 ### Features

@@ -174,6 +174,40 @@ def test_diff_extra_from_dropped_module_is_explained(tmp_path):
     assert _row_status(row, FLOOR) == "investigate"
 
 
+def test_diff_pairs_wall_clock_param_ids(tmp_path):
+    # marshmallow builds IDs from datetime.now(); the runs straddled a minute.
+    p = {"t.py::test_dt[01:46:59 2026-11-02]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00 2026-11-02]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairs_multiline_ids_in_any_line_order(tmp_path):
+    # pydantic-core pretty-prints its fields map in per-process hash order;
+    # pytest escapes the newlines to a literal backslash-n.
+    nl = "\\n"
+    p = {f"t.py::test_any[{nl.join(['M {', '  a: 1,', '  b: 2,', '}'])}]": {"call": "passed"}}
+    c = {f"t.py::test_any[{nl.join(['M {', '  b: 2,', '  a: 1,', '}'])}]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairing_still_reports_outcome_divergence(tmp_path):
+    p = {"t.py::test_dt[01:46:59]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00]": {"call": "failed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert d["mismatch_count"] == 1 and d["score"] < 100.0
+
+
+def test_diff_excludes_noisy_prefixes_from_score(tmp_path):
+    p = {"a.py::test_net[x]": {"call": "failed"}, "a.py::test_ok": {"call": "passed"}}
+    c = {"a.py::test_net[x]": {"call": "skipped"}, "a.py::test_ok": {"call": "passed"}}
+    b, cand = _write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c)
+    assert diff(b, cand)["score"] < 100.0
+    d = diff(b, cand, noisy=["a.py::test_net"])
+    assert (d["score"], d["noisy_excluded"], d["baseline_tests"]) == (100.0, 1, 2)
+
+
 def test_diff_extra_from_healthy_module_is_unexplained(tmp_path):
     # rstest collected an extra from a module the baseline collected FINE (only
     # mod_x errored) -> unexplained -> _row_status gates it.
@@ -313,6 +347,33 @@ def test_run_pytest_passes_xdist_args_only_with_workers(tmp_path, monkeypatch):
     suite.run_pytest()
     assert argvs[0][-4:] == ["-n", "8", "--dist", "worksteal"]
     assert "--dist" not in argvs[1] and "-n" not in argvs[1]
+
+
+def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):
+    # A tagless shallow clone versions as 0.1.devN under setuptools_scm, so
+    # freezegun's `python-dateutil>=2.7` swapped the editable checkout for PyPI's
+    # newest (3.0.0 broke collection). Every install step must carry a real
+    # pretend version that satisfies that floor.
+    import types
+
+    import run
+    import tomllib
+
+    envs = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        envs.append(env)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    cfg = tomllib.loads((Path(__file__).parent / "suites.toml").read_text())["python-dateutil"]
+    suite = Suite("python-dateutil", cfg, "w.whl", "rstest")
+    for step in cfg["install"]:
+        suite.pip(*step.split())
+    assert len(envs) == len(cfg["install"])
+    for env in envs:
+        major, minor = map(int, env["SETUPTOOLS_SCM_PRETEND_VERSION"].split(".")[:2])
+        assert (major, minor) >= (2, 7)
 
 
 # ---- main(): what a result file records, and how each point is run -----------
