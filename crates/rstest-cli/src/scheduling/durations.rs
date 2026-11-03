@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -208,11 +208,51 @@ fn project_base() -> PathBuf {
 /// recorded; drop edited bodies and vanished files. `base` resolves a relative
 /// `src` (the rootdir).
 fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
+    let mut check = Freshness::new(base);
     map.into_iter()
-        .filter(|(_, t)| {
-            !t.is_tagged() || content_hash(&base.join(&t.src)).is_some_and(|h| h == t.hash)
-        })
+        .filter(|(id, t)| check.keep(id, t))
         .collect()
+}
+
+/// The validation `fresh` applies, per entry. Each source's current hash is
+/// looked up once per pass, not once per entry: a parametrized suite holds
+/// hundreds of thousands of entries over a few thousand files (pandas: 348k
+/// over ~1.5k), and a stat + memo lookup per entry cost ~1s per load.
+struct Freshness<'a> {
+    base: &'a Path,
+    current: HashMap<String, Option<String>>,
+}
+
+impl<'a> Freshness<'a> {
+    fn new(base: &'a Path) -> Self {
+        Freshness {
+            base,
+            current: HashMap::new(),
+        }
+    }
+
+    fn keep(&mut self, id: &str, t: &Timing) -> bool {
+        if !t.is_tagged() {
+            return true;
+        }
+        // `src` is recorded as `rootdir/<the id's own file>`, relative to the
+        // cache base when under it, so it always ends with the id's file. One
+        // that doesn't was keyed under a different rootdir (a config change
+        // re-rooted the project): that id never recurs, and its source still
+        // hashing the same would keep it forever (pandas' cache carried 155k
+        // such dead ids).
+        if !Path::new(&t.src).ends_with(crate::text::nodeid_file(id)) {
+            return false;
+        }
+        let hash = match self.current.get(&t.src) {
+            Some(h) => h,
+            None => {
+                let h = content_hash(&self.base.join(&t.src));
+                self.current.entry(t.src.clone()).or_insert(h)
+            }
+        };
+        hash.as_deref() == Some(t.hash.as_str())
+    }
 }
 
 /// Load→prune→fold `add` (id -> seconds)→write the cache at `path`. Each added
@@ -227,7 +267,9 @@ fn persist_to(
     collected: &Collected,
     base: &Path,
 ) {
-    let raw = load_raw_from(path);
+    // The run already parsed this file to schedule; reuse that unless it
+    // changed since (another process saved: new len or mtime).
+    let raw = Arc::unwrap_or_clone(parsed(path));
     let known: HashMap<String, String> = raw
         .iter()
         .filter(|(_, t)| !t.src.is_empty())
@@ -398,7 +440,39 @@ pub fn load() -> HashMap<String, f64> {
 
 /// `load` against an explicit `durations.json` path (missing/corrupt = empty).
 pub fn load_from(path: &Path) -> HashMap<String, f64> {
-    secs_only(fresh(load_raw_from(path), &project_base()))
+    let raw = parsed(path);
+    let base = project_base();
+    let mut check = Freshness::new(&base);
+    raw.iter()
+        .filter(|(id, t)| check.keep(id, t))
+        .map(|(id, t)| (id.clone(), t.secs))
+        .collect()
+}
+
+/// The parsed file at `path`, memoized for the process on its `(len, mtime)`.
+/// A run loads the cache 3-4 times (worker sizing, dispatch, sharding) and a
+/// large suite's file is big (pandas: 112 MB, ~1s to parse), so the parse is
+/// paid once; a rewrite (new len or mtime) parses again. Validation is NOT
+/// memoized: `load_from` re-checks every load, so a long-lived watch/serve
+/// process still drops the timings of a test file edited since.
+fn parsed(path: &Path) -> Arc<HashMap<String, Timing>> {
+    type Memo = HashMap<PathBuf, (u64, Option<SystemTime>, Arc<HashMap<String, Timing>>)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let Ok(md) = std::fs::metadata(path) else {
+        return Arc::default();
+    };
+    let key = (md.len(), md.modified().ok());
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some((len, mtime, map)) = memo.lock().ok().and_then(|m| m.get(path).cloned()) {
+        if (len, mtime) == key {
+            return map;
+        }
+    }
+    let map = Arc::new(load_raw_from(path));
+    if let Ok(mut m) = memo.lock() {
+        m.insert(path.to_path_buf(), (key.0, key.1, map.clone()));
+    }
+    map
 }
 
 /// The cache as recorded, without fingerprint validation. The
@@ -1220,6 +1294,61 @@ mod tests {
         let m = HashMap::from([("gone.py::t".to_string(), Timing::untagged(1.0))]);
         assert_eq!(fresh(m, &root).len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entry_keyed_under_another_rootdir_is_dropped() {
+        // pandas 2026-11-03: re-rooting the project left 155k ids keyed under
+        // the old rootdir (`corpus/work/pandas/venv/...::t`) whose `src`
+        // (`venv/...`) still hashed the same, so they were kept forever and
+        // parsed on every load. A valid entry's src ends with its id's file.
+        let base = temp_root("reroot");
+        std::fs::create_dir_all(base.join("pkg")).unwrap();
+        std::fs::write(base.join("pkg/test_a.py"), b"a\n").unwrap();
+        let hash = crate::select::current_sha256(&base.join("pkg/test_a.py")).unwrap();
+        let tagged = |src: &str| Timing {
+            secs: 1.0,
+            src: src.into(),
+            hash: hash.clone(),
+        };
+        let map: HashMap<String, Timing> = [
+            (
+                "old/root/pkg/test_a.py::t".to_string(),
+                tagged("pkg/test_a.py"),
+            ),
+            ("pkg/test_a.py::t".to_string(), tagged("pkg/test_a.py")),
+            ("test_a.py::t".to_string(), tagged("pkg/test_a.py")), // rootdir below base
+        ]
+        .into();
+        let kept = fresh(map, &base);
+        assert!(!kept.contains_key("old/root/pkg/test_a.py::t"));
+        assert!(kept.contains_key("pkg/test_a.py::t") && kept.contains_key("test_a.py::t"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_reparses_a_rewritten_file_and_revalidates_edits() {
+        // The parse is memoized per process; neither a rewritten cache nor an
+        // edited test file (a long-lived watch/serve process) may go stale.
+        let base = temp_root("memo");
+        std::fs::write(base.join("test_m.py"), b"v1\n").unwrap();
+        let id = "test_m.py::t".to_string();
+        let path = base.join(FILE);
+        let run = collected_at(&base, &[&id]);
+        persist_to(&path, [(id.clone(), 1.0)].into_iter(), &run, &base);
+        assert_eq!(secs_only(fresh(load_raw_from(&path), &base))[&id], 1.0);
+        assert_eq!(parsed(&path)[&id].secs, 1.0);
+        persist_to(&path, [(id.clone(), 2.5)].into_iter(), &run, &base);
+        assert_eq!(parsed(&path)[&id].secs, 2.5, "rewrite re-parsed");
+        let mut check = Freshness::new(&base);
+        assert!(check.keep(&id, &parsed(&path)[&id]));
+        std::fs::write(base.join("test_m.py"), b"v2, edited\n").unwrap();
+        let mut check = Freshness::new(&base);
+        assert!(
+            !check.keep(&id, &parsed(&path)[&id]),
+            "edited file invalidates"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
