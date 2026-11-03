@@ -1,11 +1,11 @@
 {
  "environment": {
-  "date": "2026-10-06",
+  "date": "2026-11-03",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 24.15,
-  "rstest": "rstest 0.8.0",
-  "rstest_commit": "cd0b03d",
+  "load_1m_at_start": 11.6,
+  "rstest": "rstest 0.10.0",
+  "rstest_commit": "ab4b21e",
   "suite_commits": {
    "aiohttp": "12ea5a580ac02f5062b927ac3fa278000d7abb04",
    "anyio": "b7ea84c275fde6420ea242844bc7fb0fee6132f7",
@@ -44,25 +44,25 @@
   "warmup": 1,
   "rstest_cache": "warm",
   "xdist_dist": "load (xdist default)",
-  "bench_python": "3.14.6",
+  "bench_python": "3.13.13",
   "suite_runtimes": {
    "langgraph": {
     "python": "3.12.12",
     "python_implementation": "CPython",
     "pytest": "9.1.1",
     "pytest_xdist": null,
-    "rstest_worker": "0.8.0"
+    "rstest_worker": "0.10.0"
    }
   }
  },
  "spectrum": [
   {
    "suite": "langgraph",
-   "pytest_wall": 190.0,
-   "pytest_band": "190.0 (185.7-201.8)",
-   "rstest_wall": 26.1,
-   "rstest_band": "26.1 (25.0-27.2)",
-   "speedup": 7.28,
+   "pytest_wall": 173.4,
+   "pytest_band": "173.4 (169.3-186.2)",
+   "rstest_wall": 25.4,
+   "rstest_band": "25.4 (24.4-27.2)",
+   "speedup": 6.84,
    "parity": 100.0,
    "parity_missing": 0,
    "parity_mismatch": 0,

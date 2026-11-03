@@ -90,7 +90,7 @@ The declared range is the plugin's own `Requires-Dist` on pytest.
 |---|---|---|---|
 | pytest-django | 4.14.0 | `>=7.0.0` | django-allauth |
 | pytest-asyncio | 1.4.0 | `>=8.4,<10` | aiohttp, django-allauth, langchain, langgraph, structlog |
-| hypothesis | 6.165.10 / 6.167.1 | `>=4.6` (`[pytest]` extra) | attrs, anyio, packaging, pandas, pydantic, python-dateutil |
+| hypothesis | 6.165.10 / 6.167.1 / 6.168.1 | `>=4.6` (`[pytest]` extra) | anyio, attrs, packaging, pandas, pydantic, python-dateutil, sympy |
 | pytest-cov | 7.1.0 (coverage 7.16.0) | `>=7` | aiohttp, arrow, fastapi, langchain, python-dateutil, requests |
 | pytest-mock | 3.15.1 | `>=6.2.5` | aiohttp, anyio, arrow, langchain, langgraph, pydantic |
 | pytest-sugar | 1.1.1 | `>=6.2.0` | fastapi |
