@@ -319,6 +319,39 @@ def gate_failure_output(g, args, binary):
         )
 
 
+def gate_session_error_output(g, args, binary):
+    print("== session error output ==")
+    # A warning raised at unconfigure under `filterwarnings = error` escapes the
+    # worker's pytest session after pytest printed its summary. Plain pytest
+    # dumps that traceback; rstest exited 1 with no word of why (corpus
+    # flask/click/jinja2, 2026-11-02).
+    g.write(
+        "sesserr/conftest.py",
+        "import warnings, pytest\n"
+        "def pytest_unconfigure(config):\n"
+        "    warnings.warn(pytest.PytestWarning('boom at unconfigure'))\n",
+    )
+    g.write("sesserr/pytest.ini", "[pytest]\nfilterwarnings = error\n")
+    g.write("sesserr/test_ok.py", "def test_ok(): pass\n")
+    r = g.run("--report-json", "report.json", cwd=g.tmp / "sesserr")
+    check(
+        "session error: exits 1 and shows the escaped traceback",
+        r.returncode == 1
+        and "1 passed" in r.stdout
+        and "ERROR <session: PytestWarning>" in r.stdout
+        and "boom at unconfigure" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-300:] + r.stderr[-200:],
+    )
+    # CI reads the report, not the terminal: the traceback must ride along.
+    doc = json.loads((g.tmp / "sesserr" / "report.json").read_text())
+    check(
+        "session error: report-json carries the traceback",
+        "boom at unconfigure"
+        in doc.get("collect_error_reprs", {}).get("<session: PytestWarning>", ""),
+        json.dumps(doc.get("collect_error_reprs"))[:200],
+    )
+
+
 def gate_html_report(g, args, binary):
     print("== html report ==")
     hp = g.tmp / "htmlproj"

@@ -170,6 +170,11 @@ pub struct RunMeta {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Snapshot<'a> {
+    /// Each collect error's traceback, keyed by its `collect_errors` path,
+    /// including `<session: ...>` errors that escaped the whole session.
+    /// Absent when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub collect_error_reprs: BTreeMap<&'a String, &'a String>,
     /// Paths of collectors that failed to import/collect.
     pub collect_errors: Vec<&'a String>,
     /// Failures that share a cause (same exception, message and project
@@ -939,6 +944,7 @@ impl Run {
     /// historical `serde_json::Map` output (no `preserve_order`).
     fn snapshot<'a>(&'a self, run_meta: &'a RunMeta) -> Snapshot<'a> {
         Snapshot {
+            collect_error_reprs: self.collect_errors.iter().map(|(p, r)| (p, r)).collect(),
             collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
             failure_groups: self.failure_groups(),
             meta: SnapshotMeta {

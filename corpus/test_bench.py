@@ -25,7 +25,7 @@ import json
 
 from bench import _baseline_unusable, _parity_row, _render_sweep, _row_status, render
 from procmem import linear_fit, suspended
-from run import Suite, diff
+from run import Suite, _status, diff
 
 FLOOR = 99.5
 
@@ -174,6 +174,160 @@ def test_diff_extra_from_dropped_module_is_explained(tmp_path):
     assert _row_status(row, FLOOR) == "investigate"
 
 
+def test_diff_pairs_wall_clock_param_ids(tmp_path):
+    # marshmallow builds IDs from datetime.now(); the runs straddled a minute.
+    p = {"t.py::test_dt[01:46:59 2026-11-02]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00 2026-11-02]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairs_multiline_ids_in_any_line_order(tmp_path):
+    # pydantic-core pretty-prints its fields map in per-process hash order;
+    # pytest escapes the newlines to a literal backslash-n.
+    nl = "\\n"
+    p = {f"t.py::test_any[{nl.join(['M {', '  a: 1,', '  b: 2,', '}'])}]": {"call": "passed"}}
+    c = {f"t.py::test_any[{nl.join(['M {', '  b: 2,', '  a: 1,', '}'])}]": {"call": "passed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert (d["score"], d["unstable_id_pairs"]) == (100.0, 1)
+
+
+def test_diff_pairing_still_reports_outcome_divergence(tmp_path):
+    p = {"t.py::test_dt[01:46:59]": {"call": "passed"}}
+    c = {"t.py::test_dt[01:47:00]": {"call": "failed"}}
+    d = diff(_write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c))
+    assert d["mismatch_count"] == 1 and d["score"] < 100.0
+
+
+def _snap_exit(path, tests, exitstatus):
+    path.write_text(
+        json.dumps({"tests": tests, "collect_errors": [], "meta": {"exitstatus": exitstatus}})
+    )
+    return str(path)
+
+
+def test_exit_code_divergence_fails_a_full_parity_suite(tmp_path):
+    # flask 2026-11-02: 491/491 passed under both, but a `<session: PytestWarning>`
+    # made rstest exit 1. Per-test parity alone read that as "ok".
+    t = {"t.py::a": {"call": "passed"}}
+    d = diff(_snap_exit(tmp_path / "b.json", t, 0), _snap_exit(tmp_path / "c.json", t, 1))
+    assert (d["score"], d["pytest_exit"], d["rstest_exit"]) == (100.0, 0, 1)
+    assert _status(d) == "exit-diff"
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), _snap_exit(tmp_path / "c.json", t, 1))
+    assert _status(d) == "ok"
+
+
+def test_session_error_flagged_even_when_exit_codes_match(tmp_path):
+    # httpx 2026-11-02: both runners exit 1 on real failures, so the exit check
+    # passed while rstest's session had crashed after them.
+    t = {"t.py::a": {"call": "failed"}}
+    base = _snap_exit(tmp_path / "b.json", t, 1)
+    cand = tmp_path / "c.json"
+    cand.write_text(
+        json.dumps(
+            {"tests": t, "collect_errors": ["<session: PytestWarning>"], "meta": {"exitstatus": 1}}
+        )
+    )
+    d = diff(base, str(cand))
+    assert d["session_errors"] == ["<session: PytestWarning>"]
+    assert _status(d) == "session-error"
+
+
+NOISY = ["PytestUnraisableExceptionWarning"]
+
+
+def test_noisy_failure_cause_is_left_out_of_the_score(tmp_path):
+    # urllib3 2026-11-02: a socket leaked by an earlier test was GC'd during
+    # test_preserve_chunked_on_retry_after under rstest only.
+    leak = "E   pytest.PytestUnraisableExceptionWarning: Exception ignored in: <ssl.SSLSocket>"
+    p = {"t.py::leak": {"call": "passed"}, "t.py::real": {"call": "passed"}}
+    c = {
+        "t.py::leak": {"call": "failed", "longrepr": leak},
+        "t.py::real": {"call": "failed", "longrepr": "E   AssertionError"},
+    }
+    b, cand = _write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c)
+    d = diff(b, cand, noisy_failures=NOISY)
+    assert d["noisy_failure_excluded"] == 1
+    assert d["mismatch"] == ["t.py::real"]  # a real failure still counts
+    assert d["score"] == 0.0  # 0 of the 1 judged test agrees
+
+
+def test_noisy_failure_session_error_does_not_fail_the_suite(tmp_path):
+    t = {"t.py::a": {"call": "passed"}}
+    err = "<session: PytestUnraisableExceptionWarning>"
+    cand = tmp_path / "c.json"
+    cand.write_text(
+        json.dumps(
+            {
+                "tests": t,
+                "collect_errors": [err],
+                "collect_error_reprs": {err: "PytestUnraisableExceptionWarning: <ssl.SSLSocket>"},
+                "meta": {"exitstatus": 1},
+            }
+        )
+    )
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), str(cand), noisy_failures=NOISY)
+    assert (d["session_errors"], d["noisy_session_errors"]) == ([], 1)
+    assert _status(d) == "ok"
+    d = diff(_snap_exit(tmp_path / "b.json", t, 1), str(cand))  # no rule: still flagged
+    assert _status(d) == "session-error"
+
+
+def test_recorder_keeps_failure_text(tmp_path):
+    # diff() can only judge the pytest side's cause if the recorder kept it.
+    import types
+
+    from recorder import Recorder
+
+    rec = Recorder()
+    rep = types.SimpleNamespace(
+        nodeid="t.py::a",
+        when="call",
+        outcome="failed",
+        failed=True,
+        skipped=False,
+        duration=0.1,
+        longrepr="E   PytestUnraisableExceptionWarning",
+    )
+    rec.pytest_runtest_logreport(rep)
+    assert "PytestUnraisableExceptionWarning" in rec.tests["t.py::a"]["longrepr"]
+
+
+def test_status_outcome_diff_wins_and_missing_exit_is_not_judged():
+    assert _status({"score": 99.0, "pytest_exit": 0, "rstest_exit": 1}) == "diff"
+    assert _status({"score": 100.0, "pytest_exit": None, "rstest_exit": 1}) == "ok"
+
+
+def test_mono_baseline_exit_is_worst_project_ignoring_empty(tmp_path, monkeypatch):
+    import types
+
+    import run
+
+    exits = iter([0, 5, 1])
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        Path(env["RSTEST_RECORD"]).write_text(
+            json.dumps({"tests": {}, "collect_errors": [], "meta": {"exitstatus": next(exits)}})
+        )
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("m", {"mode": "mono", "projects": ["a", "b", "c"]}, "w.whl", "rstest")
+    suite.dir = suite.src = tmp_path
+    snap, _ = suite.run_pytest()
+    assert json.loads(Path(snap).read_text())["meta"]["exitstatus"] == 1
+
+
+def test_diff_excludes_noisy_prefixes_from_score(tmp_path):
+    p = {"a.py::test_net[x]": {"call": "failed"}, "a.py::test_ok": {"call": "passed"}}
+    c = {"a.py::test_net[x]": {"call": "skipped"}, "a.py::test_ok": {"call": "passed"}}
+    b, cand = _write_snap(tmp_path / "b.json", p), _write_snap(tmp_path / "c.json", c)
+    assert diff(b, cand)["score"] < 100.0
+    d = diff(b, cand, noisy=["a.py::test_net"])
+    assert (d["score"], d["noisy_excluded"], d["baseline_tests"]) == (100.0, 1, 2)
+
+
 def test_diff_extra_from_healthy_module_is_unexplained(tmp_path):
     # rstest collected an extra from a module the baseline collected FINE (only
     # mod_x errored) -> unexplained -> _row_status gates it.
@@ -313,6 +467,183 @@ def test_run_pytest_passes_xdist_args_only_with_workers(tmp_path, monkeypatch):
     suite.run_pytest()
     assert argvs[0][-4:] == ["-n", "8", "--dist", "worksteal"]
     assert "--dist" not in argvs[1] and "-n" not in argvs[1]
+
+
+def test_run_rstest_keeps_output_next_to_snapshot(tmp_path, monkeypatch):
+    # The snapshot records a `<session: X>` collect error by path only; its
+    # traceback lives in the terminal summary, so that output must be kept.
+    import types
+
+    import run
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        Path(argv[argv.index("--report-json") + 1]).write_text(
+            '{"tests": {}, "collect_errors": ["<session: PytestWarning>"]}'
+        )
+        return types.SimpleNamespace(
+            returncode=1, stdout="ERROR collecting <session: PytestWarning>\n", stderr="tb\n"
+        )
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    snap, _ = suite.run_rstest()
+    assert snap.with_suffix(".log").read_text() == (
+        "ERROR collecting <session: PytestWarning>\ntb\n"
+    )
+
+
+def test_each_runner_gets_a_private_tmpdir_wiped_after(tmp_path, monkeypatch):
+    # flask leaves a mode-000 dir in $TMPDIR/pytest-of-<user>; the NEXT session
+    # to clean that shared root crashed exit 1 under `filterwarnings = error`.
+    import os
+    import types
+
+    import run
+
+    seen = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        assert env is not None
+        tmp = Path(env["TMPDIR"])
+        seen.append(tmp)
+        (tmp / "pytest-of-u" / "my_dir").mkdir(parents=True)
+        os.chmod(tmp / "pytest-of-u" / "my_dir", 0)
+        snap = env.get("RSTEST_RECORD") or argv[argv.index("--report-json") + 1]
+        Path(snap).write_text('{"tests": {}, "collect_errors": []}')
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("x", {}, "w.whl", "rstest")
+    suite.dir = tmp_path
+    suite.run_pytest()
+    suite.run_rstest()
+    assert len(set(seen)) == 2 and os.environ.get("TMPDIR") not in {str(p) for p in seen}
+    assert not any(p.exists() for p in seen)
+    # anyio 2026-11-02: under macOS's long $TMPDIR the private root pushed its
+    # AF_UNIX socket paths past 104 bytes.
+    if os.path.isdir("/tmp"):
+        assert all(str(p).startswith("/tmp/") for p in seen)
+
+
+def test_save_merges_rows_and_records_history(tmp_path, monkeypatch):
+    # `--only flask` used to overwrite results.json with flask alone.
+    import run
+
+    monkeypatch.setattr(run, "RESULTS", tmp_path / "results.json")
+    monkeypatch.setattr(run, "HISTORY", tmp_path / "history")
+    order = ["rich", "flask", "click"]
+    run.RESULTS.write_text(
+        json.dumps(
+            [{"suite": "rich", "score": 100.0}, {"suite": "flask", "score": 1.0, "error": "x"}]
+        )
+    )
+    meta = {"id": "20261102T120000Z", "rstest_commit": "abc", "dirty": False}
+    run._save(
+        {"click": {"suite": "click", "score": 99.0}, "flask": {"suite": "flask", "score": 100.0}},
+        order,
+        meta,
+    )
+    rows = json.loads(run.RESULTS.read_text())
+    assert [r["suite"] for r in rows] == order
+    assert rows[0] == {"suite": "rich", "score": 100.0}  # untouched
+    assert rows[1] == {"suite": "flask", "score": 100.0, "run": meta["id"]}  # replaced whole
+    hist = json.loads((run.HISTORY / "20261102T120000Z.json").read_text())
+    assert hist["run"] == meta
+    assert [r["suite"] for r in hist["results"]] == ["click", "flask"]
+
+
+def test_save_prepare_only_keeps_parity_and_skips_history(tmp_path, monkeypatch):
+    import run
+
+    monkeypatch.setattr(run, "RESULTS", tmp_path / "results.json")
+    monkeypatch.setattr(run, "HISTORY", tmp_path / "history")
+    run.RESULTS.write_text(json.dumps([{"suite": "flask", "score": 100.0}]))
+    run._save(
+        {"flask": {"suite": "flask", "prepared": True}}, ["flask"], {"id": "r1"}, history=False
+    )
+    assert json.loads(run.RESULTS.read_text()) == [
+        {"suite": "flask", "score": 100.0, "prepared": True}
+    ]
+    assert not run.HISTORY.exists()
+
+
+def test_expected_editables_follows_install_steps(tmp_path):
+    def exp(cfg):
+        s = Suite("x", cfg, "w.whl", "rstest")
+        s.src = tmp_path
+        return s.expected_editables()
+
+    (tmp_path / "req.txt").write_text("pytest\n-e .[socks]\n")
+    assert exp({"install": ["--group dev", "-e ."]}) == [tmp_path]
+    assert exp({}) == [tmp_path]  # fallback attempts are all editable
+    assert exp({"install": ["-r req.txt"]}) == [tmp_path]  # httpx
+    assert exp({"install": ["-r requirements-dev.txt"]}) == []  # missing file: nothing known
+    assert exp({"install": [". pytest"]}) == []
+    assert exp({"mode": "mono", "projects": ["libs/a"]}) == [tmp_path / "libs/a"]
+    assert exp({"mode": "pyargs", "package": "p"}) == []
+
+
+def test_check_editables_fails_prepare_when_checkout_swapped(tmp_path, monkeypatch):
+    # pluggy 2026-11-02: the pinned pytest's `pluggy>=1.5` replaced the 0.1.devN
+    # checkout with PyPI 1.7.0, and the corpus silently tested the release.
+    import pytest
+    import run
+
+    s = Suite("x", {"install": ["-e ."]}, "w.whl", "rstest")
+    s.src = tmp_path
+    monkeypatch.setattr(run, "_editable_dirs", lambda py, env=None: set())
+    with pytest.raises(RuntimeError, match="replaced by a PyPI release"):
+        s.check_editables()
+    monkeypatch.setattr(run, "_editable_dirs", lambda py, env=None: {tmp_path.resolve()})
+    s.check_editables()
+
+
+def test_editable_dirs_reads_pep610_direct_url(tmp_path):
+    import os
+    import sys
+
+    import run
+
+    site = tmp_path / "site"
+    for name, editable in (("ed", True), ("plain", False)):
+        info = site / f"{name}-1.0.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
+        url = (tmp_path / name).as_uri()
+        (info / "direct_url.json").write_text(
+            json.dumps({"url": url, "dir_info": {"editable": editable}})
+        )
+    env = dict(os.environ, PYTHONPATH=str(site))
+    assert (tmp_path / "ed").resolve() in run._editable_dirs(sys.executable, env)
+    assert (tmp_path / "plain").resolve() not in run._editable_dirs(sys.executable, env)
+
+
+def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):
+    # A tagless shallow clone versions as 0.1.devN under setuptools_scm, so
+    # freezegun's `python-dateutil>=2.7` swapped the editable checkout for PyPI's
+    # newest (3.0.0 broke collection). Every install step must carry a real
+    # pretend version that satisfies that floor.
+    import types
+
+    import run
+    import tomllib
+
+    envs = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        envs.append(env)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    cfg = tomllib.loads((Path(__file__).parent / "suites.toml").read_text())["python-dateutil"]
+    suite = Suite("python-dateutil", cfg, "w.whl", "rstest")
+    for step in cfg["install"]:
+        suite.pip(*step.split())
+    assert len(envs) == len(cfg["install"])
+    for env in envs:
+        major, minor = map(int, env["SETUPTOOLS_SCM_PRETEND_VERSION"].split(".")[:2])
+        assert (major, minor) >= (2, 7)
 
 
 # ---- main(): what a result file records, and how each point is run -----------

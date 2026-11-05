@@ -150,6 +150,16 @@ fn signal_stops_the_single_session(tag: &str, sig: &str, group: bool) {
          open('hang.pid', 'w').write(str(os.getpid()))\n    time.sleep(300)\n",
     )
     .unwrap();
+    // A slow KeyboardInterrupt hook ahead of the worker's (pytest's terminal
+    // reporter formatting the traceback on a loaded CI runner) must not delay
+    // the session telling rstest it got the SIGINT past `SIGINT_GRACE`: a
+    // second SIGINT would cut this hook short.
+    std::fs::write(
+        dir.join("conftest.py"),
+        "import time\n\ndef pytest_keyboard_interrupt(excinfo):\n    \
+         time.sleep(1)\n    open('hook_done', 'w').close()\n",
+    )
+    .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rstest"));
     cmd.args(["-n", "0", "--junitxml", "j.xml", "--report-json", "r.json"])
         .current_dir(&dir)
@@ -201,12 +211,17 @@ fn signal_stops_the_single_session(tag: &str, sig: &str, group: bool) {
     let junit = std::fs::read_to_string(dir.join("j.xml")).unwrap_or_default();
     let report = std::fs::read_to_string(dir.join("r.json")).unwrap_or_default();
     let torn_down = dir.join("torn_down").is_file();
+    let hook_done = dir.join("hook_done").is_file();
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(out.status.code(), Some(2), "{text}");
     assert!(text.contains("KeyboardInterrupt"), "{text}");
     assert!(worker_gone, "worker {worker_pid} outlived rstest\n{text}");
     assert!(torn_down, "a second SIGINT cut the teardown short\n{text}");
+    assert!(
+        hook_done,
+        "a second SIGINT cut the interrupt hooks short\n{text}"
+    );
     assert!(junit.contains("test_ok"), "{junit}");
     let report: serde_json::Value = serde_json::from_str(&report).expect("--report-json");
     assert_eq!(report["meta"]["exitstatus"], 2, "{report}");

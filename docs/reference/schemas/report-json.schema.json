@@ -4,6 +4,13 @@
   "description": "The `--report-json` document (schema 5). Fields are declared alphabetically\nto match the historical output; borrows the run's data so the writer and the\nHTML embed serialize the same source without cloning.",
   "type": "object",
   "properties": {
+    "collect_error_reprs": {
+      "description": "Each collect error's traceback, keyed by its `collect_errors` path,\nincluding `<session: ...>` errors that escaped the whole session.\nAbsent when there are none.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "collect_errors": {
       "description": "Paths of collectors that failed to import/collect.",
       "type": "array",

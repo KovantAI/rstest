@@ -8,6 +8,7 @@ The `--report-json` document (schema 5). Fields are declared alphabetically to m
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `collect_error_reprs` | object of string | no | Each collect error's traceback, keyed by its `collect_errors` path, including `<session: ...>` errors that escaped the whole session. Absent when there are none. |
 | `collect_errors` | array of string | yes | Paths of collectors that failed to import/collect. |
 | `failure_groups` | array of FailureGroup | no | Failures that share a cause (same exception, message and project frame), largest group first. Only groups of two or more; absent when there are none. |
 | `meta` | SnapshotMeta | yes | Run metadata: argv, counts, exit status, schema version, shard. |

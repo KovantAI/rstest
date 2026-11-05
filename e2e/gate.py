@@ -153,6 +153,7 @@ from gates.reporting import (
     gate_output_styles,
     gate_report_json_contract,
     gate_resource_leak_detection,
+    gate_session_error_output,
     gate_warnings,
 )
 from gates.serve_watch import (
@@ -262,6 +263,7 @@ def main():
         gate_serial_mark,
         gate_serial_after_crash,
         gate_failure_output,
+        gate_session_error_output,
         gate_x_maxfail,
         gate_maxfail_bound,
         gate_lazy_work_stealing,

@@ -822,6 +822,14 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
     // interpreter-free modes never probe one.
     let scope = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let python = || discover::resolve(&scope, cli.python.as_deref());
+    // An empty entry (`--migrate-allow "$UNSET"`) is a substring of every id:
+    // it would allow every finding, so it allows none.
+    let migrate_allow: Vec<String> = cli
+        .migrate_allow
+        .iter()
+        .filter(|p| !p.is_empty())
+        .cloned()
+        .collect();
     let result = match command {
         Command::CacheCompact { keep_last, max_age } => {
             run_cache_compact(cli, &mut sink, *keep_last, max_age.as_deref())
@@ -853,7 +861,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &py,
                 args,
                 cli.migrate_check_json.as_deref(),
-                &cli.migrate_allow,
+                &migrate_allow,
                 &mut sink,
             )
         }),
@@ -863,7 +871,7 @@ pub fn dispatch_command(cli: &Cli, args: &[String]) -> Result<Option<i32>> {
                 &py,
                 args,
                 cli.xdist_removal_json.as_deref(),
-                &cli.migrate_allow,
+                &migrate_allow,
                 cli.xdist_trial,
                 &mut sink,
             )
@@ -2510,10 +2518,13 @@ pub(crate) fn check_workers() -> usize {
 }
 
 /// Whether the args select something on disk: a path, or a nodeid
-/// (`file.py::test`) whose file exists. Over-matching only keeps the
-/// empty-walk shortcut off, which is the safe direction.
+/// (`file.py::test`) whose file exists. `--pyargs` counts too: its positionals
+/// are import paths the walk never sees, so an empty walk proves nothing.
+/// Over-matching only keeps the empty-walk shortcut off, which is the safe
+/// direction.
 fn names_existing_path(args: &[String]) -> bool {
-    !crate::cli::path_args(args).is_empty()
+    args.iter().any(|a| a == "--pyargs")
+        || !crate::cli::path_args(args).is_empty()
         || args.iter().any(|a| {
             a.split_once("::")
                 .is_some_and(|(file, _)| std::path::Path::new(file).exists())
@@ -3966,6 +3977,7 @@ mod tests {
         // Cargo runs unit tests from the crate root, where Cargo.toml exists.
         assert!(names_existing_path(&s(&["Cargo.toml"])));
         assert!(names_existing_path(&s(&["Cargo.toml::test_x"])));
+        assert!(names_existing_path(&s(&["--pyargs", "some.pkg"])));
         assert!(!names_existing_path(&s(&["-q", "--maxfail=1"])));
         assert!(!names_existing_path(&s(&[
             "nope.py::test_x",
