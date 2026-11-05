@@ -1,11 +1,11 @@
 {
  "environment": {
-  "date": "2026-11-03",
+  "date": "2026-11-05",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 4.61,
+  "load_1m_at_start": 1.71,
   "rstest": "rstest 0.10.0",
-  "rstest_commit": "5385822",
+  "rstest_commit": "adfb689",
   "suite_commits": {
    "aiohttp": "12ea5a580ac02f5062b927ac3fa278000d7abb04",
    "anyio": "b7ea84c275fde6420ea242844bc7fb0fee6132f7",
@@ -44,7 +44,7 @@
   "warmup": 1,
   "rstest_cache": "warm",
   "xdist_dist": "load (xdist default)",
-  "bench_python": "3.14.6",
+  "bench_python": "3.13.13",
   "suite_runtimes": {
    "pandas": {
     "python": "3.13.13",
@@ -58,11 +58,11 @@
  "spectrum": [
   {
    "suite": "pandas",
-   "pytest_wall": 191.9,
-   "pytest_band": "191.9 (189.9-193.8)",
-   "rstest_wall": 46.3,
-   "rstest_band": "46.3 (45.3-48.3)",
-   "speedup": 4.14,
+   "pytest_wall": 183.0,
+   "pytest_band": "183.0 (180.2-184.0)",
+   "rstest_wall": 44.7,
+   "rstest_band": "44.7 (44.6-44.9)",
+   "speedup": 4.09,
    "parity": 100.0,
    "parity_missing": 0,
    "parity_mismatch": 0,
@@ -75,17 +75,17 @@
  "sweeps": [
   {
    "suite": "pandas",
-   "pytest_wall": 191.9,
-   "pytest_band": "191.9 (189.9-193.8)",
+   "pytest_wall": 183.0,
+   "pytest_band": "183.0 (180.2-184.0)",
    "points": [
     {
      "workers": 8,
-     "rstest_wall": 49.3,
-     "rstest_band": "49.3 (48.6-50.0)",
-     "min": 48.58,
-     "max": 49.99,
-     "speedup": 3.89,
-     "efficiency": 0.49,
+     "rstest_wall": 47.7,
+     "rstest_band": "47.7 (47.7-48.4)",
+     "min": 47.65,
+     "max": 48.39,
+     "speedup": 3.84,
+     "efficiency": 0.48,
      "parity": 100.0,
      "parity_missing": 0,
      "parity_mismatch": 0,
@@ -94,11 +94,11 @@
      "baseline_tests": 193843,
      "candidate_collect_errors": 0,
      "xdist": {
-      "wall": 90.6,
-      "band": "90.6 (89.3-96.1)",
-      "min": 89.3,
-      "max": 96.09,
-      "speedup": 2.12,
+      "wall": 87.7,
+      "band": "87.7 (86.1-91.8)",
+      "min": 86.06,
+      "max": 91.77,
+      "speedup": 2.09,
       "efficiency": 0.26,
       "parity": 100.0,
       "parity_missing": 0,
