@@ -26,6 +26,10 @@ Feature: Suite maintainer
             time.sleep(0.02)
         """
 
+    # Worker spawn on Windows CI (~2.5s) swamps the 4.4s of work, so no
+    # wall-time ratio holds there. The speedup math is unit-tested in
+    # crates/rstest-cli/src/doctor/mod.rs on every OS.
+    @posix_only
     Scenario: MT-01 doctor numbers on a fixture-bound suite match the measured speedup
       When I run "rstest -n 0 --doctor --doctor-json d0.json" and time it as "serial"
       Then the run succeeds
