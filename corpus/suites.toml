@@ -116,6 +116,42 @@ install = ["--group dev", "quart<0.20", "-e ."]
 args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 # socket-timeout/EINTR tests are load-sensitive
 rstest_args = ["-n", "4"]
+# Outcomes that move between any two runs, pytest-vs-pytest included: a
+# different set diverged on each of two runs (2026-11-02). Left out of the
+# score, counted under `noisy_excluded`.
+noisy = [
+    # `requires_network` probes TARPIT_HOST live, once per process: skip vs
+    # pass/timeout follows the machine's route at that moment.
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPProxyManager::test_forwarding_proxy_",
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPProxyManager::test_tunneling_proxy_",
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPProxyManager::test_https_proxy_tls_error",
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPProxyManager::test_scheme_host_case_insensitive",
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestHTTPSProxyVerification::",
+    "test/with_dummyserver/test_proxy_poolmanager.py::TestIPv6HTTPProxyManager::test_basic_ipv6_proxy",
+    "test/contrib/test_socks.py::TestSOCKS4Proxy::test_socks_with_invalid_username",
+    # Timing-sensitive dummyserver sockets and signal/EINTR tests.
+    "test/with_dummyserver/test_socketlevel.py::TestProxyManager::test_connect_reconn",
+    "test/test_connection.py::TestConnection::test_skip_header",
+    # Order-dependent in the serial baseline: fails with pyOpenSSL deprecation
+    # warnings (set_passwd_cb, X509.get_subject), as if pyOpenSSL were still
+    # injected, only in a full run; passes alone, after test/contrib, and under
+    # rstest. Hits exactly the classes test_pyopenssl.py re-imports from
+    # test_socketlevel, so those are excluded whole. Polluter not pinned down
+    # (`rstest bisect` can).
+    "test/with_dummyserver/test_socketlevel.py::TestClientCerts::",
+    "test/with_dummyserver/test_socketlevel.py::TestSNI::",
+    "test/with_dummyserver/test_socketlevel.py::TestSocketClosing::",
+    "test/with_dummyserver/test_socketlevel.py::TestSSL::",
+    # Diverged on one run each (2026-11-02), cause not pinned down.
+    "test/contrib/test_pyopenssl.py::TestHTTPS_TLSv1_1::test_client_no_intermediate",
+    "test/contrib/test_pyopenssl.py::TestPyOpenSSLHelpers::test_get_subj_alt_name",
+    "test/contrib/test_pyopenssl.py::TestSocketSSL::test_ssl_failure_midway_through_conn",
+]
+# By cause, any test: a socket or thread leaked by an EARLIER test is GC'd
+# during whichever test (or a worker's session end) runs next, so the failure
+# lands on a different test every run. A mismatch or session error whose
+# failure text carries one of these is left out of the score and counted.
+noisy_failures = ["PytestUnraisableExceptionWarning", "PytestUnhandledThreadExceptionWarning"]
 
 [requests]
 repo = "https://github.com/psf/requests"
@@ -129,6 +165,10 @@ install = ["-e .", "--group tests"]
 
 [pluggy]
 repo = "https://github.com/pytest-dev/pluggy"
+# Same trap as python-dateutil: the tagless clone versions as 0.1.devN, so the
+# pinned pytest's `pluggy>=1.5` swapped the checkout for PyPI's pluggy (the
+# suite tested a release, not this commit). The lock is past 1.6.0.
+env = { SETUPTOOLS_SCM_PRETEND_VERSION = "1.6.0.post0" }
 
 [packaging]
 repo = "https://github.com/pypa/packaging"
@@ -147,6 +187,11 @@ install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six"]
 # pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
 # (see click); ignore that one warning on both runs to keep parity.
 args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
+# The shallow, tagless clone makes setuptools_scm version the checkout 0.1.devN,
+# so a later step's `python-dateutil>=2.7` (freezegun) swaps the editable install
+# for PyPI's newest (3.0.0 warns on `dateutil.zoneinfo` import -> collection
+# error under `filterwarnings = error`). Pin the checkout to its real version.
+env = { SETUPTOOLS_SCM_PRETEND_VERSION = "2.9.0.post0" }
 
 [jsonschema]
 repo = "https://github.com/python-jsonschema/jsonschema"

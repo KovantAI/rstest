@@ -21,6 +21,10 @@ FIXTURES = E2E / "fixtures"
 
 WINDOWS = os.name == "nt"
 
+# A FAIL detail can quote test output the console encoding (cp1252 on
+# Windows) cannot encode; escape it rather than crash the gate mid-section.
+sys.stdout.reconfigure(errors="backslashreplace")
+
 
 def fx(name: str) -> str:
     """Load a fixture suite from e2e/fixtures/ (real .py files, not inlined
@@ -104,6 +108,10 @@ class Gate:
             os.environ,
             VIRTUAL_ENV=str(self.venv),
             RSTEST_WORKER_PATH=str(REPO / "python"),
+            # Pair with the UTF-8 decode below: without it the child's pytest
+            # writes in the locale encoding and escapes what cp1252 lacks
+            # (日...), so -n 0 output differs from rstest's UTF-8.
+            PYTHONIOENCODING="utf-8",
         )
         env.pop("PYTEST_ADDOPTS", None)
         # The persona specs drive this from inside a pytest session, which
@@ -139,10 +147,10 @@ class Gate:
             text=True,
             # rstest emits UTF-8 glyphs (✓ ✗ ─); pin the decode to UTF-8 so
             # the locale encoding (cp1252 on Windows) does not mangle them
-            # and make `"✓" in r.stdout` spuriously False. At -n 0 the
-            # child's own output passes through in the locale encoding; a
-            # strict decode would kill subprocess's reader thread and leave
-            # stdout None, so replace what is not UTF-8.
+            # and make `"✓" in r.stdout` spuriously False. A test's own
+            # raw bytes can still be non-UTF-8 at -n 0; a strict decode would
+            # kill subprocess's reader thread and leave stdout None, so
+            # replace what is not UTF-8.
             encoding="utf-8",
             errors="replace",
             timeout=timeout,

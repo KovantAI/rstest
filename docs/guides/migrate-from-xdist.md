@@ -107,10 +107,6 @@ retries on the replacement. Where each side's reruns apply:
 Not carried over from pytest-rerunfailures when rstest owns the retry (the
 pool, or any run with rstest's own `--reruns`):
 
-- **Mark keywords `reruns_delay`, `only_rerun`, `rerun_except`**: ignored. A
-  test with a non-matching `only_rerun` is still retried. Use the global
-  `--only-rerun` to filter by error. (The budget, `reruns=` or positional
-  `flaky(3)`, and `condition=` are read as the plugin reads them.)
 - **`--reruns-delay` and `--rerun-except`**: not rstest flags, so they are
   forwarded to pytest. With pytest-rerunfailures installed they parse and do
   nothing (no delay, no exception filter); without it they are a pytest usage
@@ -291,8 +287,9 @@ It scans the pytest config, `PYTEST_ADDOPTS`, your conftests, tests and
 local plugins, and the installed pytest plugins for every edge above: xdist
 flags in `addopts`, `-n` / `--dist` that rstest never read, `pytest-xdist` in
 `required_plugins`, `import xdist` sites (yours and installed plugins'),
-xdist hook implementations not marked `optionalhook=True`, and
-`hasplugin("xdist")` gates. Each finding comes with its fix. `--xdist-trial`
+xdist hook implementations not marked `optionalhook=True`,
+`hasplugin("xdist")` gates, and tests that skip without xdist
+(`pytest.importorskip("xdist")`, or a skip when `import xdist` fails). Each finding comes with its fix. `--xdist-trial`
 then runs the suite with pytest-xdist hidden (`-p no:xdist`, which drops its
 options and hook specs like an uninstall) and names any test that only passes
 with it installed. When it prints `ready`, uninstall pytest-xdist

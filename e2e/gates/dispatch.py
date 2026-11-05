@@ -53,6 +53,28 @@ def test_b(pkg_setups, request):
     assert "pkg_auto" in request.fixturenames
 """
 
+# R32: a test swaps its worker's command pipe for one at EOF, so the
+# orchestrator's next send to it gets EPIPE. DIES: the worker then dies
+# hard when it reads its next command (a crashed worker); otherwise it ends
+# its session cleanly with ids still handed to it.
+LAZY_DEAD_PIPE = """
+import gc
+import os
+
+from rstest_worker._internal.protocol import Connection
+
+
+def test_close_cmd_pipe():
+    r, w = os.pipe()
+    os.close(w)
+    for o in gc.get_objects():
+        if isinstance(o, Connection):
+            os.dup2(r, o._cmd_fd)
+            if os.environ.get("DIES"):
+                o.recv_one = lambda: os._exit(1)
+    os.close(r)
+""" + "".join(f"\ndef test_x{i}():\n    pass\n" for i in range(40))
+
 
 def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
@@ -70,6 +92,24 @@ def gate_lazy_collection(g, args, binary):
     r = g.run("crash", "-n", "2", "--collect", "lazy")
     check("lazy: crash completes", "1 failed, 5 passed" in r.stdout, r.stdout[-200:])
     check("lazy: crash attributed", "crashed while running" in r.stdout, r.stdout[-300:])
+    # R32: a send to a dead worker is not fatal; its ids are requeued and
+    # run on the respawned worker.
+    if not WINDOWS:
+        g.write("deadpipe/test_pipe.py", LAZY_DEAD_PIPE)
+        r = g.run("deadpipe", "-n", "2", "--collect", "lazy", env_extra={"DIES": "1"})
+        check(
+            "lazy: send to a dead worker requeues its ids",
+            r.returncode == 0 and "41 passed" in r.stdout,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+        )
+        # A worker whose session ended with ids still handed to it, and no
+        # worker left: they are reported as not run, never silently dropped.
+        r = g.run("deadpipe", "-n", "2", "--collect", "lazy")
+        check(
+            "lazy: ids left at the last worker's end are reported",
+            r.returncode == 1 and "1 passed, 40 errors" in r.stdout,
+            f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+        )
     r = g.run(".", "-n", "2", "--collect", "lazy", cwd=g.tmp / "broken")
     check(
         "lazy: collect error aborts",
@@ -209,6 +249,23 @@ def gate_lf(g, args, binary):
         "1 failed" in r.stdout and "passed" not in r.stdout,
         r.stdout[-200:],
     )
+    # A collector lastfailed recorded as broken collects now: pytest swaps its
+    # key for its children, so the ones this run deselected stay failed. -n 0
+    # is pytest's own cacheprovider; the pool's merged write must match it.
+    rec = g.tmp / "lf_recollect"
+    g.write("lf_recollect/test_a.py", "def test_1(): pass\ndef test_2(): pass\n")
+    for mode in (["-n", "0"], ["-n", "2"], ["-n", "2", "--collect", "lazy"]):
+        cache = rec / ".pytest_cache" / "v" / "cache"
+        shutil.rmtree(rec / ".pytest_cache", ignore_errors=True)
+        cache.mkdir(parents=True)
+        (cache / "lastfailed").write_text(json.dumps({"test_a.py": True}), encoding="utf-8")
+        g.run("test_a.py", *mode, "-k", "test_1", cwd=rec)
+        got = json.loads((cache / "lastfailed").read_text(encoding="utf-8"))
+        check(
+            f"lastfailed keeps a recollected file's deselected tests ({' '.join(mode)})",
+            got == {"test_a.py::test_2": True},
+            got,
+        )
 
 
 def gate_shard_k_n(g, args, binary):
@@ -387,6 +444,19 @@ def gate_fork_pool(g, args, binary):
         cr.returncode != 0 and "test_boom" in cr.stdout,
         cr.stdout[-200:],
     )
+    # A startup error every forked worker hits prints once, as in the plain
+    # pool (R1): each forked worker has its own stderr pipe, deduped.
+    g.write("fpconf/conftest.py", "import conftest_missing_mod\n")
+    for i in range(3):
+        g.write(f"fpconf/test_{i}.py", "def test_x():\n    pass\n")
+    for label, extra in (("plain pool", ()), ("fork-pool", ("--fork-pool",))):
+        r = g.run(".", "-n", "3", *extra, cwd=g.tmp / "fpconf")
+        out = r.stdout + r.stderr
+        check(
+            f"{label}: startup error printed once",
+            out.count("ImportError while loading conftest") == 1,
+            f"count={out.count('ImportError while loading conftest')}",
+        )
     # Doctor JSON records whether fork-prewarm was used.
     dj = g.tmp / "fp-doctor.json"
     g.run("fp/test_fp.py", "-n", "4", "--fork-pool", "--doctor-json", str(dj))
@@ -461,6 +531,26 @@ def gate_auto_worker_capping(g, args, binary):
         "auto caps tiny suite to single worker",
         "test session starts" in r.stdout.splitlines()[0],
         r.stdout[:100],
+    )
+    # --pyargs names an import path, not a file: run from a folder with no
+    # Python files (the corpus' pandas/sklearn shape) the walk is empty, and
+    # that must not read as "nothing to run" -> one worker.
+    g.write("pyargs_src/pyagate/__init__.py", "")
+    for i in range(6):
+        g.write(f"pyargs_src/pyagate/test_m{i}.py", "def test_a(): assert True\n")
+    g.write("pyargs_cwd/README", "no python here\n")
+    r = g.run(
+        "--pyargs",
+        "pyagate",
+        cwd=g.tmp / "pyargs_cwd",
+        env_extra={"PYTHONPATH": str(g.tmp / "pyargs_src")},
+    )
+    check(
+        "auto scales a --pyargs run from a folder with no Python files",
+        r.returncode == 0
+        and "6 passed" in r.stdout
+        and "workers (parallel" in r.stdout.splitlines()[0],
+        f"rc={r.returncode} " + r.stdout[:100] + r.stdout[-100:],
     )
 
 
@@ -1087,4 +1177,141 @@ def gate_crash_after_restart_budget(g, args, binary):
             f"crash budget {tag}: 6 failed, 90 passed, exit 3",
             "6 failed" in r.stdout and "90 passed" in r.stdout and r.returncode == 3,
             f"rc={r.returncode} " + r.stdout[-200:],
+        )
+
+
+FIXTURE_COST_DB = """
+import os, time, pytest
+
+@pytest.fixture(scope="module")
+def db():
+    time.sleep(0.6)
+    with open(os.environ["SETUP_LOG"], "a") as f:
+        f.write(f"{os.getpid()}\\n")
+    yield
+
+""" + "".join(f"def test_db{i}(db): pass\n" for i in range(40))
+
+
+def gate_fixture_cost_dispatch(g, args, binary):
+    # --dist load hands out small contiguous chunks, so a module used to be
+    # spread over several workers and each paid its module fixture again. Once
+    # a run has recorded the setup cost, the module's tests go to one worker.
+    print("== fixture-cost-aware dispatch ==")
+    g.write("fixcost/test_db.py", FIXTURE_COST_DB)
+    g.write("fixcost/test_cheap.py", "".join(f"def test_c{i}(): pass\n" for i in range(200)))
+    log = g.tmp / "fixcost_setups"
+    proj = g.tmp / "fixcost"
+    for run in ("cold", "warm"):
+        log.write_text("")
+        r = g.run("-n", "4", "--collect", "full", cwd=proj, env_extra={"SETUP_LOG": str(log)})
+        check(f"fixture-cost {run}: suite passes", "240 passed" in r.stdout, r.stdout[-300:])
+    saved = proj / ".rstest_cache" / "scope_costs.json"
+    costs = json.loads(saved.read_text()) if saved.exists() else {}
+    check(
+        "fixture-cost: the setup cost is recorded",
+        costs.get("test_db.py", 0) >= 0.5,
+        str(costs)[:200],
+    )
+    setups = log.read_text().split()
+    check("fixture-cost warm: costly module fixture set up once", len(setups) == 1, str(setups))
+
+    # The doctor names the module it kept together and the setup time saved.
+    r = g.run(
+        "-n", "4", "--collect", "full", "--doctor", cwd=proj, env_extra={"SETUP_LOG": str(log)}
+    )
+    check(
+        "fixture-cost doctor: grouping section with the time saved",
+        "FIXTURE GROUPING (~" in r.stdout and "set up 1x" in r.stdout and "test_db.py" in r.stdout,
+        r.stdout[-800:],
+    )
+
+    # A run that pushes to the shared cache lets a fresh checkout (no local
+    # .rstest_cache) group the module on its very first run.
+    remote = g.tmp / "fixcost_remote"
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-push",
+        cwd=proj,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    check("fixture-cost push: suite passes", "240 passed" in r.stdout, r.stdout[-300:])
+    fresh = g.tmp / "fixcost_fresh"
+    shutil.copytree(proj, fresh, ignore=shutil.ignore_patterns(".rstest_cache", ".pytest_cache"))
+    log.write_text("")
+    r = g.run(
+        "-n",
+        "4",
+        "--collect",
+        "full",
+        "--cache-remote",
+        str(remote),
+        "--cache-pull",
+        cwd=fresh,
+        env_extra={"SETUP_LOG": str(log)},
+    )
+    setups = log.read_text().split()
+    check(
+        "fixture-cost pull: a fresh checkout sets the module fixture up once",
+        "240 passed" in r.stdout and len(setups) == 1,
+        f"{setups} " + r.stdout[-300:],
+    )
+
+
+ISOLATED = """
+import os
+import threading
+import time
+
+import pytest
+
+STATE = {"polluted": False}
+
+
+@pytest.mark.isolated
+def test_a_polluter():
+    STATE["polluted"] = True
+    os.environ["RSTEST_ISO_POLLUTED"] = "1"
+
+
+def test_b_victim():
+    assert not STATE["polluted"]
+    assert "RSTEST_ISO_POLLUTED" not in os.environ
+
+
+@pytest.mark.isolated
+def test_c_leaks_a_thread():
+    threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+
+
+@pytest.mark.isolated
+def test_d_crash():
+    os._exit(3)
+"""
+
+
+def gate_isolated_mark(g, args, binary):
+    print("== @pytest.mark.isolated ==")
+    if WINDOWS:
+        check("isolated: skipped on Windows (no fork)", True)
+        return
+    g.write("isolated/test_iso.py", ISOLATED)
+    for mode in (("-n", "0"), ("-n", "2"), ("-n", "2", "--collect", "lazy")):
+        label = " ".join(mode)
+        r = g.run("isolated", *mode, "-p", "no:randomly", "--fail-on-leak", "--dist", "loadfile")
+        out = r.stdout + r.stderr
+        # The polluter's state never reaches the victim, the leaked thread
+        # dies with its child (no leak to gate on), and the crash is one
+        # failed test, not a dead worker.
+        check(
+            f"isolated ({label}): state contained, crash reported",
+            "1 failed, 3 passed" in out
+            and "isolated test crashed" in out
+            and "leaked threads/fds" not in out,
+            out[-400:],
         )

@@ -122,6 +122,23 @@ impl Run {
         }
     }
 
+    /// Errors that escaped the worker's whole pytest session (`<session: X>`,
+    /// e.g. a warning raised at unconfigure under `filterwarnings = error`).
+    /// They land after pytest's own summary, so in pytest-output mode nothing
+    /// else shows them; plain pytest dumps the same traceback to stderr.
+    pub fn print_session_errors(&self, sink: &mut Sink) {
+        let palette = sink.palette();
+        for (nodeid, longrepr) in &self.collect_errors {
+            if nodeid.starts_with("<session: ") {
+                sink.out_line(&format!(
+                    "\n{}",
+                    palette.bold_red(&format!("--- ERROR {nodeid} ---"))
+                ));
+                sink.out_line(longrepr.trim_end());
+            }
+        }
+    }
+
     /// The "failures by cause" block: failures sharing an exception, message
     /// and project frame, one entry per group (see [`Run::failure_groups`]),
     /// so a broken dependency failing dozens of tests reads as one cause.
@@ -292,14 +309,18 @@ impl Run {
         tests.sort_by_cached_key(|(id, _)| order(id));
 
         let mut lines: Vec<String> = Vec::new();
+        let node = |nodeid: &str| node_markup(palette, nodeid);
         let with_message = |word: String, nodeid: &str, msg: Option<&str>| -> String {
-            let line = format!("{word} {nodeid}");
+            let line = format!("{word} {}", node(nodeid));
             let Some(msg) = msg else { return line };
             match msg_width {
                 None => format!("{line} - {msg}"),
                 Some(width) => {
-                    let used = word_width(&line);
-                    match trim_message(msg, width.saturating_sub(used)) {
+                    // pytest measures the marked-up line: with color on, the
+                    // escapes make its wcswidth -1, so the message gets the
+                    // full width plus one column, as pytest gives it.
+                    let used = wcswidth(&line).map_or(-1, |w| w as isize);
+                    match trim_message(msg, width as isize - used) {
                         Some(msg) => format!("{line} - {msg}"),
                         None => line,
                     }
@@ -315,7 +336,14 @@ impl Run {
                         }
                     }
                     for f in failures.iter().filter(|f| (f.when == "call") == (c == 'f')) {
-                        let word = if c == 'f' { "FAILED" } else { "ERROR" };
+                        // pytest's word for a failed subtest carries its
+                        // description: `SUBFAILED(i=1)`.
+                        let word = match (&f.subtest_desc, c) {
+                            (Some(d), 'f') => format!("SUBFAILED{d}"),
+                            (_, 'f') => "FAILED".to_string(),
+                            _ => "ERROR".to_string(),
+                        };
+                        let word = word.as_str();
                         let msg = f
                             .crash
                             .as_deref()
@@ -326,7 +354,7 @@ impl Run {
                 'p' => {
                     for (id, e) in &tests {
                         if !e.wasxfail && e.call.as_deref() == Some("passed") {
-                            lines.push(format!("{} {id}", palette.green("PASSED")));
+                            lines.push(format!("{} {}", palette.green("PASSED"), node(id)));
                         }
                     }
                 }
@@ -337,7 +365,7 @@ impl Run {
                             || e.call.as_deref() == Some("skipped");
                         let passed = e.call.as_deref() == Some("passed");
                         if e.wasxfail && (if c == 'x' { skipped } else { passed }) {
-                            let mut line = format!("{} {id}", palette.yellow(word));
+                            let mut line = format!("{} {}", palette.yellow(word), node(id));
                             if let Some(reason) = &e.xfail_reason {
                                 line.push_str(&format!(" - {reason}"));
                             }
@@ -387,40 +415,51 @@ impl Run {
     }
 }
 
-/// Visible width of a line that may carry color codes.
-fn word_width(line: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for c in line.chars() {
-        match (in_escape, c) {
-            (false, '\x1b') => in_escape = true,
-            (true, 'm') => in_escape = false,
-            (true, _) => {}
-            (false, _) => width += 1,
-        }
+/// pytest's `_get_node_id_with_markup`: the part after the file, bold.
+fn node_markup(palette: crate::reporting::color::Palette, nodeid: &str) -> String {
+    match nodeid.split_once("::") {
+        Some((path, rest)) => format!("{path}::{}", palette.bold(rest)),
+        None => nodeid.to_string(),
     }
-    width
+}
+
+/// pytest's `_pytest._io.wcwidth.wcswidth`: terminal columns, `None` (its
+/// -1) when `s` holds a control char, an ANSI escape included. pytest NFC-
+/// normalizes first; combining marks are zero-wide either way.
+fn wcswidth(s: &str) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+    s.chars()
+        .map(|c| match c as u32 {
+            0x20..=0x7e => Some(1),
+            0 | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2063 => Some(0),
+            _ if c.is_control() => None,
+            _ => Some(c.width().unwrap_or(0)),
+        })
+        .sum()
 }
 
 /// pytest's `_format_trimmed(" - {}", msg, available)`: the message's first
 /// line, ellipsized to fit after the ` - ` separator; `None` when not even
-/// the ellipsis fits. Width counts chars.
-// ponytail: chars, not wcswidth; wide (CJK/emoji) messages may overrun a column or two.
-fn trim_message(msg: &str, available: usize) -> Option<String> {
+/// the ellipsis fits. A message with no width (control chars) is never
+/// trimmed, as in pytest.
+fn trim_message(msg: &str, available: isize) -> Option<String> {
     let first = msg.lines().next().unwrap_or("");
-    const SEP: usize = 3; // " - "
+    const SEP: isize = 3; // " - "
     const ELLIPSIS: &str = "...";
-    if SEP + ELLIPSIS.len() > available {
+    if SEP + ELLIPSIS.len() as isize > available {
         return None;
     }
-    if SEP + first.chars().count() <= available {
+    let fits = |s: &str, room: isize| wcswidth(s).is_none_or(|w| SEP + w as isize <= room);
+    if fits(first, available) {
         return Some(first.to_string());
     }
-    let keep = available - ELLIPSIS.len() - SEP;
-    Some(format!(
-        "{}{ELLIPSIS}",
-        first.chars().take(keep).collect::<String>()
-    ))
+    // pytest slices `available - 3` chars, then drops chars until it fits.
+    let room = available - ELLIPSIS.len() as isize;
+    let mut keep: String = first.chars().take(room as usize).collect();
+    while !fits(&keep, room) {
+        keep.pop();
+    }
+    Some(format!("{keep}{ELLIPSIS}"))
 }
 
 #[cfg(test)]
@@ -452,6 +491,9 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -703,6 +745,24 @@ mod tests {
     }
 
     #[test]
+    fn print_session_errors_shows_only_escaped_session_errors() {
+        // pytest's own reporter already showed module collect errors; only a
+        // session-level escape needs rstest to print it.
+        let mut run = Run::default();
+        run.collect_error("c.py".into(), "ImportError: boom".into());
+        run.collect_error(
+            "<session: PytestWarning>".into(),
+            "PytestWarning: at unconfigure".into(),
+        );
+        let (mut sink, cap) = Sink::captured();
+        run.print_session_errors(&mut sink);
+        let out = cap.out();
+        assert!(out.contains("ERROR <session: PytestWarning>"), "{out}");
+        assert!(out.contains("at unconfigure"), "{out}");
+        assert!(!out.contains("ImportError"), "{out}");
+    }
+
+    #[test]
     fn print_failures_tb_no_prints_nothing() {
         let mut run = Run::default();
         full(&mut run, "a.py::bad", "failed");
@@ -893,6 +953,28 @@ mod tests {
     }
 
     #[test]
+    fn short_summary_names_a_failed_subtest_as_pytest_does() {
+        let mut run = Run::default();
+        run.record(Some(0), report("t.py::test_sub", "setup", "passed"));
+        let mut sub = report("t.py::test_sub", "call", "failed");
+        sub.subtest = true;
+        sub.subtest_desc = Some("(i=1)".into());
+        sub.crash = Some("assert 1 != 1".into());
+        run.record(Some(0), sub);
+        let mut parent = report("t.py::test_sub", "call", "failed");
+        parent.crash = Some("contains 1 failed subtest".into());
+        run.record(Some(0), parent);
+        let out = summary(&run, "fE", None);
+        assert!(
+            out.contains(
+                "SUBFAILED(i=1) t.py::test_sub - assert 1 != 1\n\
+                 FAILED t.py::test_sub - contains 1 failed subtest\n"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn short_summary_all_chars_match_pytest_ra() {
         let out = summary(
             &r23_run(),
@@ -975,7 +1057,48 @@ mod tests {
     }
 
     #[test]
-    fn word_width_ignores_color_codes() {
-        assert_eq!(super::word_width("\x1b[31mERROR\x1b[0m t.py::a"), 13);
+    fn short_summary_trims_wide_messages_by_columns_like_pytest() {
+        let mut run = Run::default();
+        run.record(
+            None,
+            rep(
+                "t.py::w",
+                "call",
+                "failed",
+                Some(&"日本語のメッセージ".repeat(3)),
+            ),
+        );
+        // 40 columns leave 26 after `FAILED t.py::w`: ` - `, 20 columns
+        // (10 wide chars), the ellipsis. Counting chars overran by 20.
+        let out = summary(&run, "f", Some(40));
+        assert!(
+            out.contains("FAILED t.py::w - 日本語のメッセージ日...\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn wcswidth_counts_columns_like_pytest() {
+        assert_eq!(wcswidth("abc"), Some(3));
+        assert_eq!(wcswidth("日本"), Some(4));
+        assert_eq!(wcswidth("🎉"), Some(2));
+        assert_eq!(wcswidth("e\u{301}"), Some(1), "combining mark is zero-wide");
+        assert_eq!(wcswidth("a\u{200b}"), Some(1), "zero-width space");
+        // A control char (an ANSI escape too) has no width: pytest's -1.
+        assert_eq!(wcswidth("\x1b[1mt\x1b[0m"), None);
+        // ... so a message holding one is never trimmed.
+        assert_eq!(trim_message("a\tb", 6).as_deref(), Some("a\tb"));
+    }
+
+    #[test]
+    fn node_markup_bolds_the_test_part_like_pytest() {
+        let on = crate::reporting::color::Palette::detect(&["--color=yes".into()]);
+        assert_eq!(
+            node_markup(on, "t.py::C::t[a::b]"),
+            "t.py::\x1b[1mC::t[a::b]\x1b[0m"
+        );
+        assert_eq!(node_markup(on, "t.py"), "t.py", "a path alone stays plain");
+        let off = crate::reporting::color::Palette::default();
+        assert_eq!(node_markup(off, "t.py::t"), "t.py::t");
     }
 }

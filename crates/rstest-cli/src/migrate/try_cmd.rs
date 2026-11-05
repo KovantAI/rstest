@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use super::bisect::MAXFAIL_LIFT;
 use super::{Outcomes, Phase};
 use crate::reporting::sink::Sink;
 use crate::scheduling::worker;
@@ -197,6 +198,9 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     let mut py = std::process::Command::new(python);
     py.args(["-m", "pytest", "-p", "rstest_worker.recorder", "-q"])
         .args(args)
+        // `-x` would stop pytest at the first failure while the rstest
+        // workers run on: lift it on both sides so they run the same tests.
+        .arg(MAXFAIL_LIFT)
         .env("RSTEST_RECORD", &py_json)
         .env("PYTHONPATH", worker::worker_pythonpath())
         .stdout(std::process::Stdio::null())
@@ -228,7 +232,11 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
         .arg(python)
         .arg("-n")
         .arg("auto")
+        // A passing rerun would hide a failure pytest reports (see
+        // `run_session`): parity compares first attempts.
+        .args(["--reruns", "0"])
         .args(args)
+        .arg(MAXFAIL_LIFT)
         .arg("--report-json")
         .arg(&rs_json)
         .args(["-q", "--output", "dots"])
@@ -432,6 +440,26 @@ mod tests {
         assert_eq!(p.diffs, 0);
         assert_eq!(p.only_py, 0);
         assert_eq!(p.only_rs, 0);
+    }
+
+    #[test]
+    fn compute_parity_tells_skipped_from_passed() {
+        // Regression: a skip read as a pass, so a test that ran under pytest
+        // but skipped under rstest (a skipif on PYTEST_XDIST_WORKER, which
+        // only rstest sets), and the reverse, showed as identical outcomes.
+        let doc = |a: serde_json::Value, b: serde_json::Value| {
+            crate::migrate::parse_outcomes(&serde_json::json!({"tests": {"a": a, "b": b}}), false)
+                .unwrap()
+        };
+        let ran = || serde_json::json!({"setup": "passed", "call": "passed"});
+        let skipped = || serde_json::json!({"setup": "skipped", "teardown": "passed"});
+        let py = doc(ran(), skipped());
+        let rs = doc(skipped(), ran());
+        let p = compute_parity(&py, &rs);
+        assert!(!p.identical);
+        assert_eq!(p.diffs, 2);
+        // Skipped on both sides is parity.
+        assert!(compute_parity(&py, &py).identical);
     }
 
     #[test]

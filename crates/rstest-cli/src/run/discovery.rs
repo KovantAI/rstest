@@ -182,7 +182,7 @@ fn fold_collect_event(event: proto::Event, acc: &mut Collected) -> Option<i32> {
             acc.collect_errors.push((path, longrepr));
             None
         }
-        proto::Event::Done { exitstatus } => Some(exitstatus),
+        proto::Event::Done { exitstatus, .. } => Some(exitstatus),
         _ => None,
     }
 }
@@ -356,7 +356,13 @@ mod tests {
 
         // Done terminates the loop with the exit status.
         assert_eq!(
-            fold_collect_event(proto::Event::Done { exitstatus: 5 }, &mut acc),
+            fold_collect_event(
+                proto::Event::Done {
+                    exitstatus: 5,
+                    peak_rss: None
+                },
+                &mut acc
+            ),
             Some(5)
         );
     }

@@ -19,6 +19,12 @@ pub(super) struct Dispatch {
     pub(super) order: Vec<u64>,
     /// Length of the long-pole prefix (dispatched one at a time).
     pub(super) slow_count: usize,
+    /// Unit end-positions inside that prefix when it holds fixture groups
+    /// (see [`fixture_lead`]): each dispatch takes one whole unit. Empty: one
+    /// item per dispatch.
+    pub(super) lead_ends: Vec<usize>,
+    /// What [`fixture_lead`] grouped, for the doctor.
+    pub(super) fixture_groups: Vec<FixtureGroup>,
     pub(super) cursor: usize,
     /// Group end-positions in `order` (loadfile mode): a dispatch never
     /// splits a group.
@@ -29,6 +35,21 @@ pub(super) struct Dispatch {
     /// after all other workers are Done.
     pub(super) serial: VecDeque<u64>,
     pub(super) serial_active: bool,
+}
+
+/// A module or class whose tests [`fixture_lead`] kept together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixtureGroup {
+    /// The module's or class's nodeid.
+    pub scope: String,
+    pub tests: usize,
+    /// Units it went out in (each set up once): 1 unless it was split.
+    pub pieces: usize,
+    /// One setup's recorded seconds.
+    pub setup_seconds: f64,
+    /// About how many workers plain chunked dispatch would have spread it
+    /// over, each setting it up again.
+    pub chunked_setups: usize,
 }
 
 pub(super) enum Take {
@@ -57,6 +78,18 @@ impl Dispatch {
             }
             if self.cursor < self.order.len() {
                 match &self.group_ends {
+                    None if self.cursor < self.slow_count && !self.lead_ends.is_empty() => {
+                        // One lead unit per dispatch: a fixture group (or a
+                        // long pole) goes to one worker whole.
+                        if !indices.is_empty() {
+                            break;
+                        }
+                        let end =
+                            self.lead_ends[self.lead_ends.partition_point(|&e| e <= self.cursor)];
+                        indices.extend_from_slice(&self.order[self.cursor..end]);
+                        self.cursor = end;
+                        break;
+                    }
                     None => {
                         indices.push(self.order[self.cursor]);
                         self.cursor += 1;
@@ -125,6 +158,8 @@ pub(super) fn build_dispatch(
     groups: std::collections::HashMap<String, String>,
     cache: &std::collections::HashMap<String, f64>,
     flakes: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    scope_costs: &std::collections::HashMap<String, f64>,
+    workers: usize,
     dist: Dist,
     order: super::Order,
     shuffle: Option<u64>,
@@ -137,27 +172,27 @@ pub(super) fn build_dispatch(
     let serial_set: HashSet<u64> = serial.iter().copied().collect();
     let parallel = || (0..ids.len() as u64).filter(|i| !serial_set.contains(i) && kept(i));
 
+    let mut lead_ends = Vec::new();
+    let mut fixture_groups = Vec::new();
     let (order, slow_count, group_ends) = match dist {
         // Each mode has no dispatch queue (each worker is seeded with the
         // full suite), so there is nothing to build.
         Dist::Each => return None,
         Dist::Load => match order {
-            super::Order::Throughput => {
-                let full = crate::scheduling::durations::dispatch_order(ids, cache);
-                let order: Vec<u64> = full
-                    .into_iter()
-                    .filter(|i| !serial_set.contains(i) && kept(i))
-                    .collect();
-                let slow_count = order
-                    .iter()
-                    .take_while(|&&i| {
-                        cache.get(&ids[i as usize]).is_some_and(|&d| {
-                            d >= crate::scheduling::durations::SLOW_THRESHOLD_SECS
-                        })
-                    })
-                    .count();
-                (order, slow_count, None)
+            // Shuffle defeats any lead order (see below), so it never groups.
+            super::Order::Throughput if shuffle.is_none() && workers > 1 => {
+                let parallel: Vec<u64> = parallel().collect();
+                match fixture_lead(ids, &parallel, cache, scope_costs, workers) {
+                    Some((order, ends, groups)) => {
+                        let slow_count = ends.last().copied().unwrap_or(0);
+                        lead_ends = ends;
+                        fixture_groups = groups;
+                        (order, slow_count, None)
+                    }
+                    None => throughput(ids, cache, &serial_set, &kept),
+                }
             }
+            super::Order::Throughput => throughput(ids, cache, &serial_set, &kept),
             // Fail-fast: suspects (failed/flaky) first, then the throughput
             // order. The single-dispatch prefix covers the suspects AND the
             // long poles, so reds spread across workers at once and slow
@@ -284,7 +319,137 @@ pub(super) fn build_dispatch(
         requeued: VecDeque::new(),
         serial: serial.into(),
         serial_active: false,
+        lead_ends,
+        fixture_groups,
     })
+}
+
+/// `--dist load`'s throughput order: cached long poles first (longest first),
+/// then the rest in collection order. Returns (order, slow_count, None).
+fn throughput(
+    ids: &[String],
+    cache: &std::collections::HashMap<String, f64>,
+    serial_set: &HashSet<u64>,
+    kept: &impl Fn(&u64) -> bool,
+) -> (Vec<u64>, usize, Option<Vec<usize>>) {
+    let full = crate::scheduling::durations::dispatch_order(ids, cache);
+    let order: Vec<u64> = full
+        .into_iter()
+        .filter(|i| !serial_set.contains(i) && kept(i))
+        .collect();
+    let slow_count = order
+        .iter()
+        .take_while(|&&i| {
+            cache
+                .get(&ids[i as usize])
+                .is_some_and(|&d| d >= crate::scheduling::durations::SLOW_THRESHOLD_SECS)
+        })
+        .count();
+    (order, slow_count, None)
+}
+
+/// A module or class whose module/class-scoped fixtures take at least this
+/// long to set up keeps its tests on one worker.
+pub(crate) const GROUP_MIN_SETUP_SECS: f64 = 0.5;
+
+/// Fixture-cost-aware lead for `--dist load`. Chunked dispatch spreads a
+/// module over several workers, and each one pays its module fixtures again.
+/// Here the tests of every module (or class) whose fixture setup costs at
+/// least [`GROUP_MIN_SETUP_SECS`] form one unit sent to one worker, split only
+/// where a piece more saves more wall time than the setup it repeats. The units
+/// and the remaining long poles lead the queue, biggest first; the rest
+/// follows in collection order. Returns (order, unit ends, what was grouped),
+/// or `None` when no scope is costly enough (the plain throughput order then
+/// applies).
+fn fixture_lead(
+    ids: &[String],
+    parallel: &[u64],
+    cache: &std::collections::HashMap<String, f64>,
+    scope_costs: &std::collections::HashMap<String, f64>,
+    workers: usize,
+) -> Option<(Vec<u64>, Vec<usize>, Vec<FixtureGroup>)> {
+    use crate::scheduling::durations::SLOW_THRESHOLD_SECS;
+    // The widest costly scope wins: a costly module groups its classes too.
+    let scope_of = |id: &str| {
+        id.match_indices("::").find_map(|(pos, _)| {
+            scope_costs
+                .get(&id[..pos])
+                .filter(|&&c| c >= GROUP_MIN_SETUP_SECS)
+                .map(|&c| (pos, c))
+        })
+    };
+    let dur = |i: u64| cache.get(&ids[i as usize]).copied().unwrap_or(0.0);
+    let mut groups: Vec<(f64, Vec<u64>, &str)> = Vec::new();
+    let mut group_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut rest = Vec::new();
+    for &i in parallel {
+        let id = ids[i as usize].as_str();
+        match scope_of(id) {
+            Some((pos, cost)) => {
+                let g = *group_of.entry(&id[..pos]).or_insert_with(|| {
+                    groups.push((cost, Vec::new(), &id[..pos]));
+                    groups.len() - 1
+                });
+                groups[g].1.push(i);
+            }
+            None => rest.push(i),
+        }
+    }
+    if groups.is_empty() {
+        return None;
+    }
+    let total: f64 =
+        parallel.iter().map(|&i| dur(i)).sum::<f64>() + groups.iter().map(|g| g.0).sum::<f64>();
+    let pool = workers as f64;
+    // (expected seconds, items): fixture groups, then the ungrouped long poles.
+    let mut units: Vec<(f64, Vec<u64>)> = Vec::new();
+    let mut grouped = Vec::new();
+    let chunk = chunk_size(parallel.len(), workers);
+    for (cost, members, scope) in groups {
+        let calls: f64 = members.iter().map(|&i| dur(i)).sum();
+        // Wall-time floor with the group in k pieces: its longest piece, or
+        // the pool's average once each extra piece repeats the setup.
+        let wall = |k: usize| (cost + calls / k as f64).max((total + (k - 1) as f64 * cost) / pool);
+        // Another piece only when it saves more wall time than the setup it
+        // repeats.
+        let mut pieces = 1;
+        while pieces < workers.min(members.len()) && wall(pieces) - wall(pieces + 1) > cost {
+            pieces += 1;
+        }
+        // ponytail: pieces split by count; weight by duration if they come out uneven.
+        let split = members.chunks(members.len().div_ceil(pieces));
+        grouped.push(FixtureGroup {
+            scope: scope.to_string(),
+            tests: members.len(),
+            pieces: split.len(),
+            setup_seconds: cost,
+            chunked_setups: members.len().div_ceil(chunk).min(workers),
+        });
+        for piece in split {
+            units.push((
+                cost + piece.iter().map(|&i| dur(i)).sum::<f64>(),
+                piece.to_vec(),
+            ));
+        }
+    }
+    let mut tail = Vec::new();
+    for i in rest {
+        let d = dur(i);
+        if d >= SLOW_THRESHOLD_SECS {
+            units.push((d, vec![i]));
+        } else {
+            tail.push(i);
+        }
+    }
+    units.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut order = Vec::with_capacity(parallel.len());
+    let mut ends = Vec::with_capacity(units.len());
+    for (_, unit) in units {
+        order.extend(unit);
+        ends.push(order.len());
+    }
+    order.extend(tail);
+    Some((order, ends, grouped))
 }
 
 #[cfg(test)]
@@ -314,6 +479,8 @@ mod tests {
             groups,
             cache,
             &HashMap::new(),
+            &HashMap::new(),
+            4,
             dist,
             super::super::Order::Throughput,
             shuffle,
@@ -381,6 +548,8 @@ mod tests {
             HashMap::new(),
             &cache,
             &flakes,
+            &HashMap::new(),
+            4,
             Dist::Load,
             super::super::Order::FailFast,
             None,
@@ -419,6 +588,8 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             &flakes,
+            &HashMap::new(),
+            4,
             Dist::Load,
             super::super::Order::FailFast,
             None,
@@ -636,5 +807,146 @@ mod tests {
             None,
         );
         assert!(d.is_none());
+    }
+
+    /// Throughput build with saved module/class setup costs and a pool size.
+    fn grouped(
+        ids: &[String],
+        cache: &HashMap<String, f64>,
+        scope_costs: &HashMap<String, f64>,
+        workers: usize,
+        shuffle: Option<u64>,
+    ) -> Dispatch {
+        build_dispatch(
+            ids,
+            vec![],
+            HashMap::new(),
+            cache,
+            &HashMap::new(),
+            scope_costs,
+            workers,
+            Dist::Load,
+            super::super::Order::Throughput,
+            shuffle,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn costs(entries: &[(&str, f64)]) -> HashMap<String, f64> {
+        entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn a_costly_module_goes_to_one_worker_whole() {
+        // 8 cheap tests in a.py, 6 in db.py whose module fixture takes 3s.
+        let names: Vec<String> = (0..8)
+            .map(|i| format!("a.py::t{i}"))
+            .chain((0..6).map(|i| format!("db.py::t{i}")))
+            .collect();
+        let cache: HashMap<String, f64> = names.iter().map(|n| (n.clone(), 0.1)).collect();
+        let mut d = grouped(&names, &cache, &costs(&[("db.py", 3.0)]), 4, None);
+        // db.py leads as ONE dispatch, however small the chunk; then a.py.
+        let batches = drain(&mut d, 2, false);
+        assert_eq!(batches[0], vec![8, 9, 10, 11, 12, 13]);
+        assert_eq!(batches[1..].concat(), (0..8).collect::<Vec<u64>>());
+        assert!(batches[1..].iter().all(|b| b.len() <= 2));
+    }
+
+    #[test]
+    fn a_cheap_or_unknown_scope_keeps_the_throughput_order() {
+        let names = ids(&["a.py::t0", "a.py::t1", "b.py::t0", "b.py::t1"]);
+        let cache: HashMap<String, f64> = HashMap::from([("b.py::t1".to_string(), 2.0)]);
+        let plain = dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &cache,
+            Dist::Load,
+            None,
+            None,
+        )
+        .unwrap();
+        // Below the threshold, and a costly scope no test belongs to.
+        for sc in [costs(&[("a.py", 0.1)]), costs(&[("gone.py", 9.0)])] {
+            let d = grouped(&names, &cache, &sc, 4, None);
+            assert_eq!(d.order, plain.order);
+            assert_eq!(d.slow_count, plain.slow_count);
+            assert!(d.lead_ends.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_costly_class_groups_only_its_own_tests() {
+        let names = ids(&[
+            "m.py::TestDb::t0",
+            "m.py::test_free",
+            "m.py::TestDb::t1",
+            "m.py::TestOther::t0",
+        ]);
+        let mut d = grouped(
+            &names,
+            &HashMap::new(),
+            &costs(&[("m.py::TestDb", 2.0)]),
+            2,
+            None,
+        );
+        let batches = drain(&mut d, 1, false);
+        assert_eq!(batches[0], vec![0, 2]);
+        assert_eq!(batches[1..].concat(), vec![1, 3]);
+    }
+
+    #[test]
+    fn a_costly_module_beats_its_costly_class() {
+        let names = ids(&["m.py::TestA::t0", "m.py::t1", "n.py::t0"]);
+        let sc = costs(&[("m.py", 1.0), ("m.py::TestA", 5.0)]);
+        let mut d = grouped(&names, &HashMap::new(), &sc, 2, None);
+        assert_eq!(drain(&mut d, 1, false)[0], vec![0, 1]);
+    }
+
+    #[test]
+    fn a_group_bigger_than_a_workers_share_is_split_into_balanced_pieces() {
+        // One 1s setup over 40 tests of 1s: 41s of work for 4 workers (share
+        // ~10.25s) splits into 4 pieces of 10, each paying the setup again.
+        let names: Vec<String> = (0..40).map(|i| format!("db.py::t{i}")).collect();
+        let cache: HashMap<String, f64> = names.iter().map(|n| (n.clone(), 1.0)).collect();
+        let mut d = grouped(&names, &cache, &costs(&[("db.py", 1.0)]), 4, None);
+        let batches = drain(&mut d, 64, false);
+        assert_eq!(batches.len(), 4);
+        assert!(batches.iter().all(|b| b.len() == 10));
+    }
+
+    #[test]
+    fn units_and_long_poles_lead_biggest_first() {
+        // db.py: 2s setup + 2 x 0.5s = 3s; slow.py::t: a lone 5s long pole.
+        let names = ids(&["db.py::t0", "db.py::t1", "slow.py::t", "x.py::t"]);
+        let cache = costs(&[
+            ("db.py::t0", 0.5),
+            ("db.py::t1", 0.5),
+            ("slow.py::t", 5.0),
+            ("x.py::t", 0.1),
+        ]);
+        let mut d = grouped(&names, &cache, &costs(&[("db.py", 2.0)]), 4, None);
+        assert_eq!(drain(&mut d, 8, false), vec![vec![2], vec![0, 1], vec![3]]);
+    }
+
+    #[test]
+    fn shuffle_and_a_single_worker_never_group() {
+        let names = ids(&["db.py::t0", "a.py::t0", "db.py::t1"]);
+        let sc = costs(&[("db.py", 3.0)]);
+        assert!(grouped(&names, &HashMap::new(), &sc, 4, Some(7))
+            .lead_ends
+            .is_empty());
+        assert!(grouped(&names, &HashMap::new(), &sc, 1, None)
+            .lead_ends
+            .is_empty());
+    }
+
+    #[test]
+    fn a_requeued_item_is_not_merged_into_a_lead_unit() {
+        let names = ids(&["db.py::t0", "db.py::t1", "a.py::t0"]);
+        let mut d = grouped(&names, &HashMap::new(), &costs(&[("db.py", 3.0)]), 2, None);
+        d.requeued.push_back(2);
+        assert_eq!(drain(&mut d, 1, false), vec![vec![2], vec![0, 1], vec![2]]);
     }
 }

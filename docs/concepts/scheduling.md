@@ -37,6 +37,30 @@ workers may have started by then.
    protocol round-trips. Chunk size scales with suite size; refills happen
    when a worker half-drains.
 
+### Costly modules and classes stay on one worker
+
+Chunks are small, so a long module is usually spread over several workers,
+and each of them sets up its module- and class-scoped fixtures again. rstest
+times those fixtures on every run and saves each module's and class's setup
+cost to `.rstest_cache/scope_costs.json`. On the next run, the tests of a
+module or class whose setup takes 0.5s or more are sent to one worker as one
+unit, so its fixtures are set up once. A costly module groups its classes
+too.
+
+A unit is split only when another piece saves more wall time than the setup
+it repeats, for example a module of long tests that would otherwise leave
+the rest of the pool idle. Units lead the queue together with the slow tests,
+biggest first; the rest follows in chunks as above.
+
+The costs ride the shared cache (`--cache-push` / `--cache-pull`), so a fresh
+CI runner groups from its first run. `--doctor` lists what was grouped and the
+setup time it saved ([FIXTURE GROUPING](../guides/doctor.md#fixture-grouping)).
+
+This applies to the default `--dist load --order throughput` on a full
+collection. It is off under `--shuffle` and `--order fail-fast` (their order
+wins) and with one worker. [Lazy collection](lazy-collection.md) already
+hands out whole files.
+
 The duration cache (`.rstest_cache/durations.json`) is written after every
 normal run (not under [`--dist each`](#broadcast-mode-dist-each) or
 `rstest replay`), so the

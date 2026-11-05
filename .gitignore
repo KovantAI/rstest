@@ -11,6 +11,8 @@ lcov.info
 htmlcov/
 mutants.out/
 mutants.out.old/
+.fermut/
+coverage.json
 # Dev planning docs and bug notes (kept locally; not shipped source).
 /dev-notes/
 .gate-venv/
@@ -19,6 +21,7 @@ site/
 corpus/work/
 corpus/lock.json
 corpus/results.json
+corpus/history/
 # bench.py's latest run; published runs are archived in corpus/bench-results/.
 corpus/bench.json
 .claude/*
@@ -32,3 +35,6 @@ corpus/bench.json
 !.claude/skills/rstest-triage
 plugins/rstest/skills/*-workspace/
 .cursor
+
+.fermut
+coverage.json

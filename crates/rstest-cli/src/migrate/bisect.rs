@@ -144,7 +144,7 @@ pub(super) fn pinned_inifile(inifile: Option<&str>, work: &Path) -> Result<PathB
 fn victim_failed(out: &Outcomes, victim: &str) -> Result<bool> {
     match out.get(victim).map(|r| r.phase) {
         Some(Phase::Fail) => Ok(true),
-        Some(Phase::Pass) => Ok(false),
+        Some(Phase::Pass | Phase::Skip) => Ok(false),
         None => bail!(
             "rstest bisect: {victim} did not run in the child session (deselected \
              by a pytest option such as -k/-m, a collection error, a crashed \
@@ -739,7 +739,9 @@ fn print_report(sink: &mut Sink, victim: &str, culprits: &[String], repro: &str,
         "\n  Fix: the culprit leaks state the victim depends on being clean \
          (a module global, a monkeypatch not undone, a cached singleton, an \
          env var, a temp file). Reset it in the culprit's teardown, or make \
-         the victim set up its own state.",
+         the victim set up its own state. Until then, @pytest.mark.isolated \
+         on the culprit runs it in a forked process, so what it leaks dies \
+         with it.",
     );
     sink.out_line("================================================");
 }

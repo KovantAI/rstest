@@ -101,9 +101,11 @@ $ rstest audit --audit-repeat 5 --audit-json audit.json
 - Runs the suite in parallel on at least two workers (N times with
   `--audit-repeat`), diffs against the `-n 0` oracle, and classifies each
   parallel-only failure: ISOLATION / CO-LOCATION, WALL-CLOCK /
-  LOAD-SENSITIVE, ORDER DEPENDENCY, INTRINSIC FLAKE, or pre-existing.
+  LOAD-SENSITIVE, ORDER DEPENDENCY, CONCURRENT RACE, INTRINSIC FLAKE, or
+  pre-existing.
 - Emits a paste-ready `conftest.py` block marking the ISOLATION /
-  CO-LOCATION and WALL-CLOCK / LOAD-SENSITIVE tests `@pytest.mark.serial`. If
+  CO-LOCATION, WALL-CLOCK / LOAD-SENSITIVE and CONCURRENT RACE tests
+  `@pytest.mark.serial`. If
   `conftest.py` already defines `pytest_collection_modifyitems`, paste only
   the `_RSTEST_SERIAL` set and add the loop to the existing hook; a second
   definition silently replaces the first.

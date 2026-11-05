@@ -21,6 +21,7 @@
 //! guard); its outstanding items requeue; a capped-budget respawn reuses gwN.
 
 mod dispatch;
+pub use dispatch::FixtureGroup;
 mod io;
 mod state;
 
@@ -163,6 +164,9 @@ pub struct PoolOutcome {
     pub prog: Progress,
     /// Per-fixture setup timings (doctor mode), aggregated across workers.
     pub fixtures: Vec<proto::FixtureStat>,
+    /// Modules/classes `--dist load` kept on one worker for their fixture
+    /// cost (empty on paths that never group).
+    pub fixture_groups: Vec<dispatch::FixtureGroup>,
     /// Deduplicated session/collect/runtest warnings.
     pub warnings: Vec<proto::WarningEntry>,
     /// pytest's cache dir (from the designate worker), where the merged
@@ -181,6 +185,9 @@ pub struct PoolOutcome {
     /// per-worker spawns), for `--doctor` startup reporting. 0.0 on paths that
     /// don't spawn a pool (single-worker).
     pub startup_seconds: f64,
+    /// The largest peak RSS any worker reported at its session end (bytes);
+    /// `None` on the single-session path and where workers can't measure it.
+    pub peak_rss: Option<u64>,
     /// Whether the initial pool was actually fork-prewarmed off a zygote (not
     /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
     /// don't spawn a pool). Feeds the `--doctor` report.
@@ -353,6 +360,7 @@ pub fn run_pool(
     // explicit done_workers break, not channel disconnect.
 
     let duration_cache = crate::scheduling::durations::load();
+    let scope_costs = crate::scheduling::durations::load_scope_costs();
     // Flake history feeds fail-fast ordering; empty (and untouched) under the
     // throughput default so a cold cache costs nothing.
     let flake_history = if order == Order::FailFast {
@@ -372,6 +380,7 @@ pub fn run_pool(
     let mut fixtures: Vec<proto::FixtureStat> = Vec::new();
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
+    let mut peak_rss: Option<u64> = None;
     // Reference collection: (count, hash) from whichever worker reports first.
     let mut reference: Option<(u64, String)> = None;
     // Designate's id list, retained for crash-report nodeids.
@@ -559,6 +568,7 @@ pub fn run_pool(
                 }
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
+            Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
             Ok(Event::JunitSuite {
                 name,
@@ -586,6 +596,10 @@ pub fn run_pool(
                 if idx == 0 {
                     run.collect_skips += 1;
                 }
+            }
+            Ok(Event::LfRecollected { path, ids }) => {
+                // Every worker collects the same tree; the map dedups.
+                run.lf_recollected.insert(path, ids);
             }
             Ok(Event::CollectionDone {
                 count,
@@ -770,6 +784,8 @@ pub fn run_pool(
                             groups.unwrap_or_default(),
                             &duration_cache,
                             &flake_history,
+                            &scope_costs,
+                            states.len(),
                             dist,
                             order,
                             shuffle,
@@ -918,8 +934,12 @@ pub fn run_pool(
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::Done { exitstatus }) => {
+            Ok(Event::Done {
+                exitstatus,
+                peak_rss: peak,
+            }) => {
                 statuses.push(exitstatus);
+                peak_rss = peak_rss.max(peak);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own (see Stopped) never ran what
@@ -941,7 +961,9 @@ pub fn run_pool(
             | Ok(Event::FileCollected { .. })
             | Ok(Event::ItemStartId { .. })
             | Ok(Event::ItemDoneId { .. })
-            | Ok(Event::StoppedIds { .. }) => {}
+            | Ok(Event::StoppedIds { .. })
+            // Single-session only.
+            | Ok(Event::Interrupted {}) => {}
             Err(e) => {
                 // Name the cause (exit status, stderr tail) before anything below
                 // reaps the worker, which kills first and would hide it.
@@ -1137,6 +1159,8 @@ pub fn run_pool(
             dispatch = Some(Dispatch {
                 order: (0..total_items as u64).collect(),
                 slow_count: 0,
+                lead_ends: Vec::new(),
+                fixture_groups: Vec::new(),
                 cursor: 0,
                 group_ends: None,
                 requeued: VecDeque::new(),
@@ -1501,10 +1525,15 @@ pub fn run_pool(
             std::mem::take(&mut recorder),
         ));
     }
+    let fixture_groups = dispatch
+        .as_mut()
+        .map(|d| std::mem::take(&mut d.fixture_groups))
+        .unwrap_or_default();
     Ok(PoolOutcome {
         run,
         prog,
         fixtures,
+        fixture_groups,
         warnings,
         cache_dir,
         exitstatus,
@@ -1513,6 +1542,7 @@ pub fn run_pool(
         startup_seconds,
         fork_prewarmed,
         sources,
+        peak_rss,
     })
 }
 
@@ -1602,6 +1632,8 @@ mod tests {
         Dispatch {
             order: (0..len).collect(),
             slow_count,
+            lead_ends: Vec::new(),
+            fixture_groups: Vec::new(),
             cursor,
             group_ends: groups.then(|| vec![2, len as usize]),
             requeued: VecDeque::new(),

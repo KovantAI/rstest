@@ -20,6 +20,7 @@ use serde::Serialize;
 
 use crate::config::ProjectConfig;
 use crate::reporting::report::Run;
+use crate::scheduling::pool::FixtureGroup;
 use crate::scheduling::proto::FixtureStat;
 use crate::select::{CoverageFile, CoverageIndex};
 
@@ -83,6 +84,10 @@ pub struct DoctorReport {
     parallel_efficiency: Option<ParallelEfficiency>,
     /// Fixture setup cost summed across all workers, costliest first (top 50).
     fixtures: Vec<FixtureEntry>,
+    /// Modules and classes `--dist load` kept on one worker for their fixture
+    /// setup cost. `null` when the run grouped none (lazy collection,
+    /// `--shuffle`, `--order fail-fast`, one worker, or no costly scope).
+    fixture_grouping: Option<FixtureGrouping>,
     /// Test time per file, slowest first (top 20).
     slowest_files: Vec<FileEntry>,
     /// Slow tests whose every covered line is also covered by another test -
@@ -148,6 +153,9 @@ struct TimeoutAdvice {
     /// Judged tests whose own limit is above `suite_timeout`: they need a
     /// per-test `@pytest.mark.timeout`.
     override_count: usize,
+    /// Tests that would need one but already carry a `@pytest.mark.timeout`
+    /// at least as high; not in `override_count`.
+    marker_covered: usize,
     /// The highest of those, worst first (top 20).
     overrides: Vec<TimeoutOverride>,
 }
@@ -164,6 +172,10 @@ struct TimeoutOverride {
     runs: usize,
     /// Its suggested `@pytest.mark.timeout`, in seconds.
     timeout: u64,
+    /// Its current `@pytest.mark.timeout`, below the suggestion; absent when
+    /// it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current: Option<f64>,
 }
 
 /// Slow creep: a test whose median call time rose from the older third of
@@ -191,6 +203,65 @@ struct DriftTest {
     newer_median: f64,
     /// Passing runs the medians come from.
     runs: usize,
+}
+
+/// What fixture-cost-aware dispatch saved: each module or class it kept on
+/// one worker, its setups this run, and how many plain chunked dispatch would
+/// have caused (an estimate from the chunk size and worker count).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct FixtureGrouping {
+    /// Setup seconds saved over every group, against plain chunked dispatch.
+    saved_seconds: f64,
+    /// Every group, most saved first.
+    groups: Vec<GroupEntry>,
+}
+
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct GroupEntry {
+    /// The module's or class's nodeid.
+    scope: String,
+    /// Tests in it this run dispatched.
+    tests: usize,
+    /// Times its module/class fixtures were set up this run.
+    setups: usize,
+    /// About how many times plain chunked dispatch would have set them up.
+    chunked_setups: usize,
+    /// One setup's recorded seconds.
+    setup_seconds: f64,
+    /// `(chunked_setups - setups) * setup_seconds`, never negative.
+    saved_seconds: f64,
+}
+
+fn fixture_grouping(run: &Run, groups: &[FixtureGroup]) -> Option<FixtureGrouping> {
+    if groups.is_empty() {
+        return None;
+    }
+    let mut entries: Vec<GroupEntry> = groups
+        .iter()
+        .map(|g| {
+            // Measured setups; a scope whose fixtures reported nothing this run
+            // (all its tests deselected or skipped) counts its planned pieces.
+            let setups = run
+                .scope_costs
+                .get(&g.scope)
+                .map_or(g.pieces, |&(_, n)| n as usize);
+            GroupEntry {
+                scope: g.scope.clone(),
+                tests: g.tests,
+                setups,
+                chunked_setups: g.chunked_setups,
+                setup_seconds: g.setup_seconds,
+                saved_seconds: g.chunked_setups.saturating_sub(setups) as f64 * g.setup_seconds,
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| b.saved_seconds.total_cmp(&a.saved_seconds));
+    Some(FixtureGrouping {
+        saved_seconds: entries.iter().map(|e| e.saved_seconds).sum(),
+        groups: entries,
+    })
 }
 
 /// Tests that reached the network, from the worker's network guard.
@@ -315,13 +386,14 @@ fn timeout_advice(
     run: &Run,
     history: &crate::reporting::history::History,
 ) -> Option<TimeoutAdvice> {
-    let mut judged: Vec<(String, f64, usize, u64)> = run
+    let mut judged: Vec<(String, f64, usize, u64, Option<f64>)> = run
         .tests()
-        .keys()
-        .filter_map(|id| {
+        .iter()
+        .filter_map(|(id, e)| {
             let calls = crate::scheduling::durations::passing_calls(history, id)?;
             let slowest = calls.iter().copied().fold(0.0, f64::max);
-            Some((id.clone(), slowest, calls.len(), timeout_for(slowest)))
+            let limit = timeout_for(slowest);
+            Some((id.clone(), slowest, calls.len(), limit, e.marker_timeout))
         })
         .collect();
     if judged.is_empty() {
@@ -333,6 +405,10 @@ fn timeout_advice(
     let suite_timeout = limits[(limits.len() * 95).div_ceil(100) - 1];
     let tests_judged = judged.len();
     judged.retain(|t| t.3 > suite_timeout);
+    let needing = judged.len();
+    // A marker at or above the suggestion already does the job.
+    judged.retain(|t| t.4.is_none_or(|m| m < t.3 as f64));
+    let marker_covered = needing - judged.len();
     judged.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     let override_count = judged.len();
     judged.truncate(TIMEOUT_OVERRIDES_SHOWN);
@@ -340,14 +416,18 @@ fn timeout_advice(
         suite_timeout,
         tests_judged,
         override_count,
+        marker_covered,
         overrides: judged
             .into_iter()
-            .map(|(nodeid, slowest, runs, timeout)| TimeoutOverride {
-                nodeid,
-                slowest_seconds: (slowest * 1e4).round() / 1e4,
-                runs,
-                timeout,
-            })
+            .map(
+                |(nodeid, slowest, runs, timeout, current)| TimeoutOverride {
+                    nodeid,
+                    slowest_seconds: (slowest * 1e4).round() / 1e4,
+                    runs,
+                    timeout,
+                    current,
+                },
+            )
             .collect(),
     })
 }
@@ -357,6 +437,12 @@ impl DoctorReport {
     pub fn with_history(mut self, run: &Run, history: &crate::reporting::history::History) -> Self {
         self.timeouts = timeout_advice(run, history);
         self.drift = drift(run, history);
+        self
+    }
+
+    /// Add what fixture-cost-aware dispatch grouped ([`FixtureGrouping`]).
+    pub fn with_fixture_groups(mut self, run: &Run, groups: &[FixtureGroup]) -> Self {
+        self.fixture_grouping = fixture_grouping(run, groups);
         self
     }
 }
@@ -700,6 +786,7 @@ pub fn analyze(
         parallel_floor,
         parallel_efficiency,
         fixtures: fx,
+        fixture_grouping: None,
         slowest_files: files,
         coverage_waste,
         timeouts: None,
@@ -1003,6 +1090,65 @@ mod timeout_tests {
         let t = timeout_advice(&run, &h).unwrap();
         assert_eq!((t.suite_timeout, t.override_count), (15, 0));
     }
+
+    #[test]
+    fn a_timeout_marker_that_covers_the_suggestion_is_not_an_override() {
+        let mut tests: Vec<(String, f32, usize)> = (0..38)
+            .map(|i| (format!("t.py::fast{i}"), 0.1, 5))
+            .collect();
+        tests.push(("t.py::marked_enough".into(), 5.0, 6)); // needs 15
+        tests.push(("t.py::marked_low".into(), 8.4, 12)); // needs 26
+        let refs: Vec<(&str, f32, usize)> = tests
+            .iter()
+            .map(|(id, s, n)| (id.as_str(), *s, *n))
+            .collect();
+        let h = history(&refs);
+        let mut run = Run::default();
+        for (id, ..) in &tests[..38] {
+            record_test(&mut run, id, 0, 0.1);
+        }
+        record_marked(&mut run, "t.py::marked_enough", 20.0);
+        record_marked(&mut run, "t.py::marked_low", 10.0);
+        let t = timeout_advice(&run, &h).unwrap();
+        assert_eq!(t.tests_judged, 40);
+        assert_eq!(t.suite_timeout, 2);
+        assert_eq!((t.override_count, t.marker_covered), (1, 1));
+        let o = &t.overrides[0];
+        assert_eq!(
+            (o.nodeid.as_str(), o.timeout, o.current),
+            ("t.py::marked_low", 26, Some(10.0))
+        );
+    }
+
+    /// A passing test whose call report carries a `@pytest.mark.timeout`.
+    fn record_marked(run: &mut Run, nodeid: &str, marker: f64) {
+        run.record(
+            Some(0),
+            crate::scheduling::proto::Report {
+                nodeid: nodeid.into(),
+                when: "call".into(),
+                outcome: "passed".into(),
+                duration: 0.1,
+                longrepr: None,
+                wasxfail: false,
+                skip_reason: None,
+                cpu: None,
+                thread_delta: None,
+                fd_delta: None,
+                sections: Vec::new(),
+                lineno: None,
+                subtest: false,
+                crash: None,
+                cause: None,
+                xfail_reason: None,
+                skip_location: None,
+                network: Vec::new(),
+                marker_timeout: Some(marker),
+                no_rerun: false,
+                subtest_desc: None,
+            },
+        );
+    }
 }
 
 /// Report builders shared by the `analyze`/`gate`/`render` test modules. A
@@ -1094,15 +1240,28 @@ pub(crate) mod testutil {
                     also_covered_by: 3,
                 }],
             }),
+            fixture_grouping: Some(FixtureGrouping {
+                saved_seconds: 1.8,
+                groups: vec![GroupEntry {
+                    scope: "tests/test_db.py".into(),
+                    tests: 40,
+                    setups: 1,
+                    chunked_setups: 4,
+                    setup_seconds: 0.6,
+                    saved_seconds: 1.8,
+                }],
+            }),
             timeouts: Some(TimeoutAdvice {
                 suite_timeout: 3,
                 tests_judged: 40,
                 override_count: 1,
+                marker_covered: 0,
                 overrides: vec![TimeoutOverride {
                     nodeid: "tests/test_a.py::test_long".into(),
                     slowest_seconds: 8.4,
                     runs: 12,
                     timeout: 26,
+                    current: None,
                 }],
             }),
             drift: Some(Drift {
@@ -1148,6 +1307,9 @@ pub(crate) mod testutil {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1180,6 +1342,9 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1249,6 +1414,9 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }
@@ -1618,6 +1786,9 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                 },
             );
         }
@@ -1708,5 +1879,61 @@ mod tests {
         assert_eq!(settings["name"], "settings");
         assert_eq!(settings["constant"], true);
         assert_eq!(settings["projected_saving_seconds"], 0.9);
+    }
+
+    #[cfg(test)]
+    mod grouping_tests {
+        use super::*;
+
+        fn group(scope: &str, pieces: usize, chunked: usize, secs: f64) -> FixtureGroup {
+            FixtureGroup {
+                scope: scope.into(),
+                tests: 10,
+                pieces,
+                setup_seconds: secs,
+                chunked_setups: chunked,
+            }
+        }
+
+        #[test]
+        fn grouping_saves_the_setups_chunking_would_have_repeated() {
+            assert!(fixture_grouping(&Run::default(), &[]).is_none());
+            let mut run = Run::default();
+            run.add_scope_costs(vec![
+                crate::scheduling::proto::ScopeCost {
+                    key: "db.py".into(),
+                    total: 0.6,
+                    count: 1,
+                },
+                // Set up more often than chunking would have (reruns): no saving,
+                // never a negative one.
+                crate::scheduling::proto::ScopeCost {
+                    key: "m.py::T".into(),
+                    total: 3.0,
+                    count: 3,
+                },
+            ]);
+            let g = fixture_grouping(
+                &run,
+                &[
+                    group("m.py::T", 1, 2, 1.0),
+                    group("db.py", 1, 4, 0.5),
+                    group("gone.py", 2, 3, 2.0),
+                ],
+            )
+            .unwrap();
+            let rows: Vec<(&str, usize, f64)> = g
+                .groups
+                .iter()
+                .map(|e| (e.scope.as_str(), e.setups, e.saved_seconds))
+                .collect();
+            // gone.py reported no setups: its 2 planned pieces count.
+            assert_eq!(
+                rows,
+                vec![("gone.py", 2, 2.0), ("db.py", 1, 1.5), ("m.py::T", 3, 0.0)],
+                "most saved first"
+            );
+            assert_eq!(g.saved_seconds, 3.5);
+        }
     }
 }

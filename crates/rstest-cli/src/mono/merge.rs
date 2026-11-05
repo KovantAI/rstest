@@ -12,6 +12,7 @@ pub fn merge_reports(
 ) -> anyhow::Result<()> {
     let mut tests = serde_json::Map::new();
     let mut collect_errors: Vec<serde_json::Value> = Vec::new();
+    let mut collect_error_reprs = serde_json::Map::new();
     let mut projects = serde_json::Map::new();
     let mut totals: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for (rel, path, status, skipped) in parts {
@@ -42,6 +43,11 @@ pub fn merge_reports(
                     collect_errors.push(prefixed);
                 }
             }
+            if let Some(reprs) = doc.get("collect_error_reprs").and_then(|e| e.as_object()) {
+                for (p, r) in reprs {
+                    collect_error_reprs.insert(format!("{rel}/{p}"), r.clone());
+                }
+            }
             // Per-project counts ride into meta.projects; grand totals
             // aggregate across projects.
             if let Some(counts) = doc
@@ -57,7 +63,7 @@ pub fn merge_reports(
         }
         projects.insert(rel.clone(), entry.into());
     }
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "meta": {
             "runner": "rstest",
             "schema": crate::reporting::report::REPORT_SCHEMA,
@@ -72,6 +78,10 @@ pub fn merge_reports(
         "collect_errors": collect_errors,
         "tests": tests,
     });
+    // Optional, as in a single-project report: only when a project had one.
+    if !collect_error_reprs.is_empty() {
+        doc["collect_error_reprs"] = collect_error_reprs.into();
+    }
     crate::reporting::write_output(out, serde_json::to_vec_pretty(&doc)?)?;
     Ok(())
 }
@@ -98,6 +108,7 @@ mod merge_tests {
             &b,
             r#"{"meta":{"schema":3,"exitstatus":1,"counts":{"passed":0,"failed":1}},
                "collect_errors":["broken.py"],
+               "collect_error_reprs":{"broken.py":"ImportError: nope"},
                "tests":{"tests/test_y.py::t2":{"call":"failed"}}}"#,
         )
         .unwrap();
@@ -134,5 +145,9 @@ mod merge_tests {
         assert_eq!(doc["tests"]["libs/a/tests/test_x.py::t1"]["call"], "passed");
         assert_eq!(doc["tests"]["libs/b/tests/test_y.py::t2"]["call"], "failed");
         assert_eq!(doc["collect_errors"][0], "libs/b/broken.py");
+        assert_eq!(
+            doc["collect_error_reprs"]["libs/b/broken.py"],
+            "ImportError: nope"
+        );
     }
 }

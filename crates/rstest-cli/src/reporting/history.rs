@@ -764,6 +764,9 @@ mod tests {
                     xfail_reason: None,
                     skip_location: None,
                     network: Vec::new(),
+                    marker_timeout: None,
+                    no_rerun: false,
+                    subtest_desc: None,
                     cause: None,
                 },
             );

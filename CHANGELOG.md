@@ -5,7 +5,131 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Fixes
+
+- **`migrate-check` finds the polluter from a subdirectory.** The polluter
+  bisect passed rootdir-relative file paths to child runs, which resolved
+  them from the current directory. From `tests/` it selected
+  `tests/tests/...`, collected nothing, and reported every victim as "not
+  reproducible serially". The bisect now anchors the paths at the rootdir and
+  pins the config, as the discriminator runs already did.
+
+- **`migrate-check`'s polluter bisect lifts `-x`.** With `-x` or `--maxfail`
+  in `addopts`, an unrelated failing test run before the victim ended the
+  session, and the victim again read as "not reproducible serially".
+
+- **`rstest try` compares whole runs under `-x`.** pytest stopped at the
+  first failure while rstest's other workers ran on, so `try` reported the
+  rest as "only in rstest" and exited 1 on a suite where both runners agree.
+  `-x`/`--maxfail` is now lifted on both sides.
+
+- **`rstest try` turns reruns off.** `[tool.rstest] reruns` applied to its
+  rstest run, so a failure could pass on a retry: a parallel-only failure
+  then read as "identical outcomes ... drop-in ready".
+
+- **`-n auto` parallelizes `--pyargs` runs.** Run from a folder with no
+  Python files, the test-file walk found nothing and auto sizing read that as
+  an empty suite, so `rstest --pyargs pkg` ran on one worker: pandas took
+  321s instead of 51s. An import-path selection now skips that shortcut.
+
+- **A single-worker run shows errors raised after the test session.** A
+  warning raised at session end under `filterwarnings = error` (for example
+  pytest failing to clean an old temp dir) made rstest exit 1 below a "491
+  passed" summary, with no word of why. Plain pytest prints that traceback;
+  rstest now prints it too, as `ERROR <session: ...>`. `--report-json` also
+  gains `collect_error_reprs`, each collect error's traceback keyed by its
+  path, so CI can show why without the terminal log.
+
+- **`migrate-check` says why the parallel pass didn't run.** When the two
+  collections agreed but the pool still refused to dispatch (ids that differ
+  per worker, or a set order both collections happened to share), it printed
+  only "could not capture outcomes (no snapshot)". It now shows the run's
+  error, which names the cause.
+
+- **`migrate-check` on an empty selection says so.** A `-k`/`-m` matching no
+  test was reported as "no snapshot", as if the run had failed. It now reads
+  "no tests were selected".
+
+- **`migrate-check`'s UNSTABLE NODEIDS header counts only per-process ids.**
+  Its "N per-process" figure also counted the order-unstable ids, which have
+  their own UNSTABLE ORDER section.
+
+- **`audit` and `migrate-check` count a failure plain pytest has too as
+  pre-existing.** Their `-n 0` check ran only the files with parallel
+  failures, so a test polluted by another file passed it, and a test that
+  `pytest` and `rstest -n 0` both fail read as failing "only under
+  parallelism"; `audit` even listed it in its serial fix-list, which can't
+  fix it. When anything fails in parallel, one more `-n 0` run now covers the
+  whole selection, and a test that fails there is NOT PARALLEL-SPECIFIC.
+
+- **An empty `--migrate-allow` allows nothing.** `--migrate-allow ""` (an
+  unset CI variable) matched every finding as a substring, so `migrate-check`
+  and `xdist-removal-check` passed the gate whatever they found. Empty entries
+  are now ignored.
+
+- **`audit`'s parallel-safe line counts only tests that pass at `-n 0`.** "all
+  N tests that pass at -n 0" included the tests already failing there.
+
+- **`migrate-check`'s ready line no longer counts skipped tests as passing.**
+  It now reads "none of N tests fails in parallel".
+
+- **`xdist-removal-check` reports `pytest.importorskip("xdist")`.** It printed
+  `ready` for a test module that skips itself without pytest-xdist, so the
+  uninstall silently skipped those tests. `--xdist-trial` can't show it either
+  (`-p no:xdist` leaves xdist importable). It is now a non-blocking finding,
+  like a `hasplugin("xdist")` gate.
+
+- **`rstest try` tells a skipped test from a passed one.** A test that ran
+  under pytest but skipped under rstest (a `skipif` on `PYTEST_XDIST_WORKER`,
+  which only rstest sets), or the reverse, counted as identical outcomes.
+  A skip on one side and a pass on the other is now a parity difference.
+
+- **`xdist-removal-check --xdist-trial` counts a test that only skips without
+  pytest-xdist as a regression.** A test that passed with xdist loaded and
+  skipped with it hidden read as "none regressed", though the uninstall
+  drops it from the run.
+
+- **`xdist-removal-check` reports a skip under a guarded `import xdist`.** A
+  `try: import xdist` whose `except ImportError` branch calls `pytest.skip`
+  was fine to the scan, and the trial can't show it, so the uninstall
+  silently skipped those tests. It is reported like
+  `pytest.importorskip("xdist")`.
+
+## 0.10.0 (2026-11-01)
+
 ### Features
+
+- **`--dist load` keeps a module with costly fixtures on one worker.** Tests
+  went out in small chunks, so a long module was spread over several workers
+  and each set up its module- and class-scoped fixtures again. rstest now
+  times those fixtures on every run (`.rstest_cache/scope_costs.json`), and
+  from the next run sends the tests of a module or class whose setup takes
+  0.5s or more to one worker, ahead of the rest. It splits such a module only
+  when that saves more wall time than the setup it repeats. Off under
+  `--shuffle` and `--order fail-fast`; lazy collection already sends whole
+  files. The costs ride `--cache-push` / `--cache-pull`, so a fresh CI runner
+  groups from its first run, and `--doctor` gets a FIXTURE GROUPING section
+  (`fixture_grouping` in `--doctor-json`) with the setup time saved.
+
+- **`@pytest.mark.isolated` runs a test in a forked process.** What the test
+  changes in its worker (module globals, `os.environ`, `sys.modules`, a
+  monkeypatch it never undid, a thread it left running) dies with the fork,
+  so a known polluter stays in the parallel run without breaking the tests
+  after it. Fixtures stay balanced: the worker keeps what it had set up, and
+  the fork tears down only what it added. A fork that dies is one failed
+  test, not a crashed worker. Works at any `-n` and with `--collect lazy`;
+  Unix only (Windows runs the test in its worker, with a warning). `rstest
+  bisect`, the doctor's leak section and `--fail-on-leak` now suggest it.
+
+- **`-n auto` sizes the pool by memory too.** Every worker reports its peak
+  RSS when its session ends, and rstest keeps the largest of each of the last
+  5 runs in `.rstest_cache/memory.json`. The next `-n auto` runs no more
+  workers than fit in 80% of the memory limit (the cgroup limit on Linux, so a
+  container's, else physical RAM) and says so: `rstest: -n auto capped at 3
+  workers by memory (peak worker RSS 2.1 GiB recorded, 8.0 GiB available)`.
+  An explicit `-n` is never capped. A worker killed by a SIGKILL rstest didn't
+  send now reads `killed by signal 9 (SIGKILL: likely the out-of-memory
+  killer; ...)` instead of a bare crash. Not on Windows yet.
 
 - **Per-test run history, shown by `rstest explain`.** rstest now keeps each
   test's last 50 runs in `.rstest_cache/history.msgpack` (outcome, call and
@@ -75,7 +199,10 @@ between 0.x releases and are listed here.
   slowest recorded passing run from the run history, suggests a suite
   `--timeout` that covers 95% of the tests, and lists the slower tests with a
   `@pytest.mark.timeout(N)` to paste (a test's limit: 3x its slowest run, at
-  least +1s). Appears once tests have 5 passing runs in the history.
+  least +1s). A test whose own marker already covers its limit is not listed,
+  and one whose marker is lower shows it (`(now 10)`; `--doctor-json`:
+  `current`, plus `marker_covered`). Appears once tests have 5 passing runs in
+  the history.
 
 - **A red run says what changed since the last green one.** Every whole-suite
   run that exits 0 on a clean tree (no `-k`, sub-path, nodeid, `--lf`,
@@ -94,6 +221,8 @@ between 0.x releases and are listed here.
   and flaky tests per run, test call time per run, the flaky ranking, the
   slowest tests, duration drift and the runs table. Written to
   `.rstest_cache/report.html` (or `--out PATH`); opens from disk, no server.
+  Runs older than what `RSTEST_HISTORY_RUNS` kept for every test are left
+  out (with a note saying how many), so trimmed runs never chart as a drop.
 
 - **Failures are grouped by cause.** Failed tests that raised the same
   exception, with the same message (numbers and addresses masked), through
@@ -162,6 +291,76 @@ between 0.x releases and are listed here.
   `when="???"` report; rstest dropped it, so the test showed no progress
   line and the summary counted an error. Any phase but setup and teardown
   now counts as the test itself, as in pytest.
+
+- **The GitHub Action's `rerun-on` takes a regex with a comma.** Entries are
+  split on commas, so `timeout{1,3}` became two broken patterns. Write a comma
+  inside a regex as `\,` (`timeout{1\,3}`); it reaches `--only-rerun` as a
+  plain comma.
+
+- **At `-n 0`, a SIGINT sent to rstest's pid alone stops the session.**
+  `kill -INT <pid>` was recorded but never reached pytest, which ran every
+  remaining test. The pytest session now tells rstest when it got a SIGINT
+  itself; if it says nothing within half a second, rstest passes the signal
+  on, so a test stuck in a sleep or on a lock stops on the first signal. A
+  Ctrl-C or CI cancel, which reaches the whole process group, is still never
+  sent twice.
+
+- **`@pytest.mark.flaky`'s `only_rerun`, `rerun_except` and `reruns_delay`
+  are honored.** They were ignored, so a failure the mark excluded was still
+  retried. They now filter and delay as pytest-rerunfailures does (each
+  exception in the chain matched as `Type: message`, or an exception class),
+  at every worker count. In a pool the worker waits `reruns_delay` after every
+  failed attempt that may be retried, the last one included.
+
+- **`--collect lazy` collects a file named on the command line whatever its
+  name**, as pytest does. A file outside `python_files` (`check_x.py`) was
+  dropped from the run.
+
+- **A lazy-collection run no longer aborts on a send to a dead worker.** A
+  worker that died between two dispatches made the run exit with
+  `Error: Broken pipe`; its tests are now requeued as they are on any worker
+  crash. And tests still handed to the last worker when its session ended on
+  its own are reported as not run (`not run: its worker's session ended
+  ...`), not silently dropped with exit 0.
+
+- **`--fork-pool` prints a startup error once**, not once per worker. A
+  broken `conftest.py` printed its `ImportError` from every forked worker,
+  which shared the zygote's stderr; each now has its own stderr pipe, deduped
+  as in the plain pool, and a forked worker that dies names its last stderr
+  lines as a spawned one does.
+
+- **`audit` and `migrate-check` no longer call a race an order dependency.**
+  A test alone in its file that passes under `--dist loadfile` has no in-file
+  order for loadfile to keep: it won a race against another file's test for
+  a shared resource. It is now a CONCURRENT RACE (`audit` lists it with the
+  `@pytest.mark.serial` fixes) instead of ORDER DEPENDENCY with
+  `--dist loadfile` advice.
+
+- **The parallel warnings summary and short summary print as pytest's.** Each
+  warning is listed under the tests that raised it (or the file and line, for
+  one outside a test; per-file counts from 10 tests on) with its source line,
+  where it showed only `path:line: Category` and the message. A failed subtest
+  reads `SUBFAILED(i=1) nodeid - message` in the short summary, not `FAILED`.
+
+- **The short test summary matches pytest's markup and width.** With color
+  on, the test part of each nodeid is bold. Messages are trimmed by terminal
+  columns, not characters, so a message with wide characters (CJK, emoji) no
+  longer runs past the terminal edge.
+
+- **A failed subtest shows as pytest's `u` in the progress line** and as
+  `SUBFAILED(<desc>)` under `-v`. It no longer counts as an extra finished
+  test, which gave an early or repeated `[100%]`.
+
+- **`--lf` keeps a recovered file's unrun tests after a parallel run.** When a
+  file that failed to collect last time collects again, its tests that did
+  not run (deselected with `-k` / `-m`, or cut by `-x` / `--maxfail`) stay
+  recorded as failed, as in pytest. The file used to drop out of the
+  last-failed cache, so the next `--lf` skipped them.
+
+- **`--shard` and lazy scheduling use cached durations on Windows.** File
+  paths were matched against the duration cache with backslash separators,
+  so every file looked untimed and shards and file order were not balanced by
+  runtime.
 
 ## 0.9.0 (2026-10-06)
 

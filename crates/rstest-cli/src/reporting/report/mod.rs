@@ -73,6 +73,10 @@ pub struct TestEntry {
     pub setup_cpu: Option<f64>,
     #[serde(skip)]
     pub teardown_cpu: Option<f64>,
+    /// The test's `@pytest.mark.timeout` in seconds, when it has one.
+    /// Doctor-internal; not serialized.
+    #[serde(skip)]
+    pub marker_timeout: Option<f64>,
     /// Passed only after one or more reruns (--reruns or @pytest.mark.flaky).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flaky: bool,
@@ -166,6 +170,11 @@ pub struct RunMeta {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Snapshot<'a> {
+    /// Each collect error's traceback, keyed by its `collect_errors` path,
+    /// including `<session: ...>` errors that escaped the whole session.
+    /// Absent when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub collect_error_reprs: BTreeMap<&'a String, &'a String>,
     /// Paths of collectors that failed to import/collect.
     pub collect_errors: Vec<&'a String>,
     /// Failures that share a cause (same exception, message and project
@@ -264,6 +273,8 @@ struct Failure {
     sections: Vec<(String, String)>,
     /// The short test summary's message (see [`proto::Report::crash`]).
     crash: Option<String>,
+    /// A failed subtest's description (see [`proto::Report::subtest_desc`]).
+    subtest_desc: Option<String>,
 }
 
 /// Byte cap on any failure/collection-error text we persist. junit/html embed
@@ -383,6 +394,9 @@ pub struct Run {
     /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
     /// in the summary line only, as pytest does.
     pub deselected: u64,
+    /// Collectors the previous lastfailed recorded as failed that collected
+    /// now, with the nodeids they yielded (pytest swaps the key for these).
+    pub lf_recollected: BTreeMap<String, Vec<String>>,
     /// nodeids that passed only after rerun(s), with attempt counts.
     pub flaky: Vec<(String, u32)>,
     /// Record (duration, phase, nodeid) for every phase report - only when
@@ -412,6 +426,9 @@ pub struct Run {
     /// Tests in this run that `--auto-quarantine` quarantined (passing ones
     /// included); empty when it was off or over its cap.
     pub auto_quarantined: std::collections::BTreeSet<String>,
+    /// Module/class fixture setup per scope nodeid, summed over the workers:
+    /// (seconds, setups). Saved for fixture-cost-aware dispatch.
+    pub scope_costs: std::collections::HashMap<String, (f64, u64)>,
 }
 
 /// A `pytest.exit(reason, returncode)` that stopped the run.
@@ -456,6 +473,23 @@ impl Interruption {
 }
 
 impl Run {
+    /// One setup's mean seconds per module/class scope this run set up.
+    pub fn scope_cost_means(&self) -> impl Iterator<Item = (&String, f64)> {
+        self.scope_costs
+            .iter()
+            .filter(|(_, &(_, setups))| setups > 0)
+            .map(|(k, &(secs, setups))| (k, secs / setups as f64))
+    }
+
+    /// Fold one worker session's module/class fixture setup costs in.
+    pub fn add_scope_costs(&mut self, costs: Vec<proto::ScopeCost>) {
+        for c in costs {
+            let e = self.scope_costs.entry(c.key).or_default();
+            e.0 += c.total;
+            e.1 += c.count;
+        }
+    }
+
     pub fn record(&mut self, worker: Option<usize>, r: proto::Report) {
         if !r.network.is_empty() {
             // Each attempt (rerun) ships its own list: keep each host once.
@@ -495,6 +529,7 @@ impl Run {
                 longrepr: repr.clone(),
                 sections: r.sections.clone(),
                 crash: r.crash.clone(),
+                subtest_desc: r.subtest_desc.clone(),
             });
             r.longrepr.as_ref().map(|_| repr)
         } else {
@@ -551,6 +586,7 @@ impl Run {
                 }
                 entry.duration = Some((r.duration * 10_000.0).round() / 10_000.0);
                 entry.cpu = r.cpu;
+                entry.marker_timeout = r.marker_timeout;
             }
         }
         entry.wasxfail |= r.wasxfail;
@@ -908,6 +944,7 @@ impl Run {
     /// historical `serde_json::Map` output (no `preserve_order`).
     fn snapshot<'a>(&'a self, run_meta: &'a RunMeta) -> Snapshot<'a> {
         Snapshot {
+            collect_error_reprs: self.collect_errors.iter().map(|(p, r)| (p, r)).collect(),
             collect_errors: self.collect_errors.iter().map(|(p, _)| p).collect(),
             failure_groups: self.failure_groups(),
             meta: SnapshotMeta {
@@ -1109,6 +1146,9 @@ mod tests {
             xfail_reason: None,
             skip_location: None,
             network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
         }
     }
 
@@ -1461,6 +1501,9 @@ mod tests {
             subtest: true,
             crash: None,
             network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1711,6 +1754,9 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
+                no_rerun: false,
+                subtest_desc: None,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1736,6 +1782,9 @@ mod tests {
                 xfail_reason: None,
                 skip_location: None,
                 network: Vec::new(),
+                marker_timeout: None,
+                no_rerun: false,
+                subtest_desc: None,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);

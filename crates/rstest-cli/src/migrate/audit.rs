@@ -27,7 +27,7 @@ use crate::reporting::sink::Sink;
 /// keeps the file together instead. An intrinsic flake or a pre-existing
 /// (`-n 0` too) failure is a different problem serial can't paper over.
 fn serial_fixable(v: Verdict) -> bool {
-    matches!(v, Verdict::Isolation | Verdict::WallClock)
+    matches!(v, Verdict::Isolation | Verdict::WallClock | Verdict::Race)
 }
 
 /// The classifier verdicts split into the audit buckets.
@@ -232,7 +232,8 @@ fn report(tests: usize, b: &Buckets, sink: &mut Sink) -> i32 {
     sink.out_line("\n================= rstest audit =================");
     if b.parallel_safe() {
         sink.out_line(&format!(
-            "  ✓ parallel-safe: all {tests} tests that pass at -n 0 also pass in parallel."
+            "  ✓ parallel-safe: all {} tests that pass at -n 0 also pass in parallel.",
+            tests - preexisting
         ));
         if preexisting > 0 {
             sink.out_line(&format!(
@@ -490,6 +491,7 @@ mod tests {
             ("f.py::flake".to_string(), Verdict::IntrinsicFlake),
             ("b.py::bug".to_string(), Verdict::NotParallel),
             ("q.py::gone".to_string(), Verdict::Inconclusive),
+            ("r.py::race".to_string(), Verdict::Race),
         ];
         let Buckets {
             serial,
@@ -502,7 +504,7 @@ mod tests {
         // serial-fixable sorted by nodeid.
         assert_eq!(
             serial.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-            ["m.py::wall", "z.py::iso"]
+            ["m.py::wall", "r.py::race", "z.py::iso"]
         );
         // Order-dependent tests need their file kept together (loadfile);
         // serial would run them apart from the siblings they depend on.
@@ -647,7 +649,8 @@ mod tests {
         let b = partition(&[("b.py::bug".to_string(), Verdict::NotParallel)]);
         let (code, out) = render(3, &b);
         assert_eq!(code, 0);
-        assert!(out.contains("parallel-safe: all 3 tests"), "{out}");
+        // Of 3 audited tests 1 fails at -n 0: "all 2 that pass there", not 3.
+        assert!(out.contains("parallel-safe: all 2 tests"), "{out}");
         assert!(out.contains("1 test(s) already fail at -n 0"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
     }

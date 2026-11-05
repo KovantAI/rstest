@@ -57,6 +57,12 @@ The speed line names the worker count `-n auto` resolved to for this suite
 saved at least one second. In a git checkout it also projects the saving over
 the last 30 days, counting each commit in that window as one CI run.
 
+Both runs cover the whole suite: `-x`/`--maxfail` from your args or `addopts`
+is lifted on each side, since pytest would stop at the first failure while
+rstest's other workers run on. The rstest run also has reruns off
+(`[tool.rstest] reruns` included), so a failure pytest reports can't pass on a
+retry and read as parity.
+
 Parity needs something to compare. If either run hit a collection error, or
 ran no tests at all (an empty directory, everything deselected), `try` gives
 no verdict:
@@ -122,7 +128,11 @@ small suite, or any suite after one run, on a single worker, where nothing
 runs concurrently. The discriminator reruns (`-n 0` twice and `--dist
 loadfile`) are **scoped to the files containing failures**, so cost scales
 with the number of failing files, not the suite size; a clean suite runs no
-discriminators at all. One exception: with only one or two failing files the
+discriminators at all. When anything failed, one more `-n 0` run covers the
+whole selection, as plain pytest runs it: a test that fails there was already
+failing (for example polluted by a test in another file) and counts as NOT
+PARALLEL-SPECIFIC, even though it passes with its own files alone. One
+exception: with only one or two failing files the
 `--dist loadfile` run covers the whole selection, because each worker is
 handed two files to start with, so one or two files would run one after the
 other on a single worker and a cross-file race would never show. A selection
@@ -136,6 +146,7 @@ tests of the same file racing. Each failure lands in one class:
 | **INTRINSIC FLAKE** | serial repeats disagree | flaky under any runner; fix the flake (`--reruns` only hides it) |
 | **INCONCLUSIVE** | missing from a follow-up run (for example an unstable parametrize id), so there is no evidence either way; not counted as a pass | make the nodeid stable across collections |
 | **ORDER DEPENDENCY** | passes serial and under `--dist loadfile`, fails under `load` | run with `--dist loadfile`, or fix the in-file coupling |
+| **CONCURRENT RACE** | as ORDER DEPENDENCY, but the only test in its file: `loadfile` can't change a lone test's order, so it passed there only because the race went its way. It contends with another file's test for a shared resource (file, port, database) | give each worker its own resource (`tmp_path`, `worker_id`); stopgap `@pytest.mark.serial` |
 | **WALL-CLOCK / LOAD-SENSITIVE** | passes serial, fails parallel, and is wait-bound (wall ≫ cpu): a real-time deadline that misses under oversubscription | mock the clock / drop the tight upper bound; stopgap `-n 4` or `@pytest.mark.serial` |
 | **ISOLATION / CO-LOCATION** | passes serial, fails under both `load` and `loadfile`, and is *not* wait-bound: a leaked-global-state defect | reset the leaked state per test; stopgap `@pytest.mark.serial` |
 
@@ -144,7 +155,10 @@ For ORDER-DEPENDENCY and ISOLATION findings it then **bisects the polluter**
 serially before the victim, reproduce the failure, and reports `POLLUTED BY:
 <file>` (cross-file), `SAME-FILE co-location (inspect <file>)`, or (when no
 serial ordering reproduces) that the failure is likely a concurrent-resource
-race rather than state pollution. When a finding's error text names a shared
+race rather than state pollution. The bisect runs pin pytest's rootdir and
+config file, so it finds the polluter from a subdirectory too, and lift
+`-x`/`--maxfail`, so an unrelated failing test can't end a run before the
+victim. When a finding's error text names a shared
 resource (a fixed port, one shared database, one shared home directory), a
 `CAUSE:` line under it names the resource and the per-worker fix, as in
 [`audit`](#audit).
@@ -152,7 +166,9 @@ resource (a fixed port, one shared database, one shared home directory), a
 Each finding prints the upstream fix and the rstest stopgap. Exits `1` if
 any WILL-bail id or parallelism-specific failure is found, and `2` when it
 couldn't judge: the parallel pass produced no outcomes (`parallel` is
-`{"ran": false}` in the JSON), or rstest hit an error (an `Error:` line on
+`{"ran": false}` in the JSON; the report then shows the run's own error, such
+as workers that collected different ids), the selection matched no tests, or
+rstest hit an error (an `Error:` line on
 stderr). `0` means ready. Usable as a CI gate (see `--migrate-check-json` and `--migrate-allow` below for the
 machine-readable form and the known-issue allow-list).
 
@@ -175,7 +191,9 @@ finding whose nodeid or unstable-id site **contains** SUBSTRING is still
 reported (marked `(allowed)` in the human output and `"allowed": true` in the
 JSON) but excluded from the exit-code gate. This lets CI gate on **new**
 parallel-unsafe tests while tolerating a triaged backlog: allow-list today's
-findings, and the build only goes red when a fresh one appears.
+findings, and the build only goes red when a fresh one appears. An empty
+SUBSTRING (`--migrate-allow "$UNSET_VAR"`) is ignored rather than matching
+every finding.
 
 ### `xdist-removal-check`
 
@@ -202,6 +220,7 @@ the fix:
 | unguarded `import xdist` / `from xdist... import` | yes | `ImportError` | the native `worker_id` / `testrun_uid` fixtures, `config.workerinput`, or `PYTEST_XDIST_WORKER` |
 | an xdist hook (`pytest_configure_node`, `pytest_testnode*`, `pytest_xdist_*`) in a conftest or plugin module, not marked `optionalhook=True` | yes (no for a hook class the file never registers) | `PluginValidationError: unknown hook` | `@pytest.hookimpl(optionalhook=True)` |
 | `hasplugin("xdist")` in your code | no | the branch flips | gate on `config.workerinput` or `PYTEST_XDIST_WORKER` |
+| `pytest.importorskip("xdist")`, or a skip in the `except ImportError` branch of `import xdist`, in your code | no | the tests skip silently (a module-level call skips the whole file); `--xdist-trial` can't show it, since `-p no:xdist` leaves xdist importable | drop it if the tests don't need xdist itself |
 | unguarded module-level `import xdist` in an installed plugin | yes in the entry-point module and its packages' `__init__.py`, no elsewhere | `ImportError` at startup (entry module) or when that module is imported | upgrade or drop the plugin, or keep pytest-xdist |
 | `hasplugin("xdist")` in an installed plugin | no | the plugin takes its non-xdist path | check that plugin's behavior |
 | `rsyncdirs` / `rsyncignore` / `looponfailroots` | no | a `PytestConfigWarning` (an error under `--strict-config`) | remove the key |
@@ -261,7 +280,7 @@ aren't parallel-safe, and how do I fix them?" It **runs the suite in parallel**
 as `migrate-check` does; repeat with [`--audit-repeat`](#-audit-repeat-n), since a parallel flake is
 probabilistic), then diffs against the `-n 0` oracle and classifies every test
 that fails **only** under parallelism, reusing `migrate-check`'s discriminators
-(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files) and verdicts
+(`-n 0` at least twice + `--dist loadfile`, repeated with `--audit-repeat` and scoped to the failing files, plus one `-n 0` run of the whole selection) and verdicts
 (ISOLATION / WALL-CLOCK / ORDER-DEPENDENCY / INTRINSIC FLAKE / pre-existing).
 
 Where `migrate-check` is the onboarding preflight (unstable ids first, verbose
@@ -755,8 +774,9 @@ JavaScript off (dates then read "3h ago"). It reads only
 run), needs no interpreter, and exits `0`; with no history yet it says so and
 writes nothing. On CI, run it after `--cache-pull` (or on a restored
 `.rstest_cache`) and upload the file as an artifact to see every shard's and
-runner's runs. The oldest runs can be partial: each test keeps only its newest
-`RSTEST_HISTORY_RUNS` runs.
+runner's runs. Each test keeps only its newest `RSTEST_HISTORY_RUNS` runs, so
+runs older than a test's oldest kept entry would undercount; the page leaves
+them out and says how many.
 
 ### `since-green`
 
@@ -830,7 +850,7 @@ needs no interpreter and runs no tests.
 $ rstest install-skills
   migrate-to-rstest: installed
   rstest-triage: installed
-rstest 0.9.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+rstest 0.10.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
 ```
 
 | Flag | Effect |

@@ -13,7 +13,9 @@ use crate::config::ProjectConfig;
 pub fn collect_test_files(paths: &[PathBuf], cfg: &ProjectConfig) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     walk_py_files(paths, cfg, |path| {
-        if is_test_file(path, cfg) {
+        // A file named on the command line is collected whatever its name,
+        // as pytest does (`isinitpath` skips the `python_files` check).
+        if is_test_file(path, cfg) || paths.iter().any(|p| p == path) {
             files.push(path.to_path_buf());
         }
         false
@@ -284,6 +286,20 @@ mod tests {
                     .replace('\\', "/")
             })
             .collect()
+    }
+
+    #[test]
+    fn explicit_file_args_are_collected_whatever_their_name() {
+        let cfg = project("explicit");
+        touch(&cfg, "tests/check_x.py");
+        touch(&cfg, "tests/test_1.py");
+        touch(&cfg, "tests/helper.py");
+        let named = cfg.rootdir.join("tests/check_x.py");
+        let files = collect_test_files(&[named.clone(), cfg.rootdir.join("tests")], &cfg).unwrap();
+        // Named check_x.py is collected (pytest's `isinitpath`); helper.py,
+        // only reached by walking the directory, still needs python_files.
+        assert_eq!(files, [named, cfg.rootdir.join("tests/test_1.py")]);
+        let _ = std::fs::remove_dir_all(&cfg.rootdir);
     }
 
     #[test]

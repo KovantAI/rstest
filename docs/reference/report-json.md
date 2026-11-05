@@ -105,6 +105,11 @@ where `collection_hash` is the sha256 of the full ordered nodeid list and
 covered the whole suite.
 
 `collect_errors` lists the file paths of collectors that failed outright.
+`collect_error_reprs` maps each of those paths to its traceback, and is
+absent when there are none. It also carries errors that escaped the whole
+test session, listed as `<session: ExceptionType>`: for example a warning
+raised at session end under `filterwarnings = error`, which exits 1 even when
+every test passed.
 
 `failure_groups` is present when two or more failed tests share a cause (see
 [Failures by cause](../guides/ci-output.md#failures-by-cause)), largest group
@@ -295,7 +300,7 @@ It is a **separate document** from the run snapshot above; combine with
 ```json
 {
   "schema": 3,
-  "rstest_version": "0.9.0",
+  "rstest_version": "0.10.0",
   "workers": 8,
   "wall_seconds": 68.4,
   "startup_seconds": 0.6,
@@ -534,7 +539,7 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `nodeid` | string | the failing test |
-| `verdict` | string | `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
+| `verdict` | string | `INTRINSIC FLAKE` / `ORDER DEPENDENCY` / `CONCURRENT RACE` / `WALL-CLOCK / LOAD-SENSITIVE` / `ISOLATION / CO-LOCATION` / `INCONCLUSIVE` |
 | `why` | string | the evidence behind the verdict |
 | `fix` | string | the recommended fix plus rstest stopgap |
 | `allowed` | bool | matched a `--migrate-allow` substring (excluded from the gate) |
