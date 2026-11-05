@@ -21,6 +21,10 @@ class Recorder:
             t["duration"] = round(report.duration, 4)
         if hasattr(report, "wasxfail"):
             t["wasxfail"] = True
+        if report.failed and report.longrepr:
+            # Failure text, so diff() can tell a cause from the suite's
+            # `noisy_failures` (a leaked socket GC'd mid-test) from a real one.
+            t["longrepr"] = (t.get("longrepr", "") + "\n" + str(report.longrepr))[-8000:]
         if report.skipped and report.longrepr and isinstance(report.longrepr, tuple):
             t["skip_reason"] = str(report.longrepr[2])[:200]
 

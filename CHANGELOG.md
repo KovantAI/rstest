@@ -5,6 +5,98 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Fixes
+
+- **`migrate-check` finds the polluter from a subdirectory.** The polluter
+  bisect passed rootdir-relative file paths to child runs, which resolved
+  them from the current directory. From `tests/` it selected
+  `tests/tests/...`, collected nothing, and reported every victim as "not
+  reproducible serially". The bisect now anchors the paths at the rootdir and
+  pins the config, as the discriminator runs already did.
+
+- **`migrate-check`'s polluter bisect lifts `-x`.** With `-x` or `--maxfail`
+  in `addopts`, an unrelated failing test run before the victim ended the
+  session, and the victim again read as "not reproducible serially".
+
+- **`rstest try` compares whole runs under `-x`.** pytest stopped at the
+  first failure while rstest's other workers ran on, so `try` reported the
+  rest as "only in rstest" and exited 1 on a suite where both runners agree.
+  `-x`/`--maxfail` is now lifted on both sides.
+
+- **`rstest try` turns reruns off.** `[tool.rstest] reruns` applied to its
+  rstest run, so a failure could pass on a retry: a parallel-only failure
+  then read as "identical outcomes ... drop-in ready".
+
+- **`-n auto` parallelizes `--pyargs` runs.** Run from a folder with no
+  Python files, the test-file walk found nothing and auto sizing read that as
+  an empty suite, so `rstest --pyargs pkg` ran on one worker: pandas took
+  321s instead of 51s. An import-path selection now skips that shortcut.
+
+- **A single-worker run shows errors raised after the test session.** A
+  warning raised at session end under `filterwarnings = error` (for example
+  pytest failing to clean an old temp dir) made rstest exit 1 below a "491
+  passed" summary, with no word of why. Plain pytest prints that traceback;
+  rstest now prints it too, as `ERROR <session: ...>`. `--report-json` also
+  gains `collect_error_reprs`, each collect error's traceback keyed by its
+  path, so CI can show why without the terminal log.
+
+- **`migrate-check` says why the parallel pass didn't run.** When the two
+  collections agreed but the pool still refused to dispatch (ids that differ
+  per worker, or a set order both collections happened to share), it printed
+  only "could not capture outcomes (no snapshot)". It now shows the run's
+  error, which names the cause.
+
+- **`migrate-check` on an empty selection says so.** A `-k`/`-m` matching no
+  test was reported as "no snapshot", as if the run had failed. It now reads
+  "no tests were selected".
+
+- **`migrate-check`'s UNSTABLE NODEIDS header counts only per-process ids.**
+  Its "N per-process" figure also counted the order-unstable ids, which have
+  their own UNSTABLE ORDER section.
+
+- **`audit` and `migrate-check` count a failure plain pytest has too as
+  pre-existing.** Their `-n 0` check ran only the files with parallel
+  failures, so a test polluted by another file passed it, and a test that
+  `pytest` and `rstest -n 0` both fail read as failing "only under
+  parallelism"; `audit` even listed it in its serial fix-list, which can't
+  fix it. When anything fails in parallel, one more `-n 0` run now covers the
+  whole selection, and a test that fails there is NOT PARALLEL-SPECIFIC.
+
+- **An empty `--migrate-allow` allows nothing.** `--migrate-allow ""` (an
+  unset CI variable) matched every finding as a substring, so `migrate-check`
+  and `xdist-removal-check` passed the gate whatever they found. Empty entries
+  are now ignored.
+
+- **`audit`'s parallel-safe line counts only tests that pass at `-n 0`.** "all
+  N tests that pass at -n 0" included the tests already failing there.
+
+- **`migrate-check`'s ready line no longer counts skipped tests as passing.**
+  It now reads "none of N tests fails in parallel".
+
+- **`xdist-removal-check` reports `pytest.importorskip("xdist")`.** It printed
+  `ready` for a test module that skips itself without pytest-xdist, so the
+  uninstall silently skipped those tests. `--xdist-trial` can't show it either
+  (`-p no:xdist` leaves xdist importable). It is now a non-blocking finding,
+  like a `hasplugin("xdist")` gate.
+
+- **`rstest try` tells a skipped test from a passed one.** A test that ran
+  under pytest but skipped under rstest (a `skipif` on `PYTEST_XDIST_WORKER`,
+  which only rstest sets), or the reverse, counted as identical outcomes.
+  A skip on one side and a pass on the other is now a parity difference.
+
+- **`xdist-removal-check --xdist-trial` counts a test that only skips without
+  pytest-xdist as a regression.** A test that passed with xdist loaded and
+  skipped with it hidden read as "none regressed", though the uninstall
+  drops it from the run.
+
+- **`xdist-removal-check` reports a skip under a guarded `import xdist`.** A
+  `try: import xdist` whose `except ImportError` branch calls `pytest.skip`
+  was fine to the scan, and the trial can't show it, so the uninstall
+  silently skipped those tests. It is reported like
+  `pytest.importorskip("xdist")`.
+
+## 0.10.0 (2026-11-01)
+
 ### Features
 
 - **`--dist load` keeps a module with costly fixtures on one worker.** Tests

@@ -287,8 +287,9 @@ It scans the pytest config, `PYTEST_ADDOPTS`, your conftests, tests and
 local plugins, and the installed pytest plugins for every edge above: xdist
 flags in `addopts`, `-n` / `--dist` that rstest never read, `pytest-xdist` in
 `required_plugins`, `import xdist` sites (yours and installed plugins'),
-xdist hook implementations not marked `optionalhook=True`, and
-`hasplugin("xdist")` gates. Each finding comes with its fix. `--xdist-trial`
+xdist hook implementations not marked `optionalhook=True`,
+`hasplugin("xdist")` gates, and tests that skip without xdist
+(`pytest.importorskip("xdist")`, or a skip when `import xdist` fails). Each finding comes with its fix. `--xdist-trial`
 then runs the suite with pytest-xdist hidden (`-p no:xdist`, which drops its
 options and hook specs like an uninstall) and names any test that only passes
 with it installed. When it prints `ready`, uninstall pytest-xdist
