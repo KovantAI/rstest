@@ -991,7 +991,7 @@ before code lands. Add to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/KovantAI/rstest
-    rev: v0.10.0             # pin a released tag
+    rev: v0.10.1             # pin a released tag
     hooks:
       - id: rstest         # whole suite, on push
 ```
