@@ -423,3 +423,115 @@ def test_reruns_delay_waits_before_a_rerun_only(tmp_path, monkeypatch):
     slept.clear()
     _session(tmp_path, monkeypatch, DELAY_SRC, plugins=lambda: [PoolMarkReruns()])
     assert slept == [2.5]
+
+
+def _raised(fn):
+    try:
+        fn()
+    except BaseException:
+        return pytest.ExceptionInfo.from_current()
+    raise AssertionError("did not raise")
+
+
+def _implicitly_chained():
+    try:
+        {}["k"]
+    except KeyError:
+        raise RuntimeError("while handling")  # noqa: B904 - implicit __context__
+
+
+def test_matches_follows_implicit_context_only_when_asked():
+    excinfo = _raised(_implicitly_chained)
+    # only_rerun follows `During handling ...` context, rerun_except does not.
+    assert retry._matches(["KeyError"], excinfo, follow_context=True) is True
+    assert retry._matches(["KeyError"], excinfo, follow_context=False) is False
+    assert retry._matches(["RuntimeError: while"], excinfo, follow_context=False) is True
+
+
+def test_matches_suppressed_context_is_not_followed():
+    def suppressed():
+        try:
+            {}["k"]
+        except KeyError:
+            raise RuntimeError("clean") from None
+
+    assert retry._matches(["KeyError"], _raised(suppressed), follow_context=True) is False
+
+
+def test_matches_ignores_non_exception_classes_and_bad_patterns():
+    excinfo = _raised(lambda: int("x"))
+    assert retry._matches([int, "(unclosed", 42], excinfo, follow_context=True) is False
+    assert retry._matches([int, ValueError], excinfo, follow_context=True) is True
+    # No exception at all (a failure without excinfo) matches nothing.
+    assert retry._matches(["ValueError"], None, follow_context=True) is False
+
+
+def test_mark_rules_out_rerun_needs_a_failed_report_and_a_filtering_mark():
+    excinfo = _raised(lambda: int("x"))
+    failed = SimpleNamespace(failed=True)
+    unmarked = SimpleNamespace(get_closest_marker=lambda name: None)
+    assert retry.mark_rules_out_rerun(unmarked, failed, excinfo) is False
+    # A plain flaky mark (no only_rerun / rerun_except) rules nothing out.
+    assert retry.mark_rules_out_rerun(_item(2), failed, excinfo) is False
+    only_key = _item(2, only_rerun="KeyError")
+    assert retry.mark_rules_out_rerun(only_key, failed, excinfo) is True
+    assert retry.mark_rules_out_rerun(only_key, SimpleNamespace(failed=False), excinfo) is False
+    xfailed = SimpleNamespace(failed=True, wasxfail="")
+    assert retry.mark_rules_out_rerun(only_key, xfailed, excinfo) is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, 0.0),
+        ({"reruns_delay": 1.5}, 1.5),
+        ({"reruns_delay": -3}, 0.0),
+        ({"reruns_delay": "soon"}, 0.0),
+        ({"reruns_delay": [1]}, 0.0),
+        ({"reruns_delay": None}, 0.0),
+    ],
+)
+def test_rerun_delay_reads_the_mark(kwargs, expected):
+    assert retry.rerun_delay(_item(1, **kwargs)) == expected
+
+
+def test_rerun_delay_without_mark_is_zero():
+    assert retry.rerun_delay(SimpleNamespace(get_closest_marker=lambda name: None)) == 0.0
+
+
+def test_quarantine_patterns_skip_blank_and_unparsable_lines(monkeypatch):
+    monkeypatch.setenv("RSTEST_QUARANTINE", "a\\.py::t1\n\n(bad\nb\\.py::.*\n")
+    assert [p.pattern for p in retry._quarantine_patterns()] == ["a\\.py::t1", "b\\.py::.*"]
+
+
+def test_forget_failed_setup_tears_down_from_the_first_failed_node():
+    torn: list[str] = []
+
+    def fin(name, boom=False):
+        def run():
+            torn.append(name)
+            if boom:
+                raise RuntimeError("finalizer error is swallowed")
+
+        return run
+
+    session, module, cls, fn = "session", "module", "class", "fn"
+    stack = {
+        session: ([fin("s")], None),
+        module: ([fin("m1"), fin("m2", boom=True)], ("err",)),
+        cls: ([fin("c")], None),
+        fn: ([], None),
+    }
+    errored = SimpleNamespace(cached_result=(None, None, ("exc",)))
+    good = SimpleNamespace(cached_result=(1, None, None))
+    unset = SimpleNamespace(cached_result=None)
+    item = SimpleNamespace(
+        session=SimpleNamespace(_setupstate=SimpleNamespace(stack=stack)),
+        _fixtureinfo=SimpleNamespace(name2fixturedefs={"a": [errored, good], "b": [unset]}),
+    )
+    retry._forget_failed_setup(item)
+    # Innermost first, each node's finalizers LIFO, past a raising one.
+    assert torn == ["c", "m2", "m1"]
+    assert list(stack) == [session]
+    assert errored.cached_result is None
+    assert good.cached_result == (1, None, None)

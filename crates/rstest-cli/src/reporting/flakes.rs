@@ -241,6 +241,105 @@ mod tests {
         assert!(log.contains_key("future"), "future epoch must not be wiped");
     }
 
+    fn report(nodeid: &str, outcome: &str) -> crate::scheduling::proto::Report {
+        crate::scheduling::proto::Report {
+            nodeid: nodeid.into(),
+            when: "call".into(),
+            outcome: outcome.into(),
+            duration: 0.0,
+            longrepr: None,
+            wasxfail: false,
+            skip_reason: None,
+            cpu: None,
+            thread_delta: None,
+            fd_delta: None,
+            sections: Vec::new(),
+            lineno: None,
+            subtest: false,
+            crash: None,
+            cause: None,
+            xfail_reason: None,
+            skip_location: None,
+            network: Vec::new(),
+            marker_timeout: None,
+            no_rerun: false,
+            subtest_desc: None,
+        }
+    }
+
+    /// Run `f` with `RSTEST_CACHE` pointed at a fresh dir and the default
+    /// retention window, holding the env lock throughout.
+    fn with_cache<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let held = crate::test_env::lock();
+        let base = std::env::temp_dir().join(format!(
+            "rstest-flakes-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let out = {
+            let _c = crate::test_env::set_var(&held, "RSTEST_CACHE", &base);
+            let _r = crate::test_env::remove_var(&held, "RSTEST_FLAKE_RETENTION_DAYS");
+            f(&base)
+        };
+        let _ = std::fs::remove_dir_all(&base);
+        out
+    }
+
+    #[test]
+    fn record_accumulates_flaky_and_failed_events_across_runs() {
+        with_cache(|dir| {
+            let mut run = Run::default();
+            run.record(Some(0), report("t.py::flk", "passed"));
+            run.mark_flaky("t.py::flk".into(), 2);
+            run.record(Some(0), report("t.py::bad", "failed"));
+            run.record(Some(0), report("t.py::ok", "passed"));
+            let before = crate::time::now_epoch_secs();
+            record(&run);
+            record(&run);
+            let log = load_from(&dir.join(FILE));
+            assert_eq!(log, load(), "load() reads the RSTEST_CACHE file");
+            assert_eq!(log.len(), 2, "passing tests are not recorded: {log:?}");
+            let flk = log["t.py::flk"];
+            assert_eq!((flk.flaky, flk.failed, flk.last_failed_epoch), (2, 0, 0));
+            assert!(flk.last_epoch >= before);
+            let bad = log["t.py::bad"];
+            assert_eq!((bad.flaky, bad.failed), (0, 2));
+            assert!(bad.last_failed_epoch >= before);
+            assert_eq!(bad.last_epoch, bad.last_failed_epoch);
+            // Only the flake history makes a test known-flaky.
+            assert_eq!(known_flaky(), HashSet::from(["t.py::flk".to_string()]));
+        });
+    }
+
+    #[test]
+    fn record_without_events_writes_nothing() {
+        with_cache(|dir| {
+            let mut run = Run::default();
+            run.record(Some(0), report("t.py::ok", "passed"));
+            record(&run);
+            assert!(!dir.join(FILE).exists());
+        });
+    }
+
+    #[test]
+    fn load_ages_out_stale_entries_and_tolerates_garbage() {
+        with_cache(|dir| {
+            let path = dir.join(FILE);
+            let now = crate::time::now_epoch_secs();
+            let log = HashMap::from([
+                ("stale".to_string(), entry(now - 91 * DAY)),
+                ("fresh".to_string(), entry(now)),
+            ]);
+            std::fs::write(&path, serde_json::to_vec(&log).unwrap()).unwrap();
+            let got = load_from(&path);
+            assert_eq!(got.keys().collect::<Vec<_>>(), ["fresh"]);
+            std::fs::write(&path, b"{not json").unwrap();
+            assert!(load_from(&path).is_empty());
+            assert!(load_from(&dir.join("absent.json")).is_empty());
+        });
+    }
+
     #[test]
     fn retention_parse_override_and_defaults() {
         assert_eq!(parse_retention(Some("7".into())), 7 * DAY);

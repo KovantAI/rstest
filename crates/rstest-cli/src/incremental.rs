@@ -432,7 +432,9 @@ mod tests {
 
     const FP: &str = "fp-A";
 
-    fn git(dir: &Path, args: &[&str]) {
+    /// Takes the held lock: it spawns `git`, which resolves through PATH that
+    /// a sibling test may be shimming.
+    fn git(_held: &crate::test_env::Held, dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
@@ -445,15 +447,16 @@ mod tests {
 
     #[test]
     fn checkout_dirty_sees_edits_outside_the_rootdir() {
+        let held = crate::test_env::lock();
         // Config in tests/, code in src/: the rootdir is tests/.
         let repo = tmp("checkout-dirty");
         std::fs::create_dir_all(repo.join("tests")).unwrap();
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("tests").join("pytest.ini"), "[pytest]\n").unwrap();
         std::fs::write(repo.join("src").join("m.py"), "x = 1\n").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         let tests = repo.join("tests");
         assert!(!checkout_dirty(&tests, &[]));
         std::fs::write(repo.join("src").join("m.py"), "x = 2\n").unwrap();
@@ -464,14 +467,15 @@ mod tests {
 
     #[test]
     fn untracked_tool_artifacts_leave_the_tree_clean() {
+        let held = crate::test_env::lock();
         // `--cov-report=json|lcov` and Hypothesis leave these untracked; the
         // stock Python .gitignore misses them. Counting them would stamp every
         // later run -dirty and freeze the since-green baseline for good.
         let repo = tmp("artifacts-clean");
         std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         std::fs::write(repo.join("coverage.json"), "{}").unwrap();
         std::fs::write(repo.join("coverage.lcov"), "").unwrap();
         for d in [
@@ -496,9 +500,9 @@ mod tests {
         let held = crate::test_env::lock();
         let repo = tmp("custom-cache");
         std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         let cache = repo.join("rstest-cache");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("history.msgpack"), "x").unwrap();
@@ -522,13 +526,14 @@ mod tests {
 
     #[test]
     fn untracked_fixture_named_like_a_coverage_report_is_a_change() {
+        let held = crate::test_env::lock();
         // Only the tool's own top-level report is an artifact; a new fixture
         // deeper down is a change, for the dirty stamp and `--changed` alike.
         let repo = tmp("artifacts-fixture");
         std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         std::fs::create_dir_all(repo.join("tests").join("data")).unwrap();
         std::fs::write(repo.join("tests").join("data").join("coverage.json"), "{}").unwrap();
         assert!(checkout_dirty(&repo, &[]));
@@ -540,6 +545,7 @@ mod tests {
 
     #[test]
     fn committed_tool_artifact_names_are_real_changes() {
+        let held = crate::test_env::lock();
         // A committed benchmark baseline or coverage.json fixture: editing it
         // is a change, whatever its name.
         let repo = tmp("artifacts-tracked");
@@ -547,14 +553,14 @@ mod tests {
         std::fs::create_dir_all(repo.join(".benchmarks")).unwrap();
         std::fs::write(repo.join(".benchmarks").join("base.json"), "{}").unwrap();
         std::fs::write(repo.join("coverage.json"), "{}").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "-f", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "-f", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         assert!(!checkout_dirty(&repo, &[]));
         std::fs::write(repo.join(".benchmarks").join("base.json"), "{\"x\":1}").unwrap();
         assert!(checkout_dirty(&repo, &[]));
         assert!(tree_dirty(&repo, &[]));
-        git(&repo, &["checkout", "--", "."]);
+        git(&held, &repo, &["checkout", "--", "."]);
         std::fs::write(repo.join("coverage.json"), "{\"x\":1}").unwrap();
         assert!(checkout_dirty(&repo, &[]));
         std::fs::remove_dir_all(&repo).ok();
@@ -562,11 +568,12 @@ mod tests {
 
     #[test]
     fn green_baseline_advances_only_on_a_clean_tree() {
+        let held = crate::test_env::lock();
         let repo = tmp("green-if-clean");
         std::fs::write(repo.join("pytest.ini"), "[pytest]\n").unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "init"]);
+        git(&held, &repo, &["init", "-q"]);
+        git(&held, &repo, &["add", "."]);
+        git(&held, &repo, &["commit", "-qm", "init"]);
         // The run's own untracked report doesn't dirty the tree.
         std::fs::write(repo.join("report.xml"), "<x/>").unwrap();
         let outputs = [Path::new("report.xml")];
@@ -891,6 +898,7 @@ mod tests {
 
     #[test]
     fn head_sha_reads_a_commit_in_this_repo() {
+        let _held = crate::test_env::lock();
         // The test process runs inside the rstest git checkout, so `git rev-parse
         // HEAD` succeeds: a non-empty 40-char lowercase-hex sha.
         let sha = head_sha().expect("HEAD sha inside the repo");

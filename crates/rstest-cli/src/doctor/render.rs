@@ -991,9 +991,210 @@ mod tests {
             });
         }
 
-        render(&mut Sink::captured().0, &r);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        // 10 waiting tests: 8 shown, 2 counted.
+        assert!(
+            out.contains("tests/test_a.py::w6\n  ... and 2 more\n"),
+            "{out}"
+        );
+        assert!(!out.contains("::w7"), "{out}");
+        // Gate tests cap at 5, with no tail.
+        assert!(out.contains("tests/test_a.py::g3\n"), "{out}");
+        assert!(!out.contains("::g4"), "{out}");
+        // 11 workers: 8 shown, 3 counted.
+        assert!(out.contains("    ... and 3 more\n"), "{out}");
+        assert!(out.contains("    gw5 ") && !out.contains("gw6 "), "{out}");
+        // Slowest files cap at 5.
+        assert!(out.contains("tests/test_3.py\n"), "{out}");
+        assert!(!out.contains("tests/test_4.py"), "{out}");
         let md = render_markdown(&r);
-        assert!(md.contains("... and")); // truncation tail rendered
+        assert!(
+            md.contains("| 0.50s | 1.00s | `tests/test_a.py::w6` |\n\n... and 2 more\n"),
+            "{md}"
+        );
+        assert!(!md.contains("::w7"), "{md}");
+        assert!(md.contains("| 1.00s | `tests/test_a.py::g3` |\n\n"), "{md}");
+        assert!(!md.contains("::g4"), "{md}");
+        assert!(md.contains("| `gw5` | 1.00s | 1 |"), "{md}");
+        assert!(!md.contains("| `gw6` |"), "{md}");
+        assert!(md.contains("| `tests/test_3.py` |"), "{md}");
+        assert!(!md.contains("tests/test_4.py"), "{md}");
+    }
+
+    #[test]
+    fn terminal_report_frames_and_tails_every_overflowing_section() {
+        use super::super::{DriftTest, GroupEntry};
+        let mut r = report(12);
+        let g = r.fixture_grouping.as_mut().unwrap();
+        g.groups = (0..9)
+            .map(|i| GroupEntry {
+                scope: format!("tests/g{i}.py"),
+                tests: 2,
+                setups: 1,
+                chunked_setups: 2,
+                setup_seconds: 0.1,
+                saved_seconds: 0.1,
+            })
+            .collect();
+        r.timeouts.as_mut().unwrap().override_count = 4;
+        let d = r.drift.as_mut().unwrap();
+        d.drifting_tests = 3;
+        d.tests.push(DriftTest {
+            nodeid: "tests/test_b.py::creep2".into(),
+            older_median: 1.0,
+            middle_median: 2.0,
+            newer_median: 3.0,
+            runs: 9,
+        });
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(
+            out.starts_with(
+                "\n================== rstest doctor ==================\n\
+                 12 tests, 30.0s test time (wall 9.0s, 4 workers)\n\
+                 startup: 0.30s spawning 4 workers (3% of wall)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("===================================================\n"),
+            "{out}"
+        );
+        assert!(out.contains("tests/g7.py\n  ... and 1 more\n"), "{out}");
+        assert!(!out.contains("tests/g8.py"), "{out}");
+        assert!(out.contains("  these need their own limit:\n"), "{out}");
+        assert!(
+            out.contains("<- @pytest.mark.timeout(26)\n  ... and 3 more\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "    1.00s ->   2.00s ->   3.00s  (9 runs)  tests/test_b.py::creep2\n  ... and 1 more\n  \
+                 each step is too small for --durations-regress"
+            ),
+            "{out}"
+        );
+        // Markdown has no caps on these: every group row is listed.
+        assert!(render_markdown(&r).contains("| `tests/g8.py` |"));
+        // Nothing to say: the one-line notice, no frame.
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report(0));
+        assert_eq!(
+            cap.out(),
+            "\n== rstest doctor: no timing data collected ==\n"
+        );
+    }
+
+    #[test]
+    fn write_markdown_writes_the_rendered_report() {
+        let dir = std::env::temp_dir().join(format!(
+            "rstest-doctor-md-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        let path = dir.join("sub/doctor.md");
+        write_markdown(&path, &report(12)).unwrap();
+        let got = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, render_markdown(&report(12)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_summary_appends_to_github_step_summary() {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        let dir = std::env::temp_dir().join(format!(
+            "rstest-doctor-ci-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let summary = dir.join("summary.md");
+        std::fs::write(&summary, "earlier step\n").unwrap();
+        let _bk = remove_var(&held, "BUILDKITE");
+        {
+            let _gh = set_var(&held, "GITHUB_STEP_SUMMARY", &summary);
+            let (mut sink, cap) = Sink::captured();
+            append_ci_summary(&mut sink, &report(12));
+            assert_eq!(cap.err(), "");
+            assert_eq!(
+                std::fs::read_to_string(&summary).unwrap(),
+                format!("earlier step\n{}", render_markdown(&report(12)))
+            );
+        }
+        {
+            // Unwritable (a directory): warn, never fail.
+            let _gh = set_var(&held, "GITHUB_STEP_SUMMARY", &dir);
+            let (mut sink, cap) = Sink::captured();
+            append_ci_summary(&mut sink, &report(12));
+            assert!(
+                cap.err().starts_with(&format!(
+                    "rstest: skipping the GitHub job summary (GITHUB_STEP_SUMMARY={}: ",
+                    dir.display()
+                )),
+                "{}",
+                cap.err()
+            );
+        }
+        // Empty / unset GITHUB_STEP_SUMMARY and no Buildkite: nothing happens.
+        let _gh = set_var(&held, "GITHUB_STEP_SUMMARY", "");
+        let (mut sink, cap) = Sink::captured();
+        append_ci_summary(&mut sink, &report(12));
+        assert_eq!((cap.out(), cap.err()), (String::new(), String::new()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_summary_pipes_markdown_to_buildkite_agent() {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        let dir = std::env::temp_dir().join(format!(
+            "rstest-doctor-bk-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let (got, args) = (dir.join("stdin.md"), dir.join("args.txt"));
+        crate::test_env::write_executable(
+            &dir.join("bin/buildkite-agent"),
+            &format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\n/bin/cat > '{}'\n",
+                args.display(),
+                got.display()
+            ),
+        );
+        let _gh = remove_var(&held, "GITHUB_STEP_SUMMARY");
+        let _bk = set_var(&held, "BUILDKITE", "true");
+        {
+            let _p = set_var(&held, "PATH", dir.join("bin"));
+            let (mut sink, cap) = Sink::captured();
+            append_ci_summary(&mut sink, &report(12));
+            assert_eq!(cap.err(), "");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&args).unwrap(),
+            "annotate --style info --context rstest-doctor\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&got).unwrap(),
+            render_markdown(&report(12))
+        );
+        // No agent on PATH: a warning, the run carries on.
+        let _p = set_var(&held, "PATH", &dir);
+        let (mut sink, cap) = Sink::captured();
+        append_ci_summary(&mut sink, &report(12));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            cap.err()
+                .starts_with("rstest: skipping Buildkite annotation (buildkite-agent: "),
+            "{}",
+            cap.err()
+        );
     }
 
     #[test]
@@ -1092,7 +1293,14 @@ mod tests {
                 fds: 0,
             })
             .collect();
-        render(&mut Sink::captured().0, &r); // exercises the len > 10 truncation-tail branch
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(
+            out.contains("  +1 thread  t.py::leak9\n  ... and 2 more\n  a test opened"),
+            "{out}"
+        );
+        assert!(!out.contains("leak10"), "{out}");
     }
 
     /// Covers every `FixtureAdvice` arm plus candidate sorting (needs two or

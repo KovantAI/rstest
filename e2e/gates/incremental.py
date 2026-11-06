@@ -126,6 +126,50 @@ def gate_since_green_incremental(g, args, binary):
         r.stderr[-300:] + r.stdout[-300:],
     )
 
+    # A green run the user narrowed (-k / -m / a path) proves nothing about the
+    # tests it left out: it must not become the baseline, or a later plain
+    # --since-green run skips the red ones as "unaffected".
+    np = g.tmp / "sgnarrow"
+    g.write("sgnarrow/test_fast.py", "def test_fast():\n    assert True\n")
+    g.write("sgnarrow/test_slow.py", "def test_slow():\n    assert False\n")
+    g.write("sgnarrow/pyproject.toml", "[tool.pytest.ini_options]\n")
+    git_init_commit(np, "init")
+    nenv = {"PYTHONPATH": str(np)}
+    r = g.run("--since-green", "-n", "2", "-k", "fast", cwd=np, env_extra=nenv)
+    check(
+        "since-green: a green -k subset run does not record a baseline",
+        r.returncode == 0 and _since_green_baseline(np) is None,
+        f"rc={r.returncode} baseline={_since_green_baseline(np)} " + r.stderr[-200:],
+    )
+    r = g.run("--since-green", "-n", "2", "test_fast.py", cwd=np, env_extra=nenv)
+    check(
+        "since-green: a green path-subset run does not record a baseline",
+        r.returncode == 0 and _since_green_baseline(np) is None,
+        f"rc={r.returncode} baseline={_since_green_baseline(np)} " + r.stderr[-200:],
+    )
+
+    # A gate that fails the run after the tests pass (--fail-on-leak here) makes
+    # the run red: it must not advance the baseline either.
+    lp = g.tmp / "sgleak"
+    g.write(
+        "sgleak/test_leak.py",
+        "import threading\n"
+        "def test_a_warmup():\n    assert True\n"
+        # A thread, not an fd: fd leaks go unmeasured on Windows.
+        "def test_b_thread_leak():\n"
+        "    threading.Thread(target=__import__('time').sleep, args=(30,), daemon=True).start()\n",
+    )
+    g.write("sgleak/pyproject.toml", "[tool.pytest.ini_options]\n")
+    git_init_commit(lp, "init")
+    r = g.run(
+        "--since-green", "-n", "1", "--fail-on-leak", cwd=lp, env_extra={"PYTHONPATH": str(lp)}
+    )
+    check(
+        "since-green: a run failed by --fail-on-leak does not record a baseline",
+        r.returncode == 1 and _since_green_baseline(lp) is None,
+        f"rc={r.returncode} baseline={_since_green_baseline(lp)} " + r.stderr[-200:],
+    )
+
 
 def gate_since_green_dirty_tree(g, args, binary):
     """A green run over uncommitted edits proves the working tree green, not
@@ -963,4 +1007,46 @@ def gate_since_green_sharded(g, args, binary):
         "since-green sharded: every shard green -> the pull records it",
         r2.returncode == 0 and doc.get("found") is True and doc.get("green_commit") == head,
         f"rc={r2.returncode} doc={str(doc)[:300]}",
+    )
+    # A run whose tests pass but a post-run gate fails (--fail-on-leak) is red:
+    # its pushed segment must not tell other runners this commit went green.
+    lk = g.tmp / "since_green_push_leak"
+    lremote = g.tmp / "since_green_push_leak_remote"
+    g.write(
+        "since_green_push_leak/test_leak.py",
+        "import threading\n"
+        "def test_a_warmup():\n    assert True\n"
+        # A thread, not an fd: fd leaks go unmeasured on Windows.
+        "def test_b_thread_leak():\n"
+        "    threading.Thread(target=__import__('time').sleep, args=(30,), daemon=True).start()\n",
+    )
+    git_init_commit(lk)
+    r = g.run(
+        ".",
+        "-n",
+        "1",
+        "--fail-on-leak",
+        "--cache-remote",
+        str(lremote),
+        "--cache-push",
+        cwd=lk,
+        env_extra={"RSTEST_CACHE": str(g.tmp / "sgpl_runner")},
+    )
+    pull_env = {"RSTEST_CACHE": str(g.tmp / "sgpl_puller")}
+    g.run(
+        ".",
+        "-k",
+        "no_such_test",
+        "--cache-remote",
+        str(lremote),
+        "--cache-pull",
+        cwd=lk,
+        env_extra=pull_env,
+    )
+    r2 = g.run("since-green", "--json", cwd=lk, env_extra=pull_env)
+    doc = json.loads(r2.stdout) if r2.returncode == 0 else {}
+    check(
+        "cache-push: a run failed by --fail-on-leak is not pushed as green",
+        r.returncode == 1 and doc.get("found") is False,
+        f"rc={r.returncode} doc={str(doc)[:200]} " + r.stderr[-200:],
     )

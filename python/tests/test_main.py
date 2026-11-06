@@ -253,3 +253,38 @@ def test_main_swallows_broken_pipe(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         worker_main.main()
     assert exc.value.code == 0
+
+
+def test_fork_pool_parent_waits_past_release_bytes_until_eof(monkeypatch):
+    # Bytes on the release pipe are not the release: the parent reads through
+    # them and exits only at EOF (the orchestrator closing its write end).
+    report_r, report_w = os.pipe()
+    release_r, release_w = os.pipe()
+    os.write(release_w, b"xyz")
+    os.close(release_w)
+    monkeypatch.setattr(worker_main.os, "fork", lambda: 111)
+    reads = []
+    real_read = os.read
+
+    def record_read(fd, n):
+        data = real_read(fd, n)
+        reads.append(data)
+        return data
+
+    monkeypatch.setattr(worker_main.os, "read", record_read)
+    monkeypatch.setattr(
+        worker_main.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code))
+    )
+    with pytest.raises(SystemExit) as exc:
+        worker_main._fork_pool(["1", str(report_w), str(release_r), "-1", "-1", "-1"])
+    assert exc.value.code == 0
+    assert reads == [b"x", b"y", b"z", b""]
+    assert real_read(report_r, 64).decode().split() == ["111"]
+    os.close(report_r)
+    os.close(release_r)
+
+
+def test_peak_rss_is_none_without_resource_module(monkeypatch):
+    # Windows has no `resource`: the done message just omits peak RSS.
+    monkeypatch.setitem(sys.modules, "resource", None)
+    assert worker_main._peak_rss() is None

@@ -549,6 +549,27 @@ def gate_coverage_based_selection_changed_uses_th(g, args, binary):
         str(got),
     )
 
+    # Rail: a non-incremental --cov run over a SUBSET rewrites the index from
+    # only the tests it ran. The rest of the suite's coverage must survive it,
+    # or the shared line maps to test_a alone and --changed skips test_b.
+    git(cs, "checkout", "-q", ".")
+    g.run(
+        "-n",
+        "2",
+        "--cov=mymod",
+        "--cov-context=test",
+        "--cov-report=",
+        "test_a.py",
+        cwd=cs,
+        env_extra={"PYTHONPATH": str(cs)},
+    )
+    got, _ = cov_changed_targets(lambda: edit_line("mymod.py", "    return 3\n", "    return 33\n"))
+    check(
+        "cov-select: subset --cov run keeps the unrun tests' coverage",
+        got == ["test_a.py::test_a", "test_b.py::test_b"],
+        str(got),
+    )
+
     # Rail: a pure insertion (new function) has no old-side coverage -> falls
     # back to import-graph, which runs every test importing the module.
     got, _ = cov_changed_targets(

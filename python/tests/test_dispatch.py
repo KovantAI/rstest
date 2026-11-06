@@ -833,3 +833,56 @@ def test_pool_debugger_guard_hint_in_the_one_worker_rerun_pool():
         for fn in reversed(cleanups):
             fn()
     assert pdb.set_trace is original
+
+
+def test_lazy_runtestloop_end_session_polled_mid_queue_starts_nothing_more():
+    # end_session arriving while items are still queued (the orchestrator is
+    # done with this worker): finish at once, leave the rest unstarted, and
+    # still tear down what the last test left set up.
+    session, calls = _lazy_session(lambda paths: [FakeItem(f"t.py::{n}") for n in "abc"])
+    conn = FakeConn(
+        [
+            {"kind": "run_files", "payload": {"paths": ["t.py"]}},
+            {"kind": "run_ids", "payload": {"ids": ["t.py::a", "t.py::b", "t.py::c"]}},
+        ],
+        polled=[(1, {"kind": "end_session", "payload": {}})],
+    )
+    assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert calls == [("t.py::a", "t.py::b")]
+    assert session.torn == [None]
+    assert session.testscollected == 3
+
+
+def test_lazy_collection_ships_the_resolved_maxfail():
+    conn = FakeConn()
+    config = SimpleNamespace(cache=None, option=SimpleNamespace(maxfail=2))
+    LazyDispatchPlugin(conn).pytest_collection(_lazy_collection_session(config))
+    assert conn.sent == [("lazy_ready", {"maxfail": 2})]
+
+
+def test_session_roots_resolve_confcutdir_against_the_invocation_dir(tmp_path):
+    cfg = _roots_config(tmp_path)
+    cfg.known_args_namespace = SimpleNamespace(confcutdir="sub")
+    cfg.invocation_params = SimpleNamespace(dir=tmp_path / "inv")
+    assert _session_roots(cfg)["confcutdir"] == str(tmp_path / "inv" / "sub")
+    # No invocation dir known: the value is passed through as given.
+    del cfg.invocation_params
+    assert _session_roots(cfg)["confcutdir"] == "sub"
+    cfg.known_args_namespace = SimpleNamespace(confcutdir=None)
+    assert "confcutdir" not in _session_roots(cfg)
+
+
+@pytest.mark.parametrize(("returncode", "expected"), [(None, 2), (3, 3), (0, 0)])
+def test_run_protocol_pytest_exit_ends_the_whole_run(returncode, expected):
+    from rstest_worker._internal.dispatch import _run_protocol
+
+    def protocol(item, nextitem):
+        pytest.exit("enough", returncode=returncode)
+
+    conn = FakeConn()
+    item = FakeItem(
+        "t.py::a", config=SimpleNamespace(hook=SimpleNamespace(pytest_runtest_protocol=protocol))
+    )
+    with pytest.raises(pytest.exit.Exception):
+        _run_protocol(conn, item, None)
+    assert conn.sent == [("session_exit", {"reason": "enough", "returncode": expected})]

@@ -102,7 +102,11 @@ pub(crate) fn set_cwd<'a>(_held: &'a Held, dir: &Path) -> CwdGuard<'a> {
 #[cfg(unix)]
 pub(crate) fn write_executable(path: &Path, contents: &str) {
     let status = std::process::Command::new("/bin/sh")
-        .args(["-c", r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+        .args([
+            "-c",
+            r#"printf '%s' "$1" > "$2" && /bin/chmod 755 "$2""#,
+            "sh",
+        ])
         .arg(contents)
         .arg(path)
         .status()
@@ -160,6 +164,24 @@ mod tests {
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
+    }
+
+    /// Callers plant stand-ins while PATH points at an empty dir, so the
+    /// writer must not resolve anything through PATH.
+    #[cfg(unix)]
+    #[test]
+    fn write_executable_works_without_path() {
+        let held = lock();
+        let dir = std::env::temp_dir().join(format!("rstest-write-exec-np-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("s.sh");
+        {
+            let _p = set_var(&held, "PATH", &dir);
+            write_executable(&script, "#!/bin/sh\nexit 7\n");
+        }
+        let status = std::process::Command::new(&script).status().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status.code(), Some(7));
     }
 
     #[test]
