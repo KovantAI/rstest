@@ -1,0 +1,154 @@
+{
+ "environment": {
+  "date": "2026-11-03",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "rstest": "rstest 0.10.0",
+  "rstest_commit": "adfb689",
+  "worker_python": "3.13.13",
+  "pytest": "9.1.1",
+  "cycles": 10,
+  "settle_s": 1.0
+ },
+ "points": [
+  {
+   "workers": 0,
+   "cycles": [
+    {
+     "detect_ms": 314.7,
+     "run_ms": 195.2,
+     "total_ms": 509.9
+    },
+    {
+     "detect_ms": 317.1,
+     "run_ms": 199.0,
+     "total_ms": 516.1
+    },
+    {
+     "detect_ms": 313.8,
+     "run_ms": 195.4,
+     "total_ms": 509.2
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 195.0,
+     "total_ms": 512.0
+    },
+    {
+     "detect_ms": 316.9,
+     "run_ms": 191.7,
+     "total_ms": 508.6
+    },
+    {
+     "detect_ms": 317.1,
+     "run_ms": 195.0,
+     "total_ms": 512.1
+    },
+    {
+     "detect_ms": 313.7,
+     "run_ms": 190.6,
+     "total_ms": 504.3
+    },
+    {
+     "detect_ms": 314.7,
+     "run_ms": 191.1,
+     "total_ms": 505.8
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 191.2,
+     "total_ms": 508.2
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 194.8,
+     "total_ms": 512.0
+    }
+   ],
+   "detect_ms": {
+    "median": 316.9,
+    "min": 313.7,
+    "max": 317.2
+   },
+   "run_ms": {
+    "median": 194.9,
+    "min": 190.6,
+    "max": 199.0
+   },
+   "total_ms": {
+    "median": 509.5,
+    "min": 504.3,
+    "max": 516.1
+   }
+  },
+  {
+   "workers": 2,
+   "cycles": [
+    {
+     "detect_ms": 315.8,
+     "run_ms": 194.7,
+     "total_ms": 510.5
+    },
+    {
+     "detect_ms": 316.9,
+     "run_ms": 198.4,
+     "total_ms": 515.4
+    },
+    {
+     "detect_ms": 316.1,
+     "run_ms": 191.3,
+     "total_ms": 507.4
+    },
+    {
+     "detect_ms": 316.6,
+     "run_ms": 188.6,
+     "total_ms": 505.2
+    },
+    {
+     "detect_ms": 314.6,
+     "run_ms": 193.2,
+     "total_ms": 507.8
+    },
+    {
+     "detect_ms": 314.1,
+     "run_ms": 190.3,
+     "total_ms": 504.4
+    },
+    {
+     "detect_ms": 316.6,
+     "run_ms": 193.4,
+     "total_ms": 510.0
+    },
+    {
+     "detect_ms": 317.3,
+     "run_ms": 193.5,
+     "total_ms": 510.8
+    },
+    {
+     "detect_ms": 314.9,
+     "run_ms": 194.3,
+     "total_ms": 509.1
+    },
+    {
+     "detect_ms": 317.5,
+     "run_ms": 194.6,
+     "total_ms": 512.0
+    }
+   ],
+   "detect_ms": {
+    "median": 316.4,
+    "min": 314.1,
+    "max": 317.5
+   },
+   "run_ms": {
+    "median": 193.4,
+    "min": 188.6,
+    "max": 198.4
+   },
+   "total_ms": {
+    "median": 509.6,
+    "min": 504.4,
+    "max": 515.4
+   }
+  }
+ ]
+}
