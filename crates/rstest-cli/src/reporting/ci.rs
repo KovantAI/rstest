@@ -736,6 +736,7 @@ mod tests {
         buildkite_flaky_annotate(&mut Sink::captured().0, &report::Run::default());
     }
 
+    #[cfg(unix)]
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "rstest-ci-{tag}-{}-{}",
@@ -747,6 +748,7 @@ mod tests {
     }
 
     /// One failing test at `a.py`, for checking the path prefix only.
+    #[cfg(unix)]
     fn one_failure() -> report::Run {
         let mut run = report::Run::default();
         run.record(
@@ -834,6 +836,16 @@ mod tests {
         assert_eq!(mono_prefix(), None);
     }
 
+    /// `dir` ahead of the current PATH. Replacing PATH outright would hide
+    /// `git` from sibling tests that spawn it without the lock.
+    #[cfg(unix)]
+    fn path_with(dir: &Path) -> std::ffi::OsString {
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&rest)))
+            .unwrap()
+    }
+
+    #[cfg(unix)]
     fn flaky_run() -> report::Run {
         let mut run = report::Run::default();
         for (id, n) in [("a.py::one", 1), ("b.py::two", 3)] {
@@ -859,7 +871,7 @@ mod tests {
                 got.display()
             ),
         );
-        let _path = set_var(&held, "PATH", &dir);
+        let _path = set_var(&held, "PATH", path_with(&dir));
 
         // Off Buildkite: never runs the agent.
         {
@@ -898,8 +910,15 @@ mod tests {
     fn buildkite_missing_agent_warns_and_carries_on() {
         use crate::test_env::set_var;
         let held = crate::test_env::lock();
+        // Only a non-executable stand-in on PATH: spawning fails.
         let empty = temp("bk-empty");
-        let _path = set_var(&held, "PATH", &empty);
+        std::fs::write(empty.join("buildkite-agent"), "").unwrap();
+        let _path = set_var(&held, "PATH", path_with(&empty));
+        // Sibling tests spawn `git` without the lock: it must stay on PATH.
+        assert!(std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok());
         let _bk = set_var(&held, "BUILDKITE", "1");
         let (mut sink, cap) = Sink::captured();
         buildkite_flaky_annotate(&mut sink, &flaky_run());

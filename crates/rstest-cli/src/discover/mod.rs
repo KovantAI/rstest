@@ -1094,6 +1094,7 @@ mod tests {
         assert!(py_launcher_candidates().is_empty());
     }
 
+    #[cfg(unix)]
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "rstest-disc-{tag}-{}-{}",

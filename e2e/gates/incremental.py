@@ -153,8 +153,11 @@ def gate_since_green_incremental(g, args, binary):
     lp = g.tmp / "sgleak"
     g.write(
         "sgleak/test_leak.py",
+        "import threading\n"
         "def test_a_warmup():\n    assert True\n"
-        "def test_b_fd_leak():\n    test_b_fd_leak.f = open(__file__)  # never closed\n",
+        # A thread, not an fd: fd leaks go unmeasured on Windows.
+        "def test_b_thread_leak():\n"
+        "    threading.Thread(target=__import__('time').sleep, args=(30,), daemon=True).start()\n",
     )
     g.write("sgleak/pyproject.toml", "[tool.pytest.ini_options]\n")
     git_init_commit(lp, "init")
@@ -1011,8 +1014,11 @@ def gate_since_green_sharded(g, args, binary):
     lremote = g.tmp / "since_green_push_leak_remote"
     g.write(
         "since_green_push_leak/test_leak.py",
+        "import threading\n"
         "def test_a_warmup():\n    assert True\n"
-        "def test_b_fd_leak():\n    test_b_fd_leak.f = open(__file__)  # never closed\n",
+        # A thread, not an fd: fd leaks go unmeasured on Windows.
+        "def test_b_thread_leak():\n"
+        "    threading.Thread(target=__import__('time').sleep, args=(30,), daemon=True).start()\n",
     )
     git_init_commit(lk)
     r = g.run(
