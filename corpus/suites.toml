@@ -225,6 +225,11 @@ install = ["-e .", "pytest"]
 repo = "https://github.com/fastapi/typer"
 # progressbar timing tests are load-sensitive
 rstest_args = ["-n", "4"]
+# Renders tmp_path in an 80-column rich panel and asserts the file name shows;
+# whether rich keeps it or cuts it to "..." follows the path's length, and the
+# two runners' tmp roots differ in length by design (pytest-of-<user>/pytest-N
+# vs rstest-<pid>/gwN). Failed under pytest only, 2026-11-02.
+noisy = ["tests/test_types_file.py::test_file_error"]
 
 [sqlalchemy]
 repo = "https://github.com/sqlalchemy/sqlalchemy"

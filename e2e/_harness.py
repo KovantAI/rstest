@@ -306,6 +306,9 @@ STEAL = fx("steal.py")
 STEAL_SMALL = fx("steal_small.py")
 
 
+STEAL_CONFTEST = fx("steal_conftest.py")
+
+
 MP_SPAWN = fx("mp_spawn.py")
 
 

@@ -28,6 +28,7 @@ from _harness import (
     SERIAL,
     SERIAL_CRASH,
     STEAL,
+    STEAL_CONFTEST,
     STEAL_SMALL,
     WINDOWS,
     check,
@@ -858,6 +859,7 @@ def gate_lazy_work_stealing(g, args, binary):
     print("== lazy work stealing ==")
     g.write("steal/test_big.py", STEAL)
     g.write("steal/test_small.py", STEAL_SMALL)
+    g.write("steal/conftest.py", STEAL_CONFTEST)
     log = g.tmp / "steal_on.jsonl"
     clear_e2e_log(log)
     r = g.run(
