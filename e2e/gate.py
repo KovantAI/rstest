@@ -9,6 +9,7 @@ Exit 0 = all gates green. Designed to be the single CI entry point.
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import _harness
@@ -162,6 +163,24 @@ from gates.serve_watch import (
     gate_watch_mode,
 )
 
+# CI runs each shard as its own job. A section's shard is its gates module, so
+# a new section lands in a shard automatically and a new module must be mapped
+# here (an unmapped module fails every run). Every section writes the fixtures
+# it reads, so any shard runs standalone.
+SHARD_OF_MODULE = {
+    "gates.misc": "a",
+    "gates.reporting": "a",
+    "gates.replay": "a",
+    "gates.dispatch": "a",
+    "gates.flaky": "a",
+    "gates.monorepo": "a",
+    "gates.serve_watch": "a",
+    "gates.plugins": "b",
+    "gates.coverage": "b",
+    "gates.incremental": "b",
+    "gates.personas": "personas",
+}
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -174,6 +193,12 @@ def main():
         help="run only sections whose name contains this substring (dev iteration; "
         "sections run in order, so a section that reuses an earlier one's fixtures "
         "may need a broader filter). Use --list to see names.",
+    )
+    ap.add_argument(
+        "--shard",
+        default="",
+        help="comma-separated shards to run (--list shows each section's shard); "
+        "CI runs each shard as its own job",
     )
     ap.add_argument("--list", action="store_true", help="list section names and exit")
     args = ap.parse_args()
@@ -247,7 +272,6 @@ def main():
         gate_crash_after_restart_budget,
         gate_fixture_cost_dispatch,
         gate_session_exit_stops_pool,
-        gate_lone_surrogate_in_report,
         gate_replay,
         gate_replay_serial,
         gate_replay_crash,
@@ -309,24 +333,39 @@ def main():
         gate_bisect,
         gate_watch_mode,
     )
-    names = [s.__name__.removeprefix("gate_") for s in sections]
+    assert len(set(sections)) == len(sections), "a section is listed twice"
+    shard_of = {s: SHARD_OF_MODULE[s.__module__] for s in sections}
     if args.list:
-        print("\n".join(names))
+        print("\n".join(f"{shard_of[s]}\t{s.__name__.removeprefix('gate_')}" for s in sections))
         return
-    selected = [s for s in sections if not args.only or args.only in s.__name__]
+    shards = set(filter(None, args.shard.split(",")))
+    if unknown := shards - set(shard_of.values()):
+        sys.exit(f"unknown --shard {', '.join(sorted(unknown))}")
+    selected = [
+        s
+        for s in sections
+        if (not args.only or args.only in s.__name__) and (not shards or shard_of[s] in shards)
+    ]
     if not selected:
         sys.exit(f"--only {args.only!r} matched no section; --list to see names")
-    if args.only:
-        print(f"running {len(selected)}/{len(sections)} sections matching {args.only!r}")
+    if args.only or shards:
+        print(f"running {len(selected)}/{len(sections)} sections")
 
     binary = Path(args.binary).resolve()
     assert binary.exists(), f"binary missing: {binary} (cargo build --release first)"
     make_venv(Path(args.venv))
     g = Gate(binary, Path(args.venv).resolve())
 
+    took = []
     for _section in selected:
+        t0 = time.monotonic()
         _section(g, args, binary)
+        took.append((time.monotonic() - t0, _section.__name__.removeprefix("gate_")))
+        print(f"  ({took[-1][0]:.1f}s)")
 
+    print("\nslowest sections:")
+    for secs, name in sorted(took, reverse=True)[:15]:
+        print(f"  {secs:7.1f}s  {name}")
     print(
         f"\n{_harness.PASS} ok, {len(_harness.FAIL)} failed, "
         f"{len(_harness.XFAIL)} xfail (known bugs)"

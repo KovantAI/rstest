@@ -944,6 +944,273 @@ mod tests {
         assert!(obj.get("longrepr").is_none(), "{obj}");
     }
 
+    fn xfailed(mut r: Report) -> Report {
+        r.wasxfail = true;
+        r
+    }
+
+    /// One report per outcome kind, plus the phases that draw nothing.
+    fn every_kind() -> Vec<Report> {
+        vec![
+            report("setup", "passed"),
+            report("call", "passed"),
+            xfailed(report("call", "passed")),
+            report("call", "failed"),
+            report("call", "skipped"),
+            xfailed(report("setup", "skipped")),
+            report("setup", "failed"),
+            report("teardown", "failed"),
+            report("teardown", "passed"),
+        ]
+    }
+
+    #[test]
+    fn dots_draw_one_char_per_outcome_and_close_with_the_percentage() {
+        let mut p = Progress::default();
+        p.set_total(6);
+        assert_eq!(p.total(), Some(6));
+        let (mut sink, buf) = Sink::captured();
+        for r in every_kind() {
+            p.on_report(&mut sink, None, &r);
+        }
+        // A failed teardown draws 'E' but its test was already counted.
+        assert_eq!(p.done, 6);
+        p.finish(&mut sink);
+        assert_eq!(buf.out(), ".XFsxEE [100%]\n");
+
+        // No total: the line just ends.
+        let mut p = Progress::default();
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("call", "passed"));
+        p.finish(&mut sink);
+        assert_eq!(buf.out(), ".\n");
+        // Nothing drawn: finish adds nothing.
+        let (mut sink, buf) = Sink::captured();
+        Progress::default().finish(&mut sink);
+        assert_eq!(buf.out(), "");
+    }
+
+    #[test]
+    fn dots_wrap_with_a_raw_count_when_the_total_is_unknown() {
+        let mut p = Progress::default();
+        let (mut sink, buf) = Sink::captured();
+        for _ in 0..WIDTH + 1 {
+            p.on_report(&mut sink, None, &report("call", "passed"));
+        }
+        p.finish(&mut sink);
+        assert_eq!(buf.out(), format!("{} [{WIDTH}]\n.\n", ".".repeat(WIDTH)));
+    }
+
+    #[test]
+    fn verbose_lines_name_the_worker_and_outcome_word() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Verbose);
+        let (mut sink, buf) = Sink::captured();
+        for r in every_kind() {
+            p.on_report(&mut sink, Some(1), &r);
+        }
+        p.finish(&mut sink);
+        let id = "tests/test_a.py::test_x";
+        let want: String = [
+            "PASSED", "XPASS", "FAILED", "SKIPPED", "XFAIL", "ERROR", "ERROR",
+        ]
+        .iter()
+        .map(|w| format!("[gw1] {id} {w}\n"))
+        .collect();
+        assert_eq!(buf.out(), want, "no total: no percentage, no closing line");
+    }
+
+    #[test]
+    fn bar_lines_carry_symbol_duration_percentage_and_inline_failure() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Bar);
+        p.set_total(7);
+        let (mut sink, buf) = Sink::captured();
+        for r in every_kind() {
+            p.on_report(&mut sink, None, &r);
+        }
+        p.finish(&mut sink);
+        let id = "tests/test_a.py::test_x";
+        let fail_body = format!("  ── {id} ──\n  assert 1 == 2\n  line two\n");
+        assert_eq!(
+            buf.out(),
+            format!(
+                "✓ {id}  1.23s [ 14%]\n\
+                 X {id}  1.23s [ 28%]\n\
+                 ✗ {id}  1.23s [ 42%]\n{fail_body}\
+                 s {id}  1.23s [ 57%]\n\
+                 x {id}  1.23s [ 71%]\n\
+                 E {id}  1.23s [ 85%]\n{fail_body}\
+                 E {id}  1.23s [ 85%]\n{fail_body}"
+            )
+        );
+
+        // No total, no measurable duration, `--tb=no`: bare line, no repr.
+        let mut p = Progress::default();
+        p.set_mode(Mode::Bar);
+        let (mut sink, buf) = Sink::captured();
+        sink.set_tb_style(TbStyle::No);
+        let mut r = report("call", "failed");
+        r.duration = 0.0001;
+        p.on_report(&mut sink, Some(3), &r);
+        assert_eq!(buf.out(), format!("[gw3] ✗ {id}\n"));
+    }
+
+    #[test]
+    fn teamcity_mode_streams_one_group_per_test() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Teamcity);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("setup", "passed"));
+        p.on_report(&mut sink, None, &report("call", "passed"));
+        p.on_report(&mut sink, None, &report("teardown", "failed"));
+        let mut skip = report("call", "skipped");
+        skip.skip_reason = Some("no db".into());
+        p.on_report(&mut sink, None, &skip);
+        p.on_report(&mut sink, None, &xfailed(report("call", "skipped")));
+        p.on_report(&mut sink, None, &report("call", "skipped"));
+        p.finish(&mut sink);
+        // The teardown failure is reported but not counted as a test.
+        assert_eq!(p.done, 4);
+        let n = "tests/test_a.py::test_x";
+        let start = format!("##teamcity[testStarted name='{n}']");
+        let end = format!("##teamcity[testFinished name='{n}' duration='1234']");
+        let ignored = |m: &str| format!("##teamcity[testIgnored name='{n}' message='{m}']");
+        assert_eq!(
+            buf.out(),
+            [
+                format!("{start}\n{end}"),
+                format!(
+                    "{start}\n##teamcity[testFailed name='{n}' message='teardown failed' \
+                     details='assert 1 == 2|nline two']\n{end}"
+                ),
+                format!("{start}\n{}\n{end}", ignored("no db")),
+                format!("{start}\n{}\n{end}", ignored("expected failure (xfail)")),
+                format!("{start}\n{}\n{end}", ignored("skipped")),
+            ]
+            .map(|g| g + "\n")
+            .concat()
+        );
+    }
+
+    #[test]
+    fn tap_failure_text_becomes_diagnostics() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Tap);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("setup", "passed"));
+        p.on_report(&mut sink, None, &report("call", "failed"));
+        p.on_report(&mut sink, None, &report("teardown", "failed"));
+        let mut skip = report("call", "skipped");
+        skip.skip_reason = Some("a\nb".into());
+        p.on_report(&mut sink, None, &skip);
+        p.finish(&mut sink);
+        p.tap_plan(&mut sink, &[]);
+        assert_eq!(
+            buf.out(),
+            "not ok 1 - tests/test_a.py::test_x\n\
+             # assert 1 == 2\n\
+             # line two\n\
+             not ok 2 - tests/test_a.py::test_x # teardown error\n\
+             # assert 1 == 2\n\
+             # line two\n\
+             ok 3 - tests/test_a.py::test_x # SKIP a b\n\
+             1..3\n"
+        );
+        let mut setup_err = report("setup", "failed");
+        setup_err.longrepr = None;
+        assert_eq!(
+            tap_result_line(9, &setup_err).unwrap(),
+            "not ok 9 - tests/test_a.py::test_x # setup error"
+        );
+        let mut empty_reason = report("call", "skipped");
+        empty_reason.skip_reason = Some(String::new());
+        assert_eq!(
+            tap_result_line(1, &empty_reason).unwrap(),
+            "ok 1 - tests/test_a.py::test_x # SKIP"
+        );
+    }
+
+    #[test]
+    fn pytest_mode_renders_nothing() {
+        let mut p = Progress::default();
+        p.set_mode(Mode::Pytest);
+        p.set_total(1);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("call", "failed"));
+        p.finish(&mut sink);
+        assert_eq!(buf.out(), "");
+        assert_eq!(p.done, 0);
+    }
+
+    #[test]
+    fn json_failure_carries_longrepr_and_lineno() {
+        let mut r = report("call", "failed");
+        r.lineno = Some(7);
+        r.duration = 0.123456;
+        let obj = testreport_json(None, &r);
+        assert_eq!(obj["longrepr"], "assert 1 == 2\nline two");
+        assert_eq!(obj["lineno"], 7);
+        assert_eq!(obj["duration"], 0.1235);
+        assert!(obj.get("worker").is_none());
+        // cpu rides the call phase only.
+        let mut setup = report("setup", "passed");
+        setup.cpu = Some(0.5);
+        assert!(testreport_json(None, &setup).get("cpu").is_none());
+    }
+
+    #[test]
+    fn footer_routes_output_and_tracks_workers() {
+        // A non-live footer is transparent: the dots stream is unchanged.
+        let mut p = Progress::default();
+        p.enable_footer(2, false);
+        p.set_total(2);
+        let (mut sink, buf) = Sink::captured();
+        p.item_started(&mut sink, 0, "tests/test_a.py::test_x".into());
+        p.on_report(&mut sink, Some(0), &report("call", "passed"));
+        p.item_finished(&mut sink, 0);
+        p.tick(&mut sink);
+        p.finish(&mut sink);
+        assert_eq!(buf.out(), ". [ 50%]\n");
+
+        // A live footer paints the running test and the bar header (the mode
+        // set after enabling reaches the footer), and is wiped by finish().
+        let mut p = Progress::default();
+        p.enable_footer(1, true);
+        p.set_mode(Mode::Bar);
+        p.set_total(4);
+        let (mut sink, buf) = Sink::captured();
+        p.item_started(&mut sink, 0, "tests/test_live.py::t".into());
+        let painted = buf.out();
+        assert!(painted.contains("tests/test_live.py::t"), "{painted:?}");
+        assert!(painted.contains("   0% (0/4)"), "{painted:?}");
+        p.on_report(&mut sink, Some(0), &report("call", "passed"));
+        p.item_finished(&mut sink, 0);
+        p.tick(&mut sink);
+        p.finish(&mut sink);
+        let out = buf.out();
+        assert!(
+            out.contains("\x1b[0J[gw0] ✓ tests/test_a.py::test_x  1.23s [ 25%]\n"),
+            "{out:?}"
+        );
+        assert!(out.contains("  25% (1/4)"), "{out:?}");
+        assert!(
+            out.ends_with("\x1b[0J"),
+            "finish erases the footer: {out:?}"
+        );
+
+        // Dots mode with a live footer: a plain counter header, and dots are
+        // reprinted after each repaint.
+        let mut p = Progress::default();
+        p.enable_footer(1, true);
+        p.set_total(2);
+        let (mut sink, buf) = Sink::captured();
+        p.on_report(&mut sink, None, &report("call", "passed"));
+        let out = buf.out();
+        assert!(out.starts_with(".\n\x1b[2m[0/2]\x1b[0m\n"), "{out:?}");
+        assert!(out.ends_with("\x1b[3A\r."), "{out:?}");
+    }
+
     #[test]
     fn teamcity_flaky_warns_per_test() {
         assert_eq!(teamcity_flaky_messages(&[]), "");

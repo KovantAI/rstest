@@ -537,3 +537,86 @@ def test_main_no_cov_does_nothing(tmp_path, monkeypatch, capsys):
     _measure(p)
     assert covtool.main(["--no-cov", "--cov-report=term", "--cov-fail-under=95"]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_number_keeps_ints_and_accepts_floats():
+    assert covtool._number("80") == 80
+    assert isinstance(covtool._number("80"), int)
+    assert covtool._number("77.5") == 77.5
+
+
+def test_main_fractional_fail_under(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=77.5", "--cov-precision=2"]) == 0
+    assert "Required test coverage of 77.5% reached" in capsys.readouterr().out
+
+
+def test_main_invalid_fail_under_fails_the_run(tmp_path, monkeypatch, caplog):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    assert covtool.main(["--cov-report=", "--cov-fail-under=150"]) == 1
+    assert "fail_under=150 is invalid" in caplog.text
+
+
+def test_main_annotate_into_a_directory(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    covtool.main(["--cov-report=annotate:ann"])
+    assert "Coverage annotated source written to dir ann" in capsys.readouterr().out
+    assert list((p / "ann").glob("*calc.py,cover"))
+
+
+def test_main_markdown_written_then_appended(tmp_path, monkeypatch, capsys):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p)
+    covtool.main(["--cov-report=markdown"])
+    assert "Coverage Markdown information written to file coverage.md" in capsys.readouterr().out
+    first = (p / "coverage.md").read_text()
+    assert "| TOTAL" in first.replace("**", "")
+    _measure(p)
+    covtool.main(["--cov-report=markdown-append:coverage.md"])
+    assert "appended to file coverage.md" in capsys.readouterr().out
+    assert (p / "coverage.md").read_text() == first + first
+
+
+def test_main_already_reported_rewrites_reports_with_contexts(tmp_path, monkeypatch, capsys):
+    # In-process pytest-cov wrote html/json without per-test contexts: only
+    # those two are rewritten, quietly.
+    p = _project(tmp_path, monkeypatch)
+    _measure(p, suffix=False)
+    status = covtool.main(
+        [
+            "--cov-context=test",
+            "--cov-report=html:cov",
+            "--cov-report=json:cov.json",
+            "--cov-report=xml",
+            "--rstest-cov-reported",
+        ]
+    )
+    assert status == 0
+    assert capsys.readouterr().out == ""
+    assert (p / "cov" / "index.html").exists()
+    assert json.loads((p / "cov.json").read_text())["meta"]["show_contexts"] is True
+    assert not (p / "coverage.xml").exists()
+
+
+def test_main_context_rewrite_failure_is_only_a_warning(tmp_path, monkeypatch, caplog):
+    p = _project(tmp_path, monkeypatch)
+    _measure(p, suffix=False)
+
+    def boom(cov, specs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(covtool, "_rewrite_context_reports", boom)
+    argv = ["--cov-context=test", "--cov-report=html", "--rstest-cov-reported"]
+    assert covtool.main(argv) == 0
+    assert "coverage context report skipped: disk full" in caplog.text
+
+
+def test_main_unreadable_data_file_is_a_warning_not_a_crash(tmp_path, monkeypatch, caplog, capsys):
+    p = _project(tmp_path, monkeypatch)
+    (p / ".coverage").write_bytes(b"not a coverage database")
+    assert covtool.main(["--cov-report=term"]) == 0
+    assert "no coverage data to combine" in caplog.text
+    assert "is not a database" in caplog.text

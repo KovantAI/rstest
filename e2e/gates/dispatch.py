@@ -1,12 +1,17 @@
 """e2e gate sections: dispatch."""
 
+import contextlib
 import json
+import os
 import re
 import shutil
+import signal
+import subprocess
 import xml.etree.ElementTree as ET
 
 from _harness import (
     BASIC,
+    CRASH,
     CRASHMANY,
     EACH_CRASH,
     FLAKY,
@@ -23,6 +28,7 @@ from _harness import (
     SERIAL,
     SERIAL_CRASH,
     STEAL,
+    STEAL_CONFTEST,
     STEAL_SMALL,
     WINDOWS,
     check,
@@ -80,6 +86,12 @@ def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
     # initial collection pass in any worker.
+    # Self-contained: these fixtures are also written by gate_basics,
+    # gate_crash_handling and gate_collection_error_semantics.
+    g.write("basic/test_basic.py", BASIC)
+    g.write("crash/test_crash.py", CRASH)
+    g.write("broken/test_broken.py", "import nonexistent_module_xyz\n")
+    g.write("broken/test_fine.py", "def test_ok(): assert True\n")
     r = g.run("basic/test_basic.py", "-n", "2", "--collect", "lazy")
     check("lazy: parallel counts", "2 failed, 2 passed" in r.stdout, r.stdout[-200:])
     check("lazy: exit 1", r.returncode == 1)
@@ -138,6 +150,7 @@ def gate_lazy_collection(g, args, binary):
         "12 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-600:],
     )
+    g.write("empty/.keep", "")  # self-contained (also written by gate_basics)
     r = g.run("empty", "--collect", "lazy", "-n", "2")
     check("lazy: no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
     fdir = g.tmp / "flaky"
@@ -400,6 +413,7 @@ def gate_shard_verify(g, args, binary):
 
 def gate_dist_each(g, args, binary):
     print("== --dist each ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])
     check("each: exit 1", r.returncode == 1)
@@ -470,6 +484,7 @@ def gate_fork_pool(g, args, binary):
 
 def gate_dist_validation(g, args, binary):
     print("== --dist validation ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     # An invalid --dist value must be rejected the same way on every path;
     # the small-suite/lazy path used to accept garbage silently (exit 0).
     r = g.run("basic/test_basic.py", "--dist", "bogus")
@@ -745,6 +760,43 @@ def gate_worker_timeout_watchdog(g, args, binary):
         r.returncode == 1 and "exceeded --worker-timeout" in r.stdout and "2 passed" in r.stdout,
         r.stdout[-300:],
     )
+    # A process the hung test forked inherits the worker's event pipe and
+    # outlives the SIGKILL: the run must not wait for it to exit.
+    if not WINDOWS:
+        pidfile = g.tmp / "hangfork" / "child.pid"
+        g.write(
+            "hangfork/test_hangfork.py",
+            "import os, time\n"
+            "def test_hangs_with_a_child():\n"
+            "    pid = os.fork()\n"
+            "    if pid == 0:\n"
+            "        time.sleep(90)\n"
+            "        os._exit(0)\n"
+            f"    open({str(pidfile)!r}, 'w').write(str(pid))\n"
+            "    time.sleep(120)\n"
+            "def test_ok(): pass\n",
+        )
+        try:
+            r = g.run(
+                "test_hangfork.py",
+                "-n",
+                "2",
+                "--worker-timeout",
+                "3",
+                cwd=g.tmp / "hangfork",
+                timeout=45,
+            )
+            ok, detail = (
+                r.returncode == 1 and "exceeded --worker-timeout" in r.stdout,
+                r.stdout[-300:],
+            )
+        except subprocess.TimeoutExpired:
+            ok, detail = False, "run still waiting on the killed worker's leftover child"
+        finally:
+            if pidfile.exists():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        check("watchdog: a leftover forked child doesn't hang the run", ok, detail)
     # The auto-armed watchdog is sized per test from that test's own timeout.
     # A marker longer than the global --timeout must not be killed at the
     # global limit (3*1+10 = 13s here): it runs 15s under timeout(30) and passes.
@@ -807,6 +859,7 @@ def gate_lazy_work_stealing(g, args, binary):
     print("== lazy work stealing ==")
     g.write("steal/test_big.py", STEAL)
     g.write("steal/test_small.py", STEAL_SMALL)
+    g.write("steal/conftest.py", STEAL_CONFTEST)
     log = g.tmp / "steal_on.jsonl"
     clear_e2e_log(log)
     r = g.run(

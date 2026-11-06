@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,10 +40,43 @@ fn max_message_bytes() -> usize {
 struct LimitedReader<R> {
     inner: R,
     budget: Arc<AtomicUsize>,
+    /// The pipe's fd and the flag [`Worker::kill`] sets. A killed worker's
+    /// pipe can stay open (a process its test forked inherits the write end),
+    /// so once the flag is set an idle pipe reads as EOF instead of blocking
+    /// the reader thread until that process exits.
+    #[cfg(unix)]
+    abandon: Option<(std::os::fd::RawFd, Arc<AtomicBool>)>,
 }
+
+/// How often a blocked read rechecks the abandon flag.
+#[cfg(unix)]
+const ABANDON_POLL_MS: libc::c_int = 200;
 
 impl<R: Read> Read for LimitedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(unix)]
+        if let Some((fd, abandoned)) = &self.abandon {
+            loop {
+                let mut pfd = libc::pollfd {
+                    fd: *fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one valid pollfd; the fd is owned by `inner`.
+                let ready = unsafe { libc::poll(&mut pfd, 1, ABANDON_POLL_MS) };
+                if ready > 0 {
+                    break; // data, EOF or an error: the read below reports it
+                }
+                if ready < 0 {
+                    let e = io::Error::last_os_error();
+                    if e.kind() != io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                } else if abandoned.load(Ordering::Relaxed) {
+                    return Ok(0);
+                }
+            }
+        }
         let allowed = self.budget.load(Ordering::Relaxed);
         if allowed == 0 {
             return Err(io::Error::new(
@@ -144,6 +177,9 @@ pub struct Worker {
     /// Set by [`Worker::kill`]: a SIGKILL death is then ours (the hang
     /// watchdog), not the out-of-memory killer.
     killed: bool,
+    /// Shared with the event reader: set on kill so the reader stops waiting
+    /// for an EOF a leftover grandchild may hold off forever.
+    abandoned: Arc<AtomicBool>,
 }
 
 /// How a worker's OS process is owned. The plain spawn path makes the worker a
@@ -355,12 +391,18 @@ pub struct EventReader {
 }
 
 impl EventReader {
-    fn new(evt_r: File) -> Self {
+    fn new(evt_r: File, abandoned: Arc<AtomicBool>) -> Self {
         let cap = max_message_bytes();
         let budget = Arc::new(AtomicUsize::new(cap));
+        #[cfg(unix)]
+        let abandon = Some((std::os::fd::AsRawFd::as_raw_fd(&evt_r), abandoned));
+        #[cfg(not(unix))]
+        let _ = abandoned;
         let reader = LimitedReader {
             inner: evt_r,
             budget: Arc::clone(&budget),
+            #[cfg(unix)]
+            abandon,
         };
         EventReader {
             events: rmp_serde::Deserializer::new(BufReader::new(reader)),
@@ -730,7 +772,8 @@ impl Worker {
         drop(evt.write);
         let cmd_w = transport::into_file(cmd.write.into_raw());
         let evt_r = transport::into_file(evt.read.into_raw());
-        let mut reader = EventReader::new(evt_r);
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let mut reader = EventReader::new(evt_r, Arc::clone(&abandoned));
         reader.startup = stderr.as_ref().and_then(|t| t.startup.clone());
         Ok(Self {
             proc: Proc::Owned(child),
@@ -739,6 +782,7 @@ impl Worker {
             stderr,
             shutdown_sent: None,
             killed: false,
+            abandoned,
         })
     }
 
@@ -877,6 +921,7 @@ impl Worker {
     pub fn kill(&mut self) {
         self.killed = true;
         self.proc.kill();
+        self.abandoned.store(true, Ordering::Relaxed);
     }
 
     /// Wait for the worker process to exit (after a Shutdown was sent).
@@ -1328,7 +1373,8 @@ impl Worker {
             let err_r = transport::into_file(errs[i].read.take_raw());
             let startup = Arc::new(StartupStderr::new(Arc::clone(seen)));
             let stderr = StderrTail::capture(err_r, Some(startup));
-            let mut reader = EventReader::new(evt_r);
+            let abandoned = Arc::new(AtomicBool::new(false));
+            let mut reader = EventReader::new(evt_r, Arc::clone(&abandoned));
             reader.startup = stderr.startup.clone();
             workers.push(Self {
                 proc: Proc::Reparented(tracked),
@@ -1337,6 +1383,7 @@ impl Worker {
                 stderr: Some(stderr),
                 shutdown_sent: None,
                 killed: false,
+                abandoned,
             });
         }
         Ok(workers)
@@ -1723,7 +1770,7 @@ mod tests {
     use std::io::{BufReader, Cursor, Read};
     use std::path::Path;
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -1735,6 +1782,8 @@ mod tests {
         let mut r = LimitedReader {
             inner: Cursor::new(vec![0u8; 1000]),
             budget: Arc::clone(&budget),
+            #[cfg(unix)]
+            abandon: None,
         };
         let mut sink = Vec::new();
         // read_to_end surfaces the cap as an error after exactly 10 bytes.
@@ -1763,6 +1812,8 @@ mod tests {
             let reader = LimitedReader {
                 inner: Cursor::new(bytes.clone()),
                 budget,
+                #[cfg(unix)]
+                abandon: None,
             };
             let mut de = rmp_serde::Deserializer::new(BufReader::new(reader));
             proto::Event::deserialize(&mut de)
@@ -1916,13 +1967,44 @@ mod tests {
     #[test]
     fn eof_before_and_after_the_first_event_reads_as_an_exit() {
         let pipe = transport::pipe().expect("pipe");
-        let mut reader = EventReader::new(transport::into_file(pipe.read.into_raw()));
+        let mut reader = EventReader::new(
+            transport::into_file(pipe.read.into_raw()),
+            Arc::new(AtomicBool::new(false)),
+        );
         drop(pipe.write);
         let err = format!("{:#}", reader.recv().unwrap_err());
         assert_eq!(err, "exited during startup, before sending any event");
         reader.received = true;
         let err = format!("{:#}", reader.recv().unwrap_err());
         assert_eq!(err, "its event pipe closed (the process exited)");
+    }
+
+    /// A killed worker's pipe can stay open (a process its test forked holds
+    /// the write end): once abandoned, the blocked reader returns an exit
+    /// instead of waiting for that process.
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_reader_returns_while_the_write_end_is_still_open() {
+        let pipe = transport::pipe().expect("pipe");
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let mut reader = EventReader::new(
+            transport::into_file(pipe.read.into_raw()),
+            Arc::clone(&abandoned),
+        );
+        reader.received = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(format!("{:#}", reader.recv().unwrap_err()));
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_err());
+        abandoned.store(true, Ordering::Relaxed);
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reader still blocked after abandon");
+        assert_eq!(err, "its event pipe closed (the process exited)");
+        drop(pipe.write); // held open until here, as the leftover process would
     }
 
     /// A worker that dies at startup (here: a fake interpreter that prints an

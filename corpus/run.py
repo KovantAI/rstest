@@ -142,6 +142,21 @@ print(json.dumps(out))
 """
 
 
+def _pytest_config(d):
+    """The pytest config file in directory `d`, by pytest's own lookup rules
+    (pytest.toml/.pytest.toml are pytest 9's), or None."""
+    for name in ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini"):
+        if (d / name).is_file():
+            return name
+    pyproject = d / "pyproject.toml"
+    if pyproject.is_file() and "pytest" in tomllib.loads(pyproject.read_text()).get("tool", {}):
+        return "pyproject.toml"
+    for name, section in (("tox.ini", "[pytest]"), ("setup.cfg", "[tool:pytest]")):
+        if (d / name).is_file() and section in (d / name).read_text():
+            return name
+    return None
+
+
 def _editable_dirs(python, env=None):
     """Directories the venv has installed editable (PEP 610 direct_url.json)."""
     from urllib.parse import unquote, urlparse
@@ -317,6 +332,27 @@ class Suite:
             log(f"  {self.name}: wrote compat conftest.py")
         log(f"  {self.name}: prepared")
 
+    def own_rootdir(self):
+        """Pin a config-less suite's rootdir to its own run dir. Without a
+        pytest config between the run dir and corpus/work/<suite>, pytest's
+        lookup climbs into the rstest repo: its pyproject became the suite's
+        config (pythonpath = ["python"]) and its root the rootdir, so pandas,
+        scikit-learn, jsonschema, more-itertools and freezegun shared one
+        repo-root .rstest_cache that grew to 170 MB and cost every run 1.5s+
+        (2026-11-03). An empty pytest.ini changes nothing else; both runners
+        see it. Mono projects are pinned by rstest's own monorepo mode."""
+        d = Path(self.cwd())
+        if self.mode == "mono" or not d.is_dir():
+            return
+        while not _pytest_config(d):
+            if d == self.dir or self.dir not in d.parents:
+                (Path(self.cwd()) / "pytest.ini").write_text(
+                    "# corpus/run.py: stop pytest's config lookup here (see Suite.own_rootdir)\n"
+                    "[pytest]\n"
+                )
+                return
+            d = d.parent
+
     def expected_editables(self):
         """Checkouts the install steps put in editable. A later step can
         silently swap one for a PyPI release when the checkout's version
@@ -397,6 +433,7 @@ class Suite:
             if xdist_workers is not None:
                 raise RuntimeError("xdist series is not supported in mono mode")
             return self.run_pytest_mono()
+        self.own_rootdir()
         snap = self.dir / ("pytest.json" if xdist_workers is None else "xdist.json")
         env = self.env()
         env["PYTHONPATH"] = str(HERE)  # recorder plugin
@@ -514,6 +551,7 @@ class Suite:
         ]
 
     def run_rstest(self, workers=None):
+        self.own_rootdir()
         snap = self.dir / "rstest.json"
         # Drop any prior snapshot: rstest exits non-zero and writes nothing on a
         # fatal error (e.g. no usable interpreter). A leftover file would pass

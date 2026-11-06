@@ -457,6 +457,7 @@ pub(super) fn run_post_gates(
         shard,
         changed_base,
         since_green,
+        since_green_narrowed,
         head,
         env_fp,
         history_commit,
@@ -505,6 +506,13 @@ pub(super) fn run_post_gates(
             .ok()
     };
     let mut fresh_index = false;
+    // covtool rewrites the index from only the tests that ran, so a subset run
+    // would erase the rest of the suite's coverage and --changed would skip
+    // them. --incremental snapshots the index before the run; snapshot it here
+    // otherwise, to fold the unrun tests back in below.
+    let own_prev_index =
+        (!passthrough && has_cov && !incremental_active).then(remote::load_local_cov_index);
+    let prev_index = own_prev_index.as_ref().unwrap_or(prev_index);
     if !passthrough && has_cov {
         let before = index_mtime();
         // JSON and TAP keep stdout a pure machine stream, so covtool's table
@@ -625,6 +633,50 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // --fail-on-leak: gate on any test that leaked a thread/fd. Settled before
+    // anything records this run as green (cache push, --since-green baseline).
+    // Printed on stderr so --output json/tap keep stdout a pure machine stream.
+    if cli.fail_on_leak && passthrough {
+        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
+        // deltas are measured. Warn instead of silently exiting 0 (matches the
+        // --quarantine passthrough behavior).
+        sink.warn(
+            "rstest: --fail-on-leak has no effect in passthrough mode \
+             (-s/--pdb/--co); ignoring",
+        );
+    } else if cli.fail_on_leak {
+        let leaks = doctor::detect_leaks(&outcome.run);
+        if leaks.is_empty() {
+            // Note the blind spot: the first test each worker runs is an
+            // unchecked warm-up (first-touch imports aren't a per-test leak),
+            // so a clean gate does not prove those tests are leak-free.
+            sink.warn(
+                "rstest: --fail-on-leak: no thread/fd leaks detected \
+                 (first test per worker runs as an unchecked warm-up)",
+            );
+        } else {
+            // Under --doctor the RESOURCE LEAKS section already listed these;
+            // only gate + summarize here to avoid printing the table twice.
+            if !doctor {
+                sink.warn(&format!(
+                    "\n{}",
+                    palette.bold_red("=========== resource leaks ===========")
+                ));
+                for l in leaks.iter().take(20) {
+                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
+                }
+            }
+            sink.warn(&format!(
+                "rstest: --fail-on-leak: {} test(s) leaked threads/fds; close them in \
+                 teardown, or contain one with @pytest.mark.isolated (runs it in a \
+                 forked process)",
+                leaks.len()
+            ));
+            if exitstatus == 0 {
+                exitstatus = 1;
+            }
+        }
+    }
     // Restore cached (--incremental, not-run) entries' def line from the
     // baseline before any artifact is written: report-json and the HTML report
     // read it, and coverage_skip::record below carries it to the next run.
@@ -712,6 +764,22 @@ pub(super) fn run_post_gates(
             }
         }
     }
+    // Every exit-code gate is settled here, before the green records below.
+    if duration_regressions > 0 {
+        sink.warn(&format!(
+            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
+            if duration_regressions > 1 { "s" } else { "" }
+        ));
+        if exitstatus == 0 {
+            exitstatus = 1;
+        }
+    }
+    if doctor_gate_failed {
+        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
+        if exitstatus == 0 {
+            exitstatus = 1;
+        }
+    }
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" && !replay {
@@ -756,7 +824,7 @@ pub(super) fn run_post_gates(
             // green once every shard of it has pushed one.
             // A dirty tree's green proves nothing about HEAD (as `after_run`).
             let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
-            let green = (outcome.exitstatus == 0
+            let green = (exitstatus == 0
                 && !dirty
                 && changed_base.is_none()
                 && !since_green
@@ -808,27 +876,17 @@ pub(super) fn run_post_gates(
         });
     }
     write_report_json(cli.report_json.as_deref(), &outcome.run, &run_meta)?;
-    if duration_regressions > 0 {
-        sink.warn(&format!(
-            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
-            if duration_regressions > 1 { "s" } else { "" }
-        ));
-        if exitstatus == 0 {
-            exitstatus = 1;
-        }
-    }
-    if doctor_gate_failed {
-        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
-        if exitstatus == 0 {
-            exitstatus = 1;
-        }
-    }
     // Incremental testing: a fully green run advances the baseline to the commit
     // we ran at, so the next --since-green run only re-selects changes made after
     // it. Recorded only on green (exitstatus 0) — a failing test keeps being
     // selected until it passes - and only on a clean tree, since a green dirty
     // tree says nothing about HEAD itself.
-    if since_green && exitstatus == 0 {
+    if since_green && exitstatus == 0 && since_green_narrowed {
+        sink.warn(
+            "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect); \
+             baseline not advanced",
+        );
+    } else if since_green && exitstatus == 0 {
         if let Some(h) = head {
             if !incremental::record_green_if_clean(
                 &std::env::current_dir()?,
@@ -843,11 +901,12 @@ pub(super) fn run_post_gates(
     // --incremental: persist this run's green set (tests that ran green + the
     // carried-forward cached passes) so the next run skips what stays unchanged.
     // Recorded regardless of exit status — failures simply aren't in the green
-    // set, so they re-run next time. Best-effort.
-    if incremental_active {
+    // set, so they re-run next time. Best-effort. Any other --cov run only
+    // carries the unrun tests' coverage forward.
+    if incremental_active || own_prev_index.is_some() {
         // Fold the prior coverage of every test this run did not execute
         // (cached ones, and the rest of the suite on a subset run) back into
-        // the index covtool just rewrote, so they stay skippable.
+        // the index covtool just rewrote, so they stay skippable / selectable.
         let cached = outcome.run.cached_nodeids();
         let ran: std::collections::HashSet<String> = outcome
             .run
@@ -863,55 +922,14 @@ pub(super) fn run_post_gates(
                 coverage_skip::write_index(&new_index);
             }
         }
-        coverage_skip::record(
-            scope,
-            config,
-            outcome.run.green_nodeids(),
-            outcome.run.green_linenos(),
-            &ran,
-        );
-    }
-    // --fail-on-leak: gate on any test that leaked a thread/fd. Printed on
-    // stderr so --output json/tap keep stdout a pure machine stream.
-    if cli.fail_on_leak && passthrough {
-        // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
-        // deltas are measured. Warn instead of silently exiting 0 (matches the
-        // --quarantine passthrough behavior).
-        sink.warn(
-            "rstest: --fail-on-leak has no effect in passthrough mode \
-             (-s/--pdb/--co); ignoring",
-        );
-    } else if cli.fail_on_leak {
-        let leaks = doctor::detect_leaks(&outcome.run);
-        if leaks.is_empty() {
-            // Note the blind spot: the first test each worker runs is an
-            // unchecked warm-up (first-touch imports aren't a per-test leak),
-            // so a clean gate does not prove those tests are leak-free.
-            sink.warn(
-                "rstest: --fail-on-leak: no thread/fd leaks detected \
-                 (first test per worker runs as an unchecked warm-up)",
+        if incremental_active {
+            coverage_skip::record(
+                scope,
+                config,
+                outcome.run.green_nodeids(),
+                outcome.run.green_linenos(),
+                &ran,
             );
-        } else {
-            // Under --doctor the RESOURCE LEAKS section already listed these;
-            // only gate + summarize here to avoid printing the table twice.
-            if !doctor {
-                sink.warn(&format!(
-                    "\n{}",
-                    palette.bold_red("=========== resource leaks ===========")
-                ));
-                for l in leaks.iter().take(20) {
-                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
-                }
-            }
-            sink.warn(&format!(
-                "rstest: --fail-on-leak: {} test(s) leaked threads/fds; close them in \
-                 teardown, or contain one with @pytest.mark.isolated (runs it in a \
-                 forked process)",
-                leaks.len()
-            ));
-            if exitstatus == 0 {
-                exitstatus = 1;
-            }
         }
     }
     // What changed since green: a green run records its environment, a red

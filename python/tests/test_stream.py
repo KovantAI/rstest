@@ -1081,6 +1081,20 @@ def test_logreport_fails_a_subtests_fixture_parent_with_failed_subtests():
     assert other["outcome"] == "passed"
 
 
+def test_logreport_leaves_parent_passed_on_pytest_without_core_subtests(monkeypatch):
+    # pytest < 9 has no `_pytest.subtests`: nothing to count, the parent's
+    # own outcome stands.
+    from _pytest.stash import Stash
+
+    failed_subtests_key = pytest.importorskip("_pytest.subtests").failed_subtests_key
+    p = _plugin()
+    p._config = SimpleNamespace(stash=Stash())
+    p._config.stash[failed_subtests_key] = {"t.py::a": 2}
+    monkeypatch.setitem(sys.modules, "_pytest.subtests", None)
+    p.pytest_runtest_logreport(mk_report("call", "passed"))
+    assert p._conn.sent[0][1]["outcome"] == "passed"
+
+
 def test_logreport_attaches_cpu_on_call(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()
@@ -1364,3 +1378,223 @@ def test_cause_of_without_a_project_frame_and_on_surprises(tmp_path):
     assert cause_of(excinfo, tmp_path) == {"exc": "ValueError", "message": "bad", "at": None}
     # Anything unexpected is no cause, never an exception in the worker.
     assert cause_of(object(), tmp_path) is None
+
+
+# ── a real session through StreamPlugin ────────────────────────────────────
+
+SESSION_SRC = """
+import socket
+import pytest
+
+
+@pytest.fixture(scope="module")
+def shared():
+    return 1
+
+
+def test_uses_module_fixture(shared):
+    pass
+
+
+def test_fails():
+    raise ValueError("no good")
+
+
+@pytest.mark.xfail(reason="known bug")
+def test_xfails():
+    assert False
+
+
+def test_reaches_out():
+    s = socket.socket()
+    s.setblocking(False)
+    try:
+        s.connect_ex(("198.51.100.7", 9))
+    finally:
+        s.close()
+"""
+
+
+def _real_session(tmp_path, monkeypatch, *, env=None):
+    import socket
+    import uuid
+
+    from rstest_worker._internal import runner_pytest
+
+    # NetGuard.install patches these for good: restore them after the test.
+    monkeypatch.setattr(socket, "getaddrinfo", socket.getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", socket.socket.connect_ex)
+    for key in ("RSTEST_NETWORK", "RSTEST_LEAKCHECK", "RSTEST_DOCTOR", "RSTEST_WORKER_ID"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    name = f"test_streamsess_{uuid.uuid4().hex[:8]}"
+    (tmp_path / f"{name}.py").write_text(SESSION_SRC)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    plugin = StreamPlugin(FakeConn())
+    registered: list[Any] = []
+
+    class Probe:
+        def pytest_sessionstart(self, session):
+            registered.append(session.config.pluginmanager.get_plugin("rstest-leakcheck"))
+
+    runner_pytest._pytest_main(
+        [str(tmp_path / f"{name}.py"), "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
+        plugins=[plugin, Probe()],
+    )
+    sys.modules.pop(name, None)
+    reports = {
+        (p["nodeid"].split("::", 1)[1], p["when"]): p for k, p in plugin._conn.sent if k == "report"
+    }
+    return plugin, reports, registered
+
+
+def test_session_failure_payload_carries_crash_and_cause(tmp_path, monkeypatch):
+    _, reports, _ = _real_session(tmp_path, monkeypatch)
+    failed = reports[("test_fails", "call")]
+    assert failed["outcome"] == "failed"
+    assert failed["crash"] == "ValueError: no good"
+    assert failed["cause"]["exc"] == "ValueError"
+    assert failed["cause"]["message"] == "no good"
+    # The raise inside the test module, not pytest's frames.
+    assert failed["cause"]["at"].endswith(".py:16")
+    xfailed = reports[("test_xfails", "call")]
+    assert xfailed["outcome"] == "skipped"
+    assert xfailed["xfail_reason"] == "known bug"
+    assert "cause" not in xfailed and "crash" not in xfailed
+    assert "crash" not in reports[("test_uses_module_fixture", "call")]
+
+
+def test_session_ships_module_scope_setup_costs(tmp_path, monkeypatch):
+    plugin, _, _ = _real_session(tmp_path, monkeypatch)
+    (costs,) = [p["costs"] for k, p in plugin._conn.sent if k == "scope_costs"]
+    assert len(costs) == 1
+    assert costs[0]["key"].endswith(".py")
+    assert costs[0]["count"] == 1
+    assert costs[0]["total"] >= 0
+
+
+def test_session_installs_network_recorder_and_leak_tracker_from_env(tmp_path, monkeypatch):
+    plugin, reports, registered = _real_session(
+        tmp_path, monkeypatch, env={"RSTEST_NETWORK": "record", "RSTEST_LEAKCHECK": "1"}
+    )
+    assert reports[("test_reaches_out", "teardown")]["network"] == ["198.51.100.7:9"]
+    assert "network" not in reports[("test_fails", "teardown")]
+    assert registered == [plugin._leaks]
+    assert plugin._leaks is not None
+
+
+def test_session_without_env_installs_neither(tmp_path, monkeypatch):
+    import socket
+
+    connect = socket.socket.connect
+    plugin, reports, registered = _real_session(tmp_path, monkeypatch)
+    assert socket.socket.connect is connect
+    assert plugin._net is None
+    assert registered == [None]
+    assert "network" not in reports[("test_reaches_out", "teardown")]
+
+
+# ── small helpers and branches ─────────────────────────────────────────────
+
+
+def test_collectreport_tells_the_orchestrator_a_lastfailed_file_recollected():
+    p = _plugin()
+    cache = {"cache/lastfailed": {"t.py": True}}
+    p._config = SimpleNamespace(cache=SimpleNamespace(get=lambda key, default: cache[key]))
+    ok = SimpleNamespace(
+        failed=False,
+        skipped=False,
+        nodeid="t.py",
+        result=[SimpleNamespace(nodeid="t.py::a"), SimpleNamespace(nodeid="t.py::b")],
+    )
+    p.pytest_collectreport(ok)
+    p.pytest_collectreport(SimpleNamespace(failed=False, skipped=False, nodeid="u.py", result=[]))
+    assert p._conn.sent == [("lf_recollected", {"path": "t.py", "ids": ["t.py::a", "t.py::b"]})]
+
+
+def test_warning_outside_a_test_without_config_keeps_the_raw_filename():
+    p = _plugin()  # before pytest_configure: no config yet
+    wm = _warning("early", filename="/abs/m.py", lineno=9)
+    p.pytest_warning_recorded(wm, "config", "", None)
+    (key,) = p._warnings
+    assert key[5] == "/abs/m.py:9"
+
+
+def test_disable_xdist_distribution_tolerates_a_config_without_options():
+    config = SimpleNamespace()
+    StreamPlugin._disable_xdist_distribution(config)
+    assert vars(config) == {}
+
+
+def test_crashline_falls_back_to_the_longrepr_text_then_nothing():
+    reprcrash = SimpleNamespace(longrepr=SimpleNamespace(reprcrash="/a.py:3: boom"))
+    assert stream._crashline(reprcrash) == "/a.py:3: boom"
+    long = "E" * 80
+    assert stream._crashline(SimpleNamespace(longrepr=long)) == "E" * 50
+    assert stream._crashline(SimpleNamespace()) == ""
+
+
+def test_spy_dynamic_fetches_skips_a_request_it_cannot_shadow():
+    class Frozen:
+        __slots__ = ()
+
+        def getfixturevalue(self, name):
+            return name
+
+    assert stream._spy_dynamic_fetches(Frozen(), [False]) is False
+    assert stream._spy_dynamic_fetches(SimpleNamespace(), [False]) is False
+
+
+def _drive_fixture_setup(p, fd, request):
+    gen = p.pytest_fixture_setup(fd, request=request)
+    next(gen)
+    with pytest.raises(StopIteration):
+        gen.send("value")
+
+
+def test_module_and_class_fixture_setups_are_costed_per_scope_node(monkeypatch):
+    clock = iter([10.0, 10.5, 20.0, 20.25, 30.0, 31.0])
+    monkeypatch.setattr("time.perf_counter", lambda: next(clock))
+    p = _plugin()  # doctor off: only wider scopes are timed
+    mod = SimpleNamespace(node=SimpleNamespace(nodeid="t.py"))
+    _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
+    _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
+    _drive_fixture_setup(p, SimpleNamespace(argname="cfg", scope="class"), mod)
+    # Not timed at all: function scope, and a scope with no node to charge.
+    _drive_fixture_setup(p, SimpleNamespace(argname="f", scope="function"), mod)
+    p._add_scope_cost(SimpleNamespace(argname="x", scope="module"), SimpleNamespace(), 1.0)
+    assert p._scope_costs == {"t.py": {"db": [2, 0.75], "cfg": [1, 1.0]}}
+    p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    # Two fixtures on one scope: setups counted by the most-set-up one.
+    assert p._conn.sent == [
+        ("scope_costs", {"costs": [{"key": "t.py", "total": 1.75, "count": 2}]})
+    ]
+
+
+def test_logreport_crash_line_for_string_and_structured_longreprs():
+    p = _plugin()
+    p.pytest_runtest_logreport(mk_report("call", "failed", failed=True, longrepr="x" * 1200))
+    assert p._conn.sent[-1][1]["crash"] == "x" * 1000
+    structured = SimpleNamespace(reprcrash=SimpleNamespace(message="AssertionError: nope"))
+    p.pytest_runtest_logreport(mk_report("call", "failed", failed=True, longrepr=structured))
+    assert p._conn.sent[-1][1]["crash"] == "AssertionError: nope"
+    p.pytest_runtest_logreport(
+        mk_report("call", "failed", failed=True, longrepr=SimpleNamespace(reprcrash=None))
+    )
+    assert "crash" not in p._conn.sent[-1][1]
+
+
+def test_logreport_ships_no_rerun_and_cause_tags():
+    p = _plugin()
+    report = mk_report("call", "failed", failed=True, longrepr="boom")
+    report._rstest_no_rerun = True
+    report._rstest_cause = {"exc": "E", "message": "m", "at": None}
+    p.pytest_runtest_logreport(report)
+    payload = p._conn.sent[-1][1]
+    assert payload["no_rerun"] is True
+    assert payload["cause"] == {"exc": "E", "message": "m", "at": None}
+    p.pytest_runtest_logreport(mk_report("call", "failed", failed=True, longrepr="boom"))
+    assert "no_rerun" not in p._conn.sent[-1][1]
+    assert "cause" not in p._conn.sent[-1][1]

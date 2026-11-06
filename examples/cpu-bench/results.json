@@ -1,7 +1,7 @@
 {
  "sweep": {
   "environment": {
-   "date": "2026-09-30",
+   "date": "2026-11-03",
    "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
    "machine": "arm64",
    "cpu": "Apple M4 Max (10 performance + 4 efficiency cores)",
@@ -9,57 +9,57 @@
    "python": "3.13.13",
    "pytest": "9.1.1",
    "pytest_xdist": "3.8.0",
-   "rstest": "rstest 0.8.0",
-   "rstest_commit": "caa9bcc",
-   "load_1m_at_start": 2.45
+   "rstest": "rstest 0.10.0",
+   "rstest_commit": "5385822",
+   "load_1m_at_start": 31.18
   },
   "repeat": 5,
   "marker": null,
   "baseline": {
-   "median": 15.16,
-   "min": 15.0,
-   "max": 15.23,
+   "median": 15.61,
+   "min": 15.46,
+   "max": 15.92,
    "walls": [
-    15.077,
-    15.004,
-    15.16,
-    15.194,
-    15.227
+    15.915,
+    15.833,
+    15.458,
+    15.614,
+    15.477
    ]
   },
   "points": [
    {
     "workers": 1,
     "rstest": {
-     "median": 15.31,
-     "min": 15.12,
-     "max": 15.42,
+     "median": 15.95,
+     "min": 15.79,
+     "max": 15.96,
      "walls": [
-      15.122,
-      15.315,
-      15.416,
-      15.306,
-      15.314
+      15.791,
+      15.956,
+      15.947,
+      15.955,
+      15.804
      ],
-     "speedup": 0.99,
-     "efficiency": 0.99,
+     "speedup": 0.98,
+     "efficiency": 0.98,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 15.37,
-     "min": 15.29,
-     "max": 15.47,
+     "median": 15.93,
+     "min": 15.82,
+     "max": 15.94,
      "walls": [
-      15.328,
-      15.288,
-      15.366,
-      15.427,
-      15.468
+      15.94,
+      15.886,
+      15.937,
+      15.927,
+      15.819
      ],
-     "speedup": 0.99,
-     "efficiency": 0.99,
+     "speedup": 0.98,
+     "efficiency": 0.98,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -68,35 +68,35 @@
    {
     "workers": 2,
     "rstest": {
-     "median": 7.82,
-     "min": 7.81,
-     "max": 7.88,
+     "median": 8.17,
+     "min": 8.15,
+     "max": 8.2,
      "walls": [
-      7.815,
-      7.817,
-      7.805,
-      7.879,
-      7.837
+      8.198,
+      8.19,
+      8.16,
+      8.168,
+      8.15
      ],
-     "speedup": 1.94,
-     "efficiency": 0.97,
+     "speedup": 1.91,
+     "efficiency": 0.96,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 8.02,
-     "min": 7.87,
-     "max": 8.14,
+     "median": 8.17,
+     "min": 8.15,
+     "max": 8.21,
      "walls": [
-      8.02,
-      7.875,
-      8.136,
-      8.022,
-      7.974
+      8.179,
+      8.169,
+      8.205,
+      8.149,
+      8.157
      ],
-     "speedup": 1.89,
-     "efficiency": 0.95,
+     "speedup": 1.91,
+     "efficiency": 0.96,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -105,35 +105,35 @@
    {
     "workers": 4,
     "rstest": {
-     "median": 4.04,
-     "min": 4.03,
-     "max": 4.07,
+     "median": 4.23,
+     "min": 4.22,
+     "max": 4.27,
      "walls": [
-      4.03,
-      4.059,
-      4.034,
-      4.072,
-      4.042
+      4.268,
+      4.221,
+      4.231,
+      4.244,
+      4.226
      ],
-     "speedup": 3.75,
-     "efficiency": 0.94,
+     "speedup": 3.69,
+     "efficiency": 0.92,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 4.21,
-     "min": 4.21,
-     "max": 4.25,
+     "median": 4.25,
+     "min": 4.22,
+     "max": 4.34,
      "walls": [
-      4.214,
       4.226,
-      4.252,
-      4.212,
-      4.206
+      4.247,
+      4.218,
+      4.343,
+      4.308
      ],
-     "speedup": 3.6,
-     "efficiency": 0.9,
+     "speedup": 3.67,
+     "efficiency": 0.92,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -142,35 +142,35 @@
    {
     "workers": 8,
     "rstest": {
-     "median": 2.24,
-     "min": 2.21,
-     "max": 2.43,
+     "median": 2.57,
+     "min": 2.46,
+     "max": 2.62,
      "walls": [
-      2.207,
-      2.435,
-      2.254,
-      2.235,
-      2.236
+      2.46,
+      2.525,
+      2.616,
+      2.62,
+      2.569
      ],
-     "speedup": 6.77,
-     "efficiency": 0.85,
+     "speedup": 6.07,
+     "efficiency": 0.76,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.48,
-     "min": 2.44,
-     "max": 2.52,
+     "median": 2.59,
+     "min": 2.55,
+     "max": 2.63,
      "walls": [
-      2.479,
-      2.482,
-      2.494,
-      2.521,
-      2.438
+      2.629,
+      2.59,
+      2.619,
+      2.554,
+      2.549
      ],
-     "speedup": 6.11,
-     "efficiency": 0.76,
+     "speedup": 6.03,
+     "efficiency": 0.75,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -179,35 +179,35 @@
    {
     "workers": 10,
     "rstest": {
-     "median": 2.0,
-     "min": 2.0,
-     "max": 2.07,
+     "median": 2.32,
+     "min": 2.3,
+     "max": 2.37,
      "walls": [
-      2.025,
-      2.003,
-      1.996,
-      1.998,
-      2.067
+      2.374,
+      2.3,
+      2.347,
+      2.31,
+      2.322
      ],
-     "speedup": 7.58,
-     "efficiency": 0.76,
+     "speedup": 6.73,
+     "efficiency": 0.67,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.24,
-     "min": 2.24,
-     "max": 2.27,
+     "median": 2.35,
+     "min": 2.32,
+     "max": 2.42,
      "walls": [
-      2.266,
-      2.239,
-      2.244,
-      2.237,
-      2.266
+      2.403,
+      2.416,
+      2.351,
+      2.323,
+      2.319
      ],
-     "speedup": 6.77,
-     "efficiency": 0.68,
+     "speedup": 6.64,
+     "efficiency": 0.66,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -216,35 +216,35 @@
    {
     "workers": 14,
     "rstest": {
-     "median": 1.76,
-     "min": 1.74,
-     "max": 1.76,
+     "median": 2.06,
+     "min": 2.04,
+     "max": 2.16,
      "walls": [
-      1.764,
-      1.759,
-      1.76,
-      1.743,
-      1.754
+      2.05,
+      2.061,
+      2.163,
+      2.065,
+      2.042
      ],
-     "speedup": 8.61,
-     "efficiency": 0.62,
+     "speedup": 7.58,
+     "efficiency": 0.54,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.08,
-     "min": 2.06,
-     "max": 2.1,
+     "median": 2.22,
+     "min": 2.22,
+     "max": 2.29,
      "walls": [
-      2.103,
-      2.073,
-      2.06,
-      2.101,
-      2.082
+      2.224,
+      2.216,
+      2.229,
+      2.219,
+      2.285
      ],
-     "speedup": 7.29,
-     "efficiency": 0.52,
+     "speedup": 7.03,
+     "efficiency": 0.5,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -252,9 +252,9 @@
    }
   ],
   "commands": {
-   "pytest": "python -m pytest -q -p recorder tests",
-   "rstest": "rstest -n 14 -q --python python --report-json rstest-14.json tests",
-   "xdist": "python -m pytest -q -p recorder -n 14 tests"
+   "pytest": "../../corpus/work/scikit-learn/venv/bin/python -m pytest -q -p recorder tests",
+   "rstest": "../../target/release/rstest -n 14 -q --python ../../corpus/work/scikit-learn/venv/bin/python --report-json rstest-14.json tests",
+   "xdist": "../../corpus/work/scikit-learn/venv/bin/python -m pytest -q -p recorder -n 14 tests"
   }
  },
  "memory": {

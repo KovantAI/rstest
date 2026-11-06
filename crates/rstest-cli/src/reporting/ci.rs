@@ -735,4 +735,199 @@ mod tests {
         // Empty flaky => early return before any env/agent interaction.
         buildkite_flaky_annotate(&mut Sink::captured().0, &report::Run::default());
     }
+
+    #[cfg(unix)]
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rstest-ci-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    /// One failing test at `a.py`, for checking the path prefix only.
+    #[cfg(unix)]
+    fn one_failure() -> report::Run {
+        let mut run = report::Run::default();
+        run.record(
+            Some(0),
+            report_of("a.py::t", "call", "failed", None, Some("boom")),
+        );
+        run
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn annotation_prefix_resolves_repo_root_from_ci_env_git_or_mono() {
+        // `cache::init` anchors the rootdir for a real run; unset in unit
+        // tests, so the cwd stands in for it.
+        if crate::cache::rootdir().is_some() {
+            return;
+        }
+        use crate::test_env::{remove_var, set_cwd, set_var};
+        let held = crate::test_env::lock();
+        let base = temp("prefix");
+        let ws = base.join("ws");
+        let proj = ws.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let _cwd = set_cwd(&held, &proj);
+        let _mono = set_var(&held, "RSTEST_MONO_PROJECT", "mono");
+        let _az = remove_var(&held, "BUILD_SOURCESDIRECTORY");
+
+        // GITHUB_WORKSPACE holding the rootdir wins; the mono prefix is not
+        // stacked on top.
+        let gh = set_var(&held, "GITHUB_WORKSPACE", &ws);
+        let (mut sink, cap) = Sink::captured();
+        print_github_annotations(&mut sink, &one_failure());
+        assert_eq!(
+            cap.out(),
+            "::error file=proj/a.py,title=a.py%3A%3At::boom\n"
+        );
+        drop(gh);
+
+        // Azure's BUILD_SOURCESDIRECTORY plays the same role.
+        let gh = remove_var(&held, "GITHUB_WORKSPACE");
+        let az = set_var(&held, "BUILD_SOURCESDIRECTORY", &ws);
+        let (mut sink, cap) = Sink::captured();
+        print_azure_annotations(&mut sink, &one_failure());
+        assert_eq!(
+            cap.out(),
+            "##vso[task.logissue type=error;sourcepath=proj/a.py]a.py::t: boom\n"
+        );
+        drop(az);
+
+        // No CI root and no `.git` above: the monorepo prefix applies.
+        let (mut sink, cap) = Sink::captured();
+        print_github_annotations(&mut sink, &one_failure());
+        assert_eq!(
+            cap.out(),
+            "::error file=mono/a.py,title=a.py%3A%3At::boom\n"
+        );
+        drop(gh);
+
+        // A workspace that does not contain the rootdir is ignored; the git
+        // toplevel is used instead.
+        std::fs::create_dir_all(ws.join(".git")).unwrap();
+        let _gh = set_var(&held, "GITHUB_WORKSPACE", base.join("elsewhere"));
+        let (mut sink, cap) = Sink::captured();
+        print_github_annotations(&mut sink, &one_failure());
+        assert_eq!(
+            cap.out(),
+            "::error file=proj/a.py,title=a.py%3A%3At::boom\n"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mono_prefix_ignores_empty_value() {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        {
+            let _m = set_var(&held, "RSTEST_MONO_PROJECT", "");
+            assert_eq!(mono_prefix(), None);
+        }
+        {
+            let _m = set_var(&held, "RSTEST_MONO_PROJECT", "pkg/a");
+            assert_eq!(mono_prefix().as_deref(), Some("pkg/a"));
+        }
+        let _m = remove_var(&held, "RSTEST_MONO_PROJECT");
+        assert_eq!(mono_prefix(), None);
+    }
+
+    /// `dir` ahead of the current PATH. Replacing PATH outright would hide
+    /// `git` from sibling tests that spawn it without the lock.
+    #[cfg(unix)]
+    fn path_with(dir: &Path) -> std::ffi::OsString {
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&rest)))
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn flaky_run() -> report::Run {
+        let mut run = report::Run::default();
+        for (id, n) in [("a.py::one", 1), ("b.py::two", 3)] {
+            run.record(Some(0), report_of(id, "call", "passed", None, None));
+            run.mark_flaky(id.into(), n);
+        }
+        run
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildkite_pipes_a_flaky_markdown_annotation_to_the_agent() {
+        use crate::test_env::{remove_var, set_var};
+        let held = crate::test_env::lock();
+        let dir = temp("bk");
+        let got = dir.join("stdin.md");
+        let args = dir.join("args.txt");
+        crate::test_env::write_executable(
+            &dir.join("buildkite-agent"),
+            &format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\n/bin/cat > '{}'\n",
+                args.display(),
+                got.display()
+            ),
+        );
+        let _path = set_var(&held, "PATH", path_with(&dir));
+
+        // Off Buildkite: never runs the agent.
+        {
+            let _bk = remove_var(&held, "BUILDKITE");
+            let (mut sink, cap) = Sink::captured();
+            buildkite_flaky_annotate(&mut sink, &flaky_run());
+            assert!(!got.exists());
+            assert_eq!(cap.err(), "");
+        }
+        {
+            let _bk = set_var(&held, "BUILDKITE", "");
+            buildkite_flaky_annotate(&mut Sink::captured().0, &flaky_run());
+            assert!(!got.exists(), "empty BUILDKITE means off");
+        }
+
+        let _bk = set_var(&held, "BUILDKITE", "true");
+        let (mut sink, cap) = Sink::captured();
+        buildkite_flaky_annotate(&mut sink, &flaky_run());
+        assert_eq!(cap.err(), "");
+        assert_eq!(
+            std::fs::read_to_string(&args).unwrap(),
+            "annotate --style warning --context rstest-flaky\n"
+        );
+        let md = std::fs::read_to_string(&got).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            md,
+            "**Flaky tests** (passed only after reruns):\n\n\
+             - `a.py::one` — 1 rerun\n\
+             - `b.py::two` — 3 reruns\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn buildkite_missing_agent_warns_and_carries_on() {
+        use crate::test_env::set_var;
+        let held = crate::test_env::lock();
+        // Only a non-executable stand-in on PATH: spawning fails.
+        let empty = temp("bk-empty");
+        std::fs::write(empty.join("buildkite-agent"), "").unwrap();
+        let _path = set_var(&held, "PATH", path_with(&empty));
+        // Sibling tests spawn `git` without the lock: it must stay on PATH.
+        assert!(std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok());
+        let _bk = set_var(&held, "BUILDKITE", "1");
+        let (mut sink, cap) = Sink::captured();
+        buildkite_flaky_annotate(&mut sink, &flaky_run());
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(
+            cap.err()
+                .starts_with("rstest: skipping Buildkite flaky annotation (buildkite-agent: "),
+            "{}",
+            cap.err()
+        );
+    }
 }

@@ -324,4 +324,139 @@ mod tests {
             "{errs:?}"
         );
     }
+
+    #[test]
+    fn out_of_range_shards_are_caught() {
+        // k=0 and k>n are not valid shard numbers; 1/2 and 2/2 are still
+        // missing, since nothing supplied them.
+        let s = vec![shard(0, 2, "h", 2, &["a"]), shard(3, 2, "h", 2, &["b"])];
+        let mut errs = verify(&s);
+        errs.sort();
+        assert_eq!(
+            errs,
+            [
+                "missing shard 1/2",
+                "missing shard 2/2",
+                "shard 0/2 is out of range",
+                "shard 3/2 is out of range",
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_messages_for_overlap_and_drop() {
+        // 4 overlapping ids (only 3 sampled, in sorted order) and one drop.
+        let s = vec![
+            shard(1, 2, "h", 7, &["a", "b", "c", "d"]),
+            shard(2, 2, "h", 7, &["a", "b", "c", "d", "e"]),
+        ];
+        assert_eq!(
+            verify(&s),
+            [
+                "4 test(s) ran on more than one shard, e.g. a, b, c",
+                "shards ran 5 of 7 collected tests; 2 were dropped (ran on no shard)",
+            ]
+        );
+        assert_eq!(sample(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn each_mismatched_meta_field_flags_divergence() {
+        // n, size and hash each independently break agreement.
+        for other in [
+            shard(2, 3, "h", 4, &["c", "d"]),
+            shard(2, 2, "h", 5, &["c", "d"]),
+            shard(2, 2, "x", 4, &["c", "d"]),
+        ] {
+            let errs = verify(&[shard(1, 2, "h", 4, &["a", "b"]), other]);
+            assert_eq!(errs.len(), 1, "{errs:?}");
+            assert!(
+                errs[0].starts_with("shard.2.json: disagrees on the collection")
+                    && errs[0].contains("differ from shard.1.json"),
+                "{errs:?}"
+            );
+        }
+    }
+
+    fn write_report(dir: &std::path::Path, k: usize, ids: &[&str]) -> PathBuf {
+        let tests: serde_json::Map<String, serde_json::Value> = ids
+            .iter()
+            .map(|id| (id.to_string(), serde_json::json!({"call": "passed"})))
+            .collect();
+        let doc = serde_json::json!({
+            "meta": {"shard": {"k": k, "n": 2, "collection_hash": "h", "collection_size": 3}},
+            "tests": tests,
+        });
+        let p = dir.join(format!("shard{k}.json"));
+        std::fs::write(&p, doc.to_string()).unwrap();
+        p
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rstest-shardverify-{tag}-{}-{}",
+            std::process::id(),
+            crate::time::now_epoch_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn run_shard_verify_reports_complete_coverage_and_exits_zero() {
+        let dir = temp_dir("ok");
+        let reports = [
+            write_report(&dir, 2, &["c"]),
+            write_report(&dir, 1, &["a", "b"]),
+        ];
+        let (mut sink, cap) = Sink::captured();
+        let code = run_shard_verify(&mut sink, &reports).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0);
+        assert_eq!(
+            cap.out(),
+            "ok shard-verify: 2 shards cover all 3 collected tests (no drops, no overlap)\n"
+        );
+        assert_eq!(cap.err(), "");
+    }
+
+    #[test]
+    fn run_shard_verify_lists_problems_on_stderr_and_exits_one() {
+        let dir = temp_dir("bad");
+        let reports = [write_report(&dir, 1, &["a"])];
+        let (mut sink, cap) = Sink::captured();
+        let code = run_shard_verify(&mut sink, &reports).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 1);
+        assert_eq!(cap.out(), "FAILED shard-verify: coverage is INCOMPLETE\n");
+        assert_eq!(
+            cap.err(),
+            "  - missing shard 2/2\n  - shards ran 1 of 3 collected tests; 2 were dropped (ran on no shard)\n"
+        );
+    }
+
+    #[test]
+    fn run_shard_verify_fails_loudly_on_unreadable_or_unstamped_files() {
+        let dir = temp_dir("err");
+        let missing = dir.join("nope.json");
+        let (mut sink, _cap) = Sink::captured();
+        let err = format!(
+            "{:#}",
+            run_shard_verify(&mut sink, std::slice::from_ref(&missing)).unwrap_err()
+        );
+        assert!(
+            err.starts_with(&format!("reading {}", missing.display())),
+            "{err}"
+        );
+        let plain = dir.join("plain.json");
+        std::fs::write(&plain, r#"{"tests":{}}"#).unwrap();
+        let err = run_shard_verify(&mut sink, std::slice::from_ref(&plain))
+            .unwrap_err()
+            .to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.starts_with(&format!("{}: no shard metadata", plain.display())),
+            "{err}"
+        );
+    }
 }

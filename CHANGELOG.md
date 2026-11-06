@@ -7,6 +7,14 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **The duration cache stays fast on large suites.** A run parsed
+  `.rstest_cache/durations.json` up to four times and checked each entry's
+  source file separately, and entries left by an earlier rootdir were never
+  dropped. On pandas (193k tests) the file reached 112 MB and cost about 3s
+  per run before any test started. rstest now parses it once per run, checks
+  each source file once, and drops entries recorded under another rootdir, so
+  the file shrinks back on the next run (pandas: 55 MB).
+
 - **`migrate-check` finds the polluter from a subdirectory.** The polluter
   bisect passed rootdir-relative file paths to child runs, which resolved
   them from the current directory. From `tests/` it selected
