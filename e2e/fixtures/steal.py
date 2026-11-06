@@ -4,8 +4,12 @@
 # (steal ON) the worker that finishes the tiny file steals from this file's
 # own_queue, spreading these 40 items across >=2 workers. With --dist loadfile
 # (steal OFF) file affinity keeps all 40 on their single collecting worker.
+# Each item takes 50ms (2s total) so a thief that boots late (steal_conftest.py,
+# or a loaded CI runner) still finds items left: instant items let the owner
+# drain all 40 before the thief is ready, and nothing is left to steal.
 import json
 import os
+import time
 
 import pytest
 
@@ -20,4 +24,4 @@ def _log_worker():
 @pytest.mark.parametrize("i", range(40))
 def test_many(i):
     _log_worker()
-    assert True
+    time.sleep(0.05)

@@ -619,6 +619,30 @@ def test_editable_dirs_reads_pep610_direct_url(tmp_path):
     assert (tmp_path / "plain").resolve() not in run._editable_dirs(sys.executable, env)
 
 
+def test_own_rootdir_stops_config_lookup_at_the_suite(tmp_path):
+    # pandas/scikit-learn/... had no pytest config, so pytest climbed into the
+    # rstest repo: its pyproject became their config and its root their shared
+    # .rstest_cache (170 MB, +1.5s a run).
+    def suite(files, mode="git"):
+        s = Suite("x", {"mode": mode, "package": "p"}, "w.whl", "rstest")
+        s.dir = tmp_path / f"case{len(list(tmp_path.iterdir()))}"
+        s.src = s.dir / "src"
+        s.src.mkdir(parents=True)
+        for rel, text in files.items():
+            (s.dir / rel).write_text(text)
+        s.own_rootdir()
+        return Path(s.cwd()) / "pytest.ini"
+
+    assert suite({}).read_text().endswith("[pytest]\n")  # config-less: pinned
+    assert suite({}, mode="pyargs").exists()  # runs from the suite dir
+    assert suite({"src/pyproject.toml": "[project]\nname = 'x'\n"}).exists()  # no pytest table
+    assert not suite({"src/pyproject.toml": "[tool.pytest.ini_options]\n"}).exists()
+    assert not suite({"src/tox.ini": "[pytest]\n"}).exists()
+    assert not suite({"src/setup.cfg": "[tool:pytest]\n"}).exists()
+    assert not suite({"src/pytest.toml": "[pytest]\n"}).exists()  # pytest 9
+    assert not suite({"pytest.ini": "[pytest]\n"}).exists()  # parent, inside the suite
+
+
 def test_dateutil_install_steps_keep_editable_checkout(monkeypatch):
     # A tagless shallow clone versions as 0.1.devN under setuptools_scm, so
     # freezegun's `python-dateutil>=2.7` swapped the editable checkout for PyPI's
