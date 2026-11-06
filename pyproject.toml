@@ -75,7 +75,7 @@ dev = [
     # corpus/procmem.py's optional memory sampler; ty resolves it from .venv.
     "psutil>=5",
     # e2e/personas: the persona specs are Gherkin features bound with pytest-bdd.
-    "pytest-bdd>=9",
+    "pytest-bdd>=9.0.1",
 ]
 
 [tool.ruff]

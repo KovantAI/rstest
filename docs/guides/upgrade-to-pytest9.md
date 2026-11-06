@@ -166,6 +166,10 @@ The 9.1 → 9.2 delta:
 3. A `-c` path that doesn't exist is a usage error, and plugin import
    failures exit 4 or 3 instead of 1 (see the
    [behavioral changes](#behavioral-changes-the-w-probe-wont-catch)).
+4. Plugins that reach into pytest internals need a 9.2-ready release:
+   pytest-bdd 9.0.1 and pytest-benchmark 5.3.1 or newer. pytest-forked
+   1.7.5 fails every forked test on 9.2; its fix is
+   [pending upstream](https://github.com/pytest-dev/pytest-forked/pull/112).
 
 9.2 also starts the `PytestRemovedIn10Warning` cycle for module-, package-
 and session-scoped fixtures defined as instance methods on a test class,

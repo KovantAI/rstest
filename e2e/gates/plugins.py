@@ -776,6 +776,10 @@ def gate_pytest_forked(g, args, binary):
         and "test_fk.py::test_segv FAILED" in r.stdout
         and "CRASHED with signal" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-600:],
+        # pytest-forked 1.7.5 can't marshal pytest 9.2's TestReport._id, so
+        # every forked child exits 3, under plain pytest too. Fix pending
+        # upstream: https://github.com/pytest-dev/pytest-forked/pull/112
+        known_bug=True,
     )
 
 
@@ -1091,9 +1095,9 @@ def gate_pytest_httpserver(g, args, binary):
 
 def gate_pytest_bdd(g, args, binary):
     print("== pytest-bdd (.feature-generated items per worker) ==")
-    # ponytail: pytest-bdd 9.0.0 fails here with "FixtureManager object has no
-    # attribute '_arg2node2fixturedefs'"; cap at 8.x until a fixed release.
-    gb = _plugin_gate(binary, args, "-bdd", ["pytest-bdd<9"])
+    # pytest-bdd 9.0.0 reads FixtureManager internals pytest 9.2 renamed;
+    # 9.0.1 is the first release that runs on 9.2.
+    gb = _plugin_gate(binary, args, "-bdd", ["pytest-bdd>=9.0.1"])
     gb.write(
         "bd/add.feature",
         "Feature: calc\n"
