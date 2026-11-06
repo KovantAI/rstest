@@ -1108,9 +1108,11 @@ mod tests {
     /// A repo-rooted scope with PATH, `$VIRTUAL_ENV` and uv's install dir all
     /// pointed at empty places, so only what the test plants is discoverable.
     #[cfg(unix)]
-    fn isolated<T>(f: impl FnOnce(&crate::test_env::Held, &Path) -> T) -> T {
+    fn isolated<T>(f: impl FnOnce(&crate::test_env::Held, &Path, &std::ffi::OsStr) -> T) -> T {
         use crate::test_env::{remove_var, set_var};
         let held = crate::test_env::lock();
+        // Read under the lock: a sibling may be shimming PATH right now.
+        let real_path = std::env::var_os("PATH").unwrap_or_default();
         let base = temp("iso");
         std::fs::create_dir_all(base.join(".git")).unwrap();
         std::fs::create_dir_all(base.join("empty")).unwrap();
@@ -1120,7 +1122,7 @@ mod tests {
             let _v = remove_var(&held, "VIRTUAL_ENV");
             // Positive probes persist; keep them out of the user's cache.
             let _c = set_var(&held, "RSTEST_CACHE_DIR", base.join("cache"));
-            f(&held, &base)
+            f(&held, &base, &real_path)
         };
         let _ = std::fs::remove_dir_all(&base);
         out
@@ -1129,8 +1131,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn explicit_python_errors_name_the_path_and_reason() {
-        let real_path = std::env::var_os("PATH").unwrap_or_default();
-        isolated(|held, scope| {
+        isolated(|held, scope, real_path| {
             let missing = scope.join("nope/python");
             let err = super::resolve(scope, Some(missing.to_str().unwrap()))
                 .unwrap_err()
@@ -1153,7 +1154,7 @@ mod tests {
             // An explicit version request: no "pass --python" hint. Probed
             // on the real PATH: a bare name's probe is memoized process-wide,
             // so a fake PATH here would poison it for other tests.
-            let _p = crate::test_env::set_var(held, "PATH", &real_path);
+            let _p = crate::test_env::set_var(held, "PATH", real_path);
             let err = super::resolve(scope, Some("3.1")).unwrap_err().to_string();
             assert!(
                 err.starts_with("No interpreter satisfied '3.1'. Tried:\n"),
@@ -1166,8 +1167,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn python_version_file_errors_name_the_pin_file() {
-        let real_path = std::env::var_os("PATH").unwrap_or_default();
-        isolated(|held, scope| {
+        isolated(|held, scope, real_path| {
             let pin = scope.join(".python-version");
             let sub = scope.join("pkg");
             std::fs::create_dir_all(&sub).unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
                 )
             );
             // Pinned to an unsatisfiable version (real PATH, see above).
-            let _p = crate::test_env::set_var(held, "PATH", &real_path);
+            let _p = crate::test_env::set_var(held, "PATH", real_path);
             std::fs::write(&pin, "3.1\n").unwrap();
             let err = super::resolve(&sub, None).unwrap_err().to_string();
             assert!(
@@ -1209,14 +1209,9 @@ mod tests {
     #[test]
     fn unrunnable_reason_tells_missing_from_broken() {
         use super::{on_path, unrunnable_reason};
-        let real_path = std::env::var_os("PATH").unwrap_or_default();
-        isolated(|held, scope| {
+        isolated(|_, scope, _| {
             let bin = scope.join("empty");
-            {
-                // The writer shells out to chmod, which needs the real PATH.
-                let _p = crate::test_env::set_var(held, "PATH", &real_path);
-                crate::test_env::write_executable(&bin.join("python3.99"), "#!/bin/sh\nexit 1\n");
-            }
+            crate::test_env::write_executable(&bin.join("python3.99"), "#!/bin/sh\nexit 1\n");
             assert!(on_path(Path::new("python3.99")));
             assert!(!on_path(Path::new("python3.98")));
             assert_eq!(
@@ -1246,7 +1241,7 @@ mod tests {
     #[test]
     fn skipped_project_venv_reports_the_unused_dotvenv() {
         use super::skipped_project_venv;
-        isolated(|_, repo| {
+        isolated(|_, repo, _| {
             let scope = repo.join("a/b");
             std::fs::create_dir_all(&scope).unwrap();
             // Nothing to skip without a project venv.
