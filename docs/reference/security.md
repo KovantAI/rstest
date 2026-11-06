@@ -55,14 +55,14 @@ ships a `SHA256SUMS` file.
 
 ## Vendored pytest
 
-rstest ships an **unmodified, vendored copy of pytest** (currently **9.1.1**)
+rstest ships an **unmodified, vendored copy of pytest** (currently **9.2.0**)
 inside the `rstest_worker._vendor` package. It sits at pytest's usual
 `pytest` / `_pytest` import paths so plugins keep class identity with the real
 library. Provenance and the update procedure are documented in
 [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md);
 licensing is in [License](license.md#vendored-software). Key points:
 
-- The vendored tree is copied **verbatim** from the pytest 9.1.1 PyPI wheel.
+- The vendored tree is copied **verbatim** from the pytest 9.2.0 PyPI wheel.
   Local modifications inside the vendored directories are forbidden by policy:
   rstest replaces orchestration, not pytest semantics.
 - There is **one** vendored core, tracked forward. Adopting rstest adopts
@@ -97,9 +97,9 @@ a security release is a release.
 ### Re-vendor history
 
 **Why this table is short.** It records changes to the *vendored pytest*, not
-rstest releases. pytest has been on 9.1.1 since rstest 0.1.0 (2026-06-23), so
-there has been nothing to re-vendor since: a short table here means the core
-has been stable, not that the docs are stale. For rstest's own release cadence
+rstest releases. pytest stayed on 9.1.1 from rstest 0.1.0 (2026-06-23) until
+pytest 9.2.0 shipped (2026-10-27): a short table here means the core has been
+stable, not that the docs are stale. For rstest's own release cadence
 and per-version changes, see the
 [CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
 
@@ -108,7 +108,8 @@ the tree and the rstest release it shipped in:
 
 | Vendored pytest | Change | PR / commit | rstest release |
 |---|---|---|---|
-| **9.1.1** | 9.1.0 → 9.1.1 | [`54ed39d`](https://github.com/KovantAI/rstest/commit/54ed39d) · [#30](https://github.com/KovantAI/rstest/pull/30) | 0.1.0 (2026-06-23) |
+| **9.2.0** | 9.1.1 → 9.2.0 | pending (`features/pytest/9.2`) | Unreleased |
+| 9.1.1 | 9.1.0 → 9.1.1 | [`54ed39d`](https://github.com/KovantAI/rstest/commit/54ed39d) · [#30](https://github.com/KovantAI/rstest/pull/30) | 0.1.0 (2026-06-23) |
 | 9.1.0 | 9.0.3 → 9.1.0 | [`ab80f28`](https://github.com/KovantAI/rstest/commit/ab80f28) · [#30](https://github.com/KovantAI/rstest/pull/30) | 0.1.0 (2026-06-23) |
 | 9.0.3 | initial vendored core | [`df7dcf1`](https://github.com/KovantAI/rstest/commit/df7dcf1) | 0.0.1 (2026-06-10) |
 
@@ -133,7 +134,7 @@ itself. Two levels of check:
 
     ```console
     $ rstest verify-vendor
-    vendored pytest 9.1.1: 84 files verified against vendor.lock
+    vendored pytest 9.2.0: 85 files verified against vendor.lock
     ```
 
 - **Upstream provenance (CI).** The
@@ -340,7 +341,7 @@ and attached as release assets:
 
 Both are listed in the release's `SHA256SUMS`. One component is **not**
 captured by either SBOM: the vendored pytest lives *inside* the wheel rather
-than as a declared dependency, so tools don't see it. Its version (9.1.1) and
+than as a declared dependency, so tools don't see it. Its version (9.2.0) and
 that core's own runtime deps are documented under
 [Vendored pytest](#vendored-pytest) and in
 [`python/VENDOR.md`](https://github.com/KovantAI/rstest/blob/main/python/VENDOR.md).

@@ -17,7 +17,7 @@ stages, and how to roll back.
    ([how it works](../getting-started/evaluating.md#try-it-first)). If it
    flags differences, it points you at `migrate-check` (step 4).
 3. `rstest -n 0`: confirm per-test outcomes match a plain `pytest` run with
-   pytest 9.1.x installed, the version rstest vendors. Matching outcomes are
+   pytest 9.2.x installed, the version rstest vendors. Matching outcomes are
    the contract; report a bug if they differ. Move any rstest-owned flags out
    of `addopts` first ([why](#addopts-and-pytest_addopts)). See
    [The escape hatch](#the-escape-hatch).
@@ -106,7 +106,7 @@ tests.
 
 **Your test code.** Nothing changes: fixtures, conftest hierarchies,
 parametrize, marks, `pytest.raises`, assertion introspection, all of it
-runs through a vendored pytest core (currently pytest 9.1.1), not a
+runs through a vendored pytest core (currently pytest 9.2.0), not a
 reimplementation.
 
 **Your plugins.** Plugins installed in the environment load through the

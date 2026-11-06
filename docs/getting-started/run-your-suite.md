@@ -139,7 +139,7 @@ pytest session prints its own `-v` output, exactly as pytest does
 ```console
 $ rstest -n 0 -v
 ============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0 -- /path/to/.venv/bin/python
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0 -- /path/to/.venv/bin/python
 cachedir: .pytest_cache
 rootdir: /path/to/project
 collecting ... collected 6 items

@@ -36,7 +36,7 @@ The one command to check your own suite against the vendored core:
 $ rstest -n 0
 ```
 
-This is a single vendored-pytest-9.1.1 session over your arguments
+This is a single vendored-pytest-9.2.0 session over your arguments
 (single-worker mode; see [Compatibility](../concepts/compatibility.md)).
 Green here means the whole stack is happy with pytest 9 before you add a
 single worker.
@@ -58,14 +58,14 @@ rendering, and pytest-timeout must be uninstalled or disabled with
 
 ## Plugin versions vs the vendored pytest 9
 
-rstest vendors **pytest 9.1.1**, unmodified, and plugins load *into* that
+rstest vendors **pytest 9.2.0**, unmodified, and plugins load *into* that
 core, so each plugin's own code must support pytest 9 (its scorecard status
 above is about parallel behavior only) and a `pytest<9` install pin is inert
 at runtime; rstest warns when it sees one. The full rule is in
 [Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core).
 
 **`rstest -n 0` exercises every installed plugin against vendored pytest
-9.1.1** and surfaces any pytest-9 incompatibility *exactly as a real pytest
+9.2.0** and surfaces any pytest-9 incompatibility *exactly as a real pytest
 upgrade would*, because that is effectively what it is. Clear it there first.
 
 A stack that is warning-clean on a recent pytest 8.x is almost always
@@ -77,7 +77,7 @@ with the step-by-step in [Upgrading to pytest 9](upgrade-to-pytest9.md)).
 ### Known-good versions
 
 The versions below are the ones the [compatibility corpus](../concepts/compatibility.md)
-resolved and ran against vendored pytest 9.1.1. They are **known-good
+resolved and ran against vendored pytest 9.2.0. They are **known-good
 floors to aim for, not proven minimums**: older releases were not tested,
 and the corpus installs plugins unpinned, so a newer corpus run may resolve
 newer versions. Every corpus run records the versions it installed, and the

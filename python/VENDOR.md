@@ -1,9 +1,9 @@
 # Vendored code provenance
 
-- `rstest_worker/_vendor/{pytest,_pytest,py.py}`: pytest 9.1.1, copied unmodified from the PyPI wheel
-  contents (via a pytest==9.1.1 site-packages install). MIT licensed.
+- `rstest_worker/_vendor/{pytest,_pytest,py.py}`: pytest 9.2.0, copied unmodified from the PyPI wheel
+  contents (via a pytest==9.2.0 site-packages install). MIT licensed.
   - `rstest_worker/_vendor/LICENSE.pytest`: pytest's MIT license text, copied verbatim from the
-    pytest 9.1.1 dist-info. Required by the MIT terms (license must ship with the vendored copies).
+    pytest 9.2.0 dist-info. Required by the MIT terms (license must ship with the vendored copies).
     Re-copy it whenever the vendored pytest version changes.
   - Why vendor at all: the worker's pytest IS this vendored copy, shadowed
     onto `sys.path` at pytest's original import paths. rstest replaces
@@ -12,7 +12,7 @@
     `_pytest` packages shadow the installed ones, a missing module does not
     fall back to site-packages, it just fails to import.
   - Runtime deps of the vendored core (must exist in the target venv):
-    pluggy>=1.5, iniconfig, packaging, pygments, plus pytest's conditional
+    pluggy>=1.6, iniconfig>=2, packaging>=24, pygments>=2.15, plus pytest's conditional
     deps: exceptiongroup and tomli below Python 3.11, colorama on Windows.
     Mirror pytest's own `Requires-Dist` on every re-vendor. We depend on the REAL pluggy
     (not a vendored copy) by design: plugins check class identity against

@@ -50,8 +50,9 @@ class StreamingLogXML(LogXML):
         self._sent: set[int] = set()
 
     def finalize(self, report: Any) -> None:
-        nodeid = getattr(report, "nodeid", report)
-        reporter = self.node_reporters.get((nodeid, getattr(report, "node", None)))
+        nodeid = report.nodeid
+        # LogXML keys its reporters by the structured id (pytest 9.2).
+        reporter = self.node_reporters.get((report.id, getattr(report, "node", None)))
         super().finalize(report)
         if reporter is None:
             return
