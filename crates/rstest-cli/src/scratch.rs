@@ -142,11 +142,11 @@ mod tests {
             root.join("rstest-nocache-1-ab"),
             root.join("rstest-xr-test-a-1"),
         ];
-        // A claimed folder whose guard is forgotten: the lock file stays, the
-        // lock goes with the handle, as when the owner was SIGKILLed.
-        let mut gone = claim_at(dead.clone()).unwrap();
-        drop(gone.lock.take());
-        std::mem::forget(gone);
+        // A SIGKILLed owner's folder: the lock file stays, the lock is gone.
+        // Never flock it here: a sibling test spawning a child mid-claim hands
+        // that child a dup of the locked fd, holding the lock until it execs.
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(dead.join(LOCK), "").unwrap();
         let held = claim_at(live.clone()).unwrap();
         for d in [&own, &legacy].into_iter().chain(&foreign) {
             std::fs::create_dir_all(d).unwrap();

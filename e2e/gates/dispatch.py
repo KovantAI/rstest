@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 
 from _harness import (
     BASIC,
+    CRASH,
     CRASHMANY,
     EACH_CRASH,
     FLAKY,
@@ -81,6 +82,12 @@ def gate_lazy_collection(g, args, binary):
     print("== lazy collection ==")
     # D5 single-point collection: same fixtures, same outcomes, no
     # initial collection pass in any worker.
+    # Self-contained: these fixtures are also written by gate_basics,
+    # gate_crash_handling and gate_collection_error_semantics.
+    g.write("basic/test_basic.py", BASIC)
+    g.write("crash/test_crash.py", CRASH)
+    g.write("broken/test_broken.py", "import nonexistent_module_xyz\n")
+    g.write("broken/test_fine.py", "def test_ok(): assert True\n")
     r = g.run("basic/test_basic.py", "-n", "2", "--collect", "lazy")
     check("lazy: parallel counts", "2 failed, 2 passed" in r.stdout, r.stdout[-200:])
     check("lazy: exit 1", r.returncode == 1)
@@ -139,6 +146,7 @@ def gate_lazy_collection(g, args, binary):
         "12 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-600:],
     )
+    g.write("empty/.keep", "")  # self-contained (also written by gate_basics)
     r = g.run("empty", "--collect", "lazy", "-n", "2")
     check("lazy: no tests exit 5", r.returncode in (4, 5), f"rc={r.returncode}")
     fdir = g.tmp / "flaky"
@@ -401,6 +409,7 @@ def gate_shard_verify(g, args, binary):
 
 def gate_dist_each(g, args, binary):
     print("== --dist each ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     r = g.run("basic/test_basic.py", "-n", "2", "--dist", "each")
     check("each: counts are per-worker", "4 failed, 4 passed" in r.stdout, r.stdout[-200:])
     check("each: exit 1", r.returncode == 1)
@@ -471,6 +480,7 @@ def gate_fork_pool(g, args, binary):
 
 def gate_dist_validation(g, args, binary):
     print("== --dist validation ==")
+    g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
     # An invalid --dist value must be rejected the same way on every path;
     # the small-suite/lazy path used to accept garbage silently (exit 0).
     r = g.run("basic/test_basic.py", "--dist", "bogus")
