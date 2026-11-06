@@ -2861,6 +2861,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_runner_runs_program_feeds_stdin_and_probes_path() {
+        // Resolves programs through PATH, which a sibling test may be shimming.
+        let _held = crate::test_env::lock();
         let r = RealRunner;
         // program_exists: a shell is always on PATH, a nonsense name is not.
         assert!(r.program_exists("sh"));

@@ -998,6 +998,9 @@ mod tests {
 
     #[test]
     fn tracked_dirty_ignores_untracked_report_files() {
+        // Spawns `git`, which resolves through PATH that a sibling test may be
+        // shimming.
+        let _held = crate::test_env::lock();
         let repo = std::env::temp_dir().join(format!(
             "rstest-since-green-git-{}-{}",
             std::process::id(),
