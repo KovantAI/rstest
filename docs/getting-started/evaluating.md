@@ -86,8 +86,8 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
 
 - **Status:** alpha (0.x). CLI flags and the report-json schema aim for
   stability but may change between minor versions until 1.0.
-- **Releases:** first release 0.0.1 on 2026-06-10; 18 releases through 0.10.0
-  (2026-11-01), every change listed in the
+- **Releases:** first release 0.0.1 on 2026-06-10; 19 releases through 0.10.1
+  (2026-11-06), every change listed in the
   [CHANGELOG](https://github.com/KovantAI/rstest/blob/main/CHANGELOG.md).
 - **Maintainer:** Kovant AB ([Security](../reference/security.md)).
 - **Security support:** fixes land on the latest release only; there are no
