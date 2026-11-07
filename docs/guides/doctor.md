@@ -54,11 +54,10 @@ Every number in the report counts a test's **whole protocol**: fixture setup,
 the test call, and fixture teardown. That is the time the test held its
 worker, so a suite whose cost lives in function fixtures reads correctly:
 its test time, worker load, long pole, slowest files and realized speedup
-all include the fixture work. CPU time is measured over the same span. On
-Linux and macOS it includes CPU used by child processes the test waited for (a
-CLI run with `subprocess.run`), so a test that shells out to a CPU-heavy tool
-reads as computing, not waiting. On Windows such a test reads as waiting
-([no child CPU time](windows.md#diagnostics)).
+all include the fixture work. CPU time is measured over the same span. It
+includes CPU used by child processes the test waited for (a CLI run with
+`subprocess.run`), so a test that shells out to a CPU-heavy tool reads as
+computing, not waiting.
 
 A single-worker run (`-n 0` or `-n 1`) reports `1 worker`.
 

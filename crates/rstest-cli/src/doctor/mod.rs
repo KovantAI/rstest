@@ -1146,6 +1146,7 @@ mod timeout_tests {
                 marker_timeout: Some(marker),
                 no_rerun: false,
                 subtest_desc: None,
+                subtest_shown: false,
             },
         );
     }
@@ -1310,6 +1311,7 @@ pub(crate) mod testutil {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         run.record(Some(worker), r("setup", 0.0));
         run.record(Some(worker), r("call", dur));
@@ -1345,6 +1347,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         run.record(None, rep("setup", None, None));
         run.record(None, rep("call", None, None));
@@ -1417,6 +1420,7 @@ mod tests {
                     marker_timeout: None,
                     no_rerun: false,
                     subtest_desc: None,
+                    subtest_shown: false,
                 },
             );
         }
@@ -1789,6 +1793,7 @@ mod tests {
                     marker_timeout: None,
                     no_rerun: false,
                     subtest_desc: None,
+                    subtest_shown: false,
                 },
             );
         }

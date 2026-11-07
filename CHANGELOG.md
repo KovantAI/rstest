@@ -3,6 +3,23 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **`-v` shows passed and skipped subtests at `-n 2` and up.** pytest prints
+  `SUBPASSED(i=0)` / `SUBSKIPPED[msg]` lines and counts them in the summary
+  (`1 skipped, 2 subtests passed`) whenever `verbosity_subtests` is above 0,
+  which `-v` sets. A parallel run printed only `SUBFAILED` lines and left both
+  counts out. It now matches pytest, in the dots stream too (`u`, `-`). TAP
+  and TeamCity output still emit one result per test.
+
+- **`--doctor` counts child-process CPU on Windows.** `os.times()` reports
+  no child CPU there, so a test that ran a CPU-heavy tool through
+  `subprocess.run` read as waiting. Each worker now runs in its own job
+  object and reads CPU time from it, which also counts children the test
+  never waited for.
+
 ## 0.10.1 (2026-11-06)
 
 ### Fixes

@@ -138,6 +138,11 @@ pub struct Report {
     /// (`(i=1)`, `[msg] (i=1)`); absent on any other report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtest_desc: Option<String>,
+    /// A subtest pytest shows even when it passed or skipped
+    /// (`verbosity_subtests` > 0, which follows -v): `SUBPASSED` lines and
+    /// `N subtests passed` in the summary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subtest_shown: bool,
 }
 
 /// What a failure raised and where (see [`Report::cause`]).
@@ -506,6 +511,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
             ..r
         })
         .unwrap();
@@ -651,6 +657,7 @@ mod property {
                 marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
+                subtest_shown: false,
             }
         }
     }

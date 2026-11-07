@@ -1054,6 +1054,27 @@ def test_logreport_marks_subtest_reports():
     # pytest's description, for the short summary's `SUBFAILED[m] (i=1)`.
     assert sub["subtest_desc"] == "[m] (i=1)"
     assert "subtest" not in parent and "subtest_desc" not in parent
+    # No config: verbosity unknown, so passed subtests stay hidden.
+    assert "subtest_shown" not in sub
+
+
+@pytest.mark.parametrize(("verbosity", "shown"), [(0, False), (1, True)])
+def test_logreport_marks_subtests_pytest_shows(verbosity, shown):
+    # pytest prints SUBPASSED / counts `N subtests passed` only at
+    # verbosity_subtests > 0 (-v): the orchestrator follows this flag.
+    SubtestReport = pytest.importorskip("_pytest.subtests").SubtestReport
+
+    class FakeSubtestReport(SubtestReport):
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    p = _plugin()
+    p._config = SimpleNamespace(get_verbosity=lambda kind: verbosity)
+    rep = mk_report("call", "passed")
+    context = SimpleNamespace(msg=None, kwargs={"i": 0})
+    p.pytest_runtest_logreport(FakeSubtestReport(**vars(rep), context=context))
+    (_, sub), *_ = p._conn.sent
+    assert sub.get("subtest_shown", False) is shown
 
 
 def test_logreport_fails_a_subtests_fixture_parent_with_failed_subtests():
@@ -1281,10 +1302,22 @@ def test_longrepr_text_absent_and_non_pytest_reports():
 
 
 def test_cpu_now_counts_reaped_child_processes(monkeypatch):
+    monkeypatch.setattr(stream.sys, "platform", "linux")
     times = SimpleNamespace(children_user=1.5, children_system=0.5)
     monkeypatch.setattr(stream.os, "times", lambda: times)
     monkeypatch.setattr("time.process_time", lambda: 2.0)
     assert stream._cpu_now() == pytest.approx(4.0)
+
+
+def test_cpu_now_counts_child_processes_on_every_platform():
+    # A CPU-bound child the test waits for is computing, not waiting: on
+    # Windows os.times() has no child counters, so this reads the job object.
+    import subprocess
+
+    t0 = stream._cpu_now()
+    spin = "import time\nend = time.process_time() + 0.5\nwhile time.process_time() < end: pass"
+    subprocess.run([sys.executable, "-c", spin], check=True)
+    assert stream._cpu_now() - t0 >= 0.4
 
 
 def test_setup_and_teardown_reports_carry_phase_cpu(monkeypatch):

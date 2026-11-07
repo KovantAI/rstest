@@ -1376,6 +1376,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1416,6 +1417,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1682,6 +1684,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
@@ -1759,6 +1762,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
             cause: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];

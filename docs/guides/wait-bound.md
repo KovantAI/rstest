@@ -23,12 +23,12 @@ here:
 - **WAIT-BOUND**: compares each test's wall time against its CPU time. A
   test whose wall time vastly exceeds its CPU time isn't computing; it's
   sleeping or waiting on IO/a timeout. Both cover the whole test,
-  fixture setup and teardown included, and on Linux and macOS CPU time
-  includes child processes the test waited for, so a test that runs a
-  CPU-heavy CLI through `subprocess.run` counts as computing, not waiting
-  (oversubscribing `-n` will not help it). On Windows such a test counts
-  as waiting ([no child CPU time](windows.md#diagnostics)). Doctor prints the share of
-  test time spent waiting and names the worst offenders. In one real suite
+  fixture setup and teardown included, and CPU time includes child
+  processes the test waited for (on Windows, every child it started), so a
+  test that runs a CPU-heavy CLI through `subprocess.run` counts as
+  computing, not waiting (oversubscribing `-n` will not help it). Doctor
+  prints the share of test time spent waiting and names the worst
+  offenders. In one real suite
   ([aiohttp]) this was **95% of test time (176.5s) waiting**, almost all
   of it on 10-second proxy timeouts.
 - **PARALLEL FLOOR**: no worker count can finish faster than the longest

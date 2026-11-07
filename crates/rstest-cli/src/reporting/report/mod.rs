@@ -394,6 +394,10 @@ pub struct Run {
     /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
     /// in the summary line only, as pytest does.
     pub deselected: u64,
+    /// Passed/skipped/xfailed subtests pytest shows (`verbosity_subtests`,
+    /// -v), by pytest's category: `subtests passed`, `skipped`, `xfailed`.
+    /// Summary line only, as the categories exist only at that verbosity.
+    shown_subtests: BTreeMap<&'static str, u64>,
     /// Collectors the previous lastfailed recorded as failed that collected
     /// now, with the nodeids they yielded (pytest swaps the key for these).
     pub lf_recollected: BTreeMap<String, Vec<String>>,
@@ -549,6 +553,14 @@ impl Run {
                     entry.longrepr = capped_longrepr;
                 }
                 entry.call = Some(r.outcome);
+            } else if r.subtest_shown {
+                let category = match (r.outcome.as_str(), r.wasxfail) {
+                    ("passed", false) => "subtests passed",
+                    ("skipped", false) => "skipped",
+                    ("skipped", true) => "xfailed",
+                    _ => return,
+                };
+                *self.shown_subtests.entry(category).or_default() += 1;
             }
             return;
         }
@@ -867,7 +879,10 @@ impl Run {
     /// are shown. Nothing counted reads "no tests ran", like pytest.
     pub fn summary_line_with(&self, warnings: u64) -> String {
         let counts = self.counts();
-        let n = |key: &str| counts.get(key).copied().unwrap_or(0);
+        let n = |key: &str| {
+            counts.get(key).copied().unwrap_or(0)
+                + self.shown_subtests.get(key).copied().unwrap_or(0)
+        };
         let parts = [
             (n("failed"), "failed", "failed"),
             (n("passed"), "passed", "passed"),
@@ -877,6 +892,8 @@ impl Run {
             (n("xpassed"), "xpassed", "xpassed"),
             (warnings, "warning", "warnings"),
             (n("errors") + n("collect_errors"), "error", "errors"),
+            // pytest's fixed category name: `1 subtests passed` too.
+            (n("subtests passed"), "subtests passed", "subtests passed"),
             (n("flaky"), "flaky", "flaky"),
             (n("quarantined"), "quarantined", "quarantined"),
         ];
@@ -1149,6 +1166,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         }
     }
 
@@ -1504,6 +1522,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
             ..report(nodeid, "call", outcome)
         }
     }
@@ -1552,6 +1571,24 @@ mod tests {
         assert_eq!(e.call.as_deref(), Some("passed"));
         assert_eq!(e.subtests_failed, 0);
         assert_eq!(run.summary_line(), "1 passed");
+    }
+
+    #[test]
+    fn shown_subtests_join_the_summary_like_pytest_verbose() {
+        // At -v pytest counts passed subtests as `subtests passed` and a
+        // skipped one as `skipped`; the report-json counts are unchanged.
+        let shown = |outcome| proto::Report {
+            subtest_shown: true,
+            ..subtest("t.py::t", outcome)
+        };
+        let mut run = Run::default();
+        run.record(None, shown("passed"));
+        run.record(None, shown("passed"));
+        run.record(None, shown("skipped"));
+        run.record(None, shown("failed"));
+        run.record(None, report("t.py::t", "call", "failed"));
+        assert_eq!(run.summary_line(), "2 failed, 1 skipped, 2 subtests passed");
+        assert_eq!(run.counts()["skipped"], 0);
     }
 
     #[test]
@@ -1757,6 +1794,7 @@ mod tests {
                 marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
+                subtest_shown: false,
             },
         );
         assert!(run.phase_durations.is_empty());
@@ -1785,6 +1823,7 @@ mod tests {
                 marker_timeout: None,
                 no_rerun: false,
                 subtest_desc: None,
+                subtest_shown: false,
             },
         );
         assert_eq!(run.phase_durations.len(), 1);
