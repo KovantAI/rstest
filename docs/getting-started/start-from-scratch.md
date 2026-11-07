@@ -49,7 +49,7 @@ exactly like pytest's:
 ```console
 $ rstest
 ============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
 rootdir: /path/to/rstest-demo
 collected 2 items
 
@@ -75,7 +75,7 @@ def test_add_wrong():
 ```console
 $ rstest
 ============================= test session starts ==============================
-platform darwin -- Python 3.13.13, pytest-9.1.1, pluggy-1.6.0
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
 rootdir: /path/to/rstest-demo
 collected 3 items
 

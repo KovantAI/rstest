@@ -84,7 +84,7 @@ matches pytest's numbers on the same suites.
 
 ## Vendored pytest version
 
-rstest currently vendors **pytest 9.1.1**, unmodified. Policy:
+rstest currently vendors **pytest 9.2.0**, unmodified. Policy:
 
 - The vendored version is pinned per rstest release and stated in
   [License](../reference/license.md) and `rstest_worker._vendor`.
@@ -129,13 +129,13 @@ If your suite is *not* yet warning-clean on pytest 8.x, treat the rstest
 switch as "clear pytest deprecations first, then change one command": the
 same upgrade you'd owe pytest itself within a release or two anyway.
 [Upgrading to pytest 9](../guides/upgrade-to-pytest9.md) is the
-step-by-step for clearing them, including the tiny 9.0.x → 9.1.1 delta.
+step-by-step for clearing them, including the small 9.0.x → 9.1 → 9.2 deltas.
 
 ### Plugin versions vs the vendored core
 
 The same rule applies to your **plugins**, and it is the most common source
 of confusion. A plugin loads *into* the vendored core, so `import pytest`
-inside it resolves to vendored pytest 9.1.1, not to whatever pytest is installed
+inside it resolves to vendored pytest 9.2.0, not to whatever pytest is installed
 in your environment. Two consequences:
 
 - **The plugin's own code must support pytest 9.** Its compatibility with
@@ -146,7 +146,7 @@ in your environment. Two consequences:
 - **A `pytest<9` pin is inert at runtime.** Such a pin is a packaging
   constraint that pip enforces at install time only. It does not change which
   pytest the plugin sees once a worker is running, so a plugin pinned to
-  `pytest<9` still executes against vendored pytest 9.1.1. rstest reads each loaded
+  `pytest<9` still executes against vendored pytest 9.2.0. rstest reads each loaded
   plugin's `Requires-Dist` on pytest and, when it excludes the running pytest,
   prints one `rstest: warning: <plugin> <version> requires pytest<9, ...` line
   per plugin to stderr, once per run, telling you the pin is not enforced and
