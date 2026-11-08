@@ -448,18 +448,34 @@ impl DoctorReport {
 }
 
 /// A test that ended with more threads / open fds than it started: a resource
-/// it opened and never released (its own teardown included).
+/// it opened and never released (its own teardown included). Or a class,
+/// module or package fixture whose resources outlived its scope end in at
+/// least two of its setups (`scope` set).
 #[derive(Serialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Leak {
-    /// The test that leaked.
+    /// The test that leaked, or the fixture (`baseid::name`) when `scope` is
+    /// set.
     pub nodeid: String,
+    /// The fixture's scope (`class`, `module`, `package`); absent for a test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Threads the test created that outlived its teardown (0 if only fds
     /// leaked).
     pub threads: i64,
     /// Fds the test opened that are still open after its teardown (0 if only
     /// threads leaked).
     pub fds: i64,
+}
+
+impl Leak {
+    /// The nodeid, or `[module fixture] tests::server` for a fixture leak.
+    pub fn label(&self) -> String {
+        match &self.scope {
+            Some(scope) => format!("[{scope} fixture] {}", self.nodeid),
+            None => self.nodeid.clone(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -912,7 +928,7 @@ fn coverage_waste(
 }
 
 /// Tests that leaked threads/fds (created by the test, still open after its
-/// teardown), worst first.
+/// teardown) and wide fixtures that leaked past their scope end, worst first.
 /// A resource the test opened and never released — its own teardown included.
 /// Empty unless leak-check instrumentation ran. Shared by the doctor report and
 /// the `--fail-on-leak` gate.
@@ -925,11 +941,22 @@ pub fn detect_leaks(run: &Run) -> Vec<Leak> {
             let fds = e.fd_delta.unwrap_or(0).max(0);
             (threads > 0 || fds > 0).then(|| Leak {
                 nodeid: id.clone(),
+                scope: None,
                 threads,
                 fds,
             })
         })
         .collect();
+    leaks.extend(
+        run.fixture_leaks
+            .iter()
+            .map(|((fixture, scope), &(threads, fds))| Leak {
+                nodeid: fixture.clone(),
+                scope: Some(scope.clone()),
+                threads,
+                fds,
+            }),
+    );
     // Worst first: total leaked resources, then threads, then name for stability.
     leaks.sort_by(|a, b| {
         (b.threads + b.fds)
@@ -1387,6 +1414,31 @@ mod tests {
             "only real leaks, worst first"
         );
         assert_eq!((leaks[0].threads, leaks[0].fds), (3, 2));
+    }
+
+    #[test]
+    fn detect_leaks_includes_fixture_leaks_summed_over_workers() {
+        // R16: a wide fixture that leaked past its scope end is a leak too,
+        // labelled as a fixture; workers' reports of it add up.
+        let mut run = Run::default();
+        teardown_with_leak(&mut run, "t.py::one_fd", None, Some(1));
+        let leak = |threads, fds| crate::scheduling::proto::FixtureLeak {
+            fixture: "tests::server".into(),
+            scope: "module".into(),
+            threads,
+            fds,
+            instances: 2,
+        };
+        run.add_fixture_leaks(vec![leak(2, 0)]); // worker 0
+        run.add_fixture_leaks(vec![leak(1, 1)]); // worker 1
+
+        let leaks = detect_leaks(&run);
+        let labels: Vec<String> = leaks.iter().map(Leak::label).collect();
+        assert_eq!(labels, ["[module fixture] tests::server", "t.py::one_fd"]);
+        assert_eq!((leaks[0].threads, leaks[0].fds), (3, 1));
+        let json = serde_json::to_value(&leaks).unwrap();
+        assert_eq!(json[0]["scope"], "module");
+        assert!(json[1].get("scope").is_none(), "absent for a test");
     }
 
     /// One test whose time is mostly fixture setup/teardown, with per-phase

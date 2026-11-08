@@ -760,8 +760,10 @@ Metrics (from the [Doctor JSON](report-json.md#doctor-json) model):
 
 Fail the run if any test **leaked a resource**: started a thread or opened a
 file descriptor during its setup, call or teardown that is still alive after
-its teardown. Turns the leak signal (see [`--doctor`](#-doctor)) into a CI
-gate.
+its teardown, or if a class, module or package fixture leaked past its scope
+end in at least two of its setups
+([how fixtures are checked](../guides/resource-leaks.md#how-a-leak-is-attributed)).
+Turns the leak signal (see [`--doctor`](#-doctor)) into a CI gate.
 
 ```console
 $ rstest -n auto --fail-on-leak

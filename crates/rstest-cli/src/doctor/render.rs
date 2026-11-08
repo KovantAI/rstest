@@ -297,7 +297,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push_str("### Resource leaks\n\n> Threads/fds a test created that are still open after its teardown.\n\n");
         md.push_str("| Leaked | Test |\n|---|---|\n");
         for l in r.leaks.iter().take(10) {
-            let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.nodeid);
+            let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.label());
         }
     }
     md
@@ -644,7 +644,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
             "\nRESOURCE LEAKS (threads/fds a test created, still open after its teardown):",
         );
         for l in r.leaks.iter().take(10) {
-            sink.out_line(&format!("  {}  {}", leak_delta(l), l.nodeid));
+            sink.out_line(&format!("  {}  {}", leak_delta(l), l.label()));
         }
         if r.leaks.len() > 10 {
             sink.out_line(&format!("  ... and {} more", r.leaks.len() - 10));
@@ -1246,6 +1246,7 @@ mod tests {
         let d = |threads, fds| {
             leak_delta(&Leak {
                 nodeid: "t".into(),
+                scope: None,
                 threads,
                 fds,
             })
@@ -1265,11 +1266,13 @@ mod tests {
         r.leaks = vec![
             Leak {
                 nodeid: "tests/test_pool.py::test_executor".into(),
+                scope: None,
                 threads: 3,
                 fds: 0,
             },
             Leak {
                 nodeid: "tests/test_io.py::test_reader".into(),
+                scope: None,
                 threads: 0,
                 fds: 5,
             },
@@ -1289,6 +1292,7 @@ mod tests {
         r.leaks = (0..12)
             .map(|i| Leak {
                 nodeid: format!("t.py::leak{i}"),
+                scope: None,
                 threads: 1,
                 fds: 0,
             })

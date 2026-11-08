@@ -104,12 +104,13 @@ What fixture-cost-aware dispatch saved: each module or class it kept on one work
 
 ### Leak
 
-A test that ended with more threads / open fds than it started: a resource it opened and never released (its own teardown included).
+A test that ended with more threads / open fds than it started: a resource it opened and never released (its own teardown included). Or a class, module or package fixture whose resources outlived its scope end in at least two of its setups (`scope` set).
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `fds` | integer | yes | Fds the test opened that are still open after its teardown (0 if only threads leaked). |
-| `nodeid` | string | yes | The test that leaked. |
+| `nodeid` | string | yes | The test that leaked, or the fixture (`baseid::name`) when `scope` is set. |
+| `scope` | string or null | no | The fixture's scope (`class`, `module`, `package`); absent for a test. |
 | `threads` | integer | yes | Threads the test created that outlived its teardown (0 if only fds leaked). |
 
 ### NetworkAccess

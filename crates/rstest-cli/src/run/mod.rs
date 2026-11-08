@@ -2812,6 +2812,10 @@ fn fold_run_event(
             run.add_scope_costs(costs);
             None
         }
+        proto::Event::FixtureLeaks { leaks } => {
+            run.add_fixture_leaks(leaks);
+            None
+        }
         proto::Event::Warnings { entries } => {
             warnings.extend(entries);
             None
