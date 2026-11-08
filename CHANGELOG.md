@@ -18,6 +18,13 @@ between 0.x releases and are listed here.
   the terminal width at `-v` and whole at `-vv`; a parallel run printed the
   bare word. It now matches pytest.
 
+- **`--fail-on-leak` and `--doctor` catch wide fixtures that leak.** A class,
+  module or package fixture whose thread or fd was still alive after its
+  teardown went unreported. It is now reported as a fixture leak
+  (`+3 threads  [module fixture] server`) and fails `--fail-on-leak`, once at
+  least two of its setups leaked in one worker. A suite that passed the gate
+  before can fail it now. Session fixtures are not checked.
+
 ## 0.10.1 (2026-11-06)
 
 ### Fixes

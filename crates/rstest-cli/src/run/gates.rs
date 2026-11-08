@@ -663,11 +663,11 @@ pub(super) fn run_post_gates(
                     palette.bold_red("=========== resource leaks ===========")
                 ));
                 for l in leaks.iter().take(20) {
-                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
+                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.label()));
                 }
             }
             sink.warn(&format!(
-                "rstest: --fail-on-leak: {} test(s) leaked threads/fds; close them in \
+                "rstest: --fail-on-leak: {} test(s)/fixture(s) leaked threads/fds; close them in \
                  teardown, or contain one with @pytest.mark.isolated (runs it in a \
                  forked process)",
                 leaks.len()
