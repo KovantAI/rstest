@@ -77,10 +77,23 @@ cleanup in a teardown fixture is credited; only what survives it counts.
 package or session fixture is being set up belong to that fixture, not to the
 test that happened to trigger the setup, and are never charged to a test. A
 session-scoped server that is shut down at session end is therefore not a leak,
-and neither is the first test that used it. Such a fixture is set up once per
-scope, so it can't pile up resources per test; the flip side is that a wide
-fixture that never releases what it opened is not reported either. Function
-fixtures are part of the test and are charged like the test body.
+and neither is the first test that used it. Function fixtures are part of the
+test and are charged like the test body.
+
+A class, module or package fixture is checked when its scope ends instead:
+what its setup created and is still alive after its teardown is the
+fixture's leak, reported under the fixture's name:
+
+```text
+  +3 threads  [module fixture] tests::server
+```
+
+It is reported once **at least two** of its setups leaked in one worker. A
+library that creates a process-lifetime cache on first use (libc's resolver
+socket) does so in the first setup only, so it is not mistaken for a leak. The
+flip side: a fixture set up once per worker is never reported, whatever it
+leaks. Session fixtures are not checked at all: they are set up once and their
+resources die with the worker, after the last test.
 
 The worker also **skips its first test** as a warm-up: a library can lazily
 spin up a persistent thread or open a cache fd *once*, on first use, which is

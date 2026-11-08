@@ -434,6 +434,9 @@ pub struct Run {
     /// Module/class fixture setup per scope nodeid, summed over the workers:
     /// (seconds, setups). Saved for fixture-cost-aware dispatch.
     pub scope_costs: std::collections::HashMap<String, (f64, u64)>,
+    /// Leak check: wide fixtures that leaked past their scope end, by
+    /// (fixture, scope), summed over the workers: (threads, fds).
+    pub fixture_leaks: BTreeMap<(String, String), (i64, i64)>,
 }
 
 /// A `pytest.exit(reason, returncode)` that stopped the run.
@@ -492,6 +495,14 @@ impl Run {
             let e = self.scope_costs.entry(c.key).or_default();
             e.0 += c.total;
             e.1 += c.count;
+        }
+    }
+
+    pub fn add_fixture_leaks(&mut self, leaks: Vec<proto::FixtureLeak>) {
+        for l in leaks {
+            let e = self.fixture_leaks.entry((l.fixture, l.scope)).or_default();
+            e.0 += l.threads;
+            e.1 += l.fds;
         }
     }
 

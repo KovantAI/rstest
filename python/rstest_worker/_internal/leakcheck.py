@@ -16,6 +16,13 @@ test that happened to trigger the setup, and are never charged to a test. They
 are set up once per scope, so they can't pile up per test; and they sit in
 every later test's starting snapshot, so their release at scope end (often in
 another test's window) changes nothing either.
+
+What a class, module or package fixture created is checked when its scope ends
+instead (`fixture_leaks`): still alive after its finalizers = the fixture
+leaked it. A fixture is reported only when at least two of its setups leaked: a
+process-lifetime cache a library creates on first use (libc's resolver socket)
+shows up in the first setup only. Session fixtures are not checked: set up once,
+they die with the process and can't affect a later test.
 """
 
 from __future__ import annotations
@@ -25,6 +32,8 @@ import threading
 from typing import Any
 
 import pytest
+
+from rstest_worker._internal.messages import FixtureLeak
 
 Fd = tuple[int, int, int]
 
@@ -85,9 +94,23 @@ class LeakTracker:
         # persistent thread / open a cache fd on first use, which is not a
         # per-test leak. Measuring from the 2nd test on drops that noise.
         self._warmed = False
+        # Resource -> key of the wide (non-session) fixture whose setup created
+        # it, until that fixture is finalized. Innermost fixture wins.
+        self._owner: dict[Any, tuple[str, str]] = {}
+        # Fixture key -> [leaky instances, threads, fds] over the session.
+        self._fixture_leaks: dict[tuple[str, str], list[int]] = {}
 
     def pop(self, nodeid: str) -> tuple[int, int | None] | None:
         return self._res.pop(nodeid, None)
+
+    def fixture_leaks(self) -> list[FixtureLeak]:
+        """Wide fixtures that leaked threads/fds past their scope end in at
+        least two setups, with the totals over those setups."""
+        return [
+            {"fixture": name, "scope": scope, "threads": t, "fds": f, "instances": n}
+            for (name, scope), (n, t, f) in self._fixture_leaks.items()
+            if n >= 2
+        ]
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtest_setup(self, item):
@@ -124,7 +147,37 @@ class LeakTracker:
         try:
             return (yield)
         finally:
-            win.fixture_threads |= live_threads() - bt
+            new_t = live_threads() - bt
+            win.fixture_threads |= new_t
             af = open_fds()
-            if af is not None and bf is not None:
-                win.fixture_fds |= af - bf
+            new_f = af - bf if af is not None and bf is not None else frozenset()
+            win.fixture_fds |= new_f
+            if fixturedef.scope != "session":
+                key = _fixture_key(fixturedef)
+                for r in new_t | new_f:
+                    self._owner.setdefault(r, key)
+
+    def pytest_fixture_post_finalizer(self, fixturedef, request):
+        key = _fixture_key(fixturedef)
+        mine = [r for r, k in self._owner.items() if k == key]
+        if not mine:
+            return
+        for r in mine:
+            del self._owner[r]
+        live = live_threads() | (open_fds() or frozenset())
+        left = [r for r in mine if r in live]
+        if left:
+            fds = sum(isinstance(r, tuple) for r in left)
+            rec = self._fixture_leaks.setdefault(key, [0, 0, 0])
+            rec[0] += 1
+            rec[1] += len(left) - fds
+            rec[2] += fds
+
+
+def _fixture_key(fixturedef) -> tuple[str, str]:
+    """`(baseid::argname, scope)`; plugin and root-conftest fixtures have no
+    baseid."""
+    name = fixturedef.argname
+    if fixturedef.baseid:
+        name = f"{fixturedef.baseid}::{name}"
+    return name, fixturedef.scope

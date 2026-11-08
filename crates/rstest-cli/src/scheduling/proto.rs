@@ -221,6 +221,21 @@ pub struct ScopeCost {
     pub count: u64,
 }
 
+/// Leak check: a class/module/package fixture whose threads/fds outlived its
+/// scope end in at least two of its setups, over one worker session.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[cfg_attr(test, derive(PartialEq, Serialize))]
+pub struct FixtureLeak {
+    /// `baseid::argname` (argname alone for root-conftest/plugin fixtures).
+    pub fixture: String,
+    pub scope: String,
+    /// Still alive after its finalizers, summed over the setups that leaked.
+    pub threads: i64,
+    pub fds: i64,
+    /// Setups that leaked.
+    pub instances: u64,
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Serialize))]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
@@ -251,6 +266,11 @@ pub enum Event {
     /// (always, not only under the doctor) for fixture-cost-aware dispatch.
     ScopeCosts {
         costs: Vec<ScopeCost>,
+    },
+    /// Leak check: wide fixtures that leaked past their scope end, sent at
+    /// session finish.
+    FixtureLeaks {
+        leaks: Vec<FixtureLeak>,
     },
     /// Aggregated warnings, sent at session finish.
     Warnings {
@@ -746,6 +766,26 @@ mod property {
                 0..4
             )
             .prop_map(|costs| Event::ScopeCosts { costs }),
+            prop::collection::vec(
+                (
+                    small_str(),
+                    small_str(),
+                    any::<i64>(),
+                    any::<i64>(),
+                    any::<u64>()
+                )
+                    .prop_map(|(fixture, scope, threads, fds, instances)| {
+                        FixtureLeak {
+                            fixture,
+                            scope,
+                            threads,
+                            fds,
+                            instances,
+                        }
+                    }),
+                0..4
+            )
+            .prop_map(|leaks| Event::FixtureLeaks { leaks }),
             prop::collection::vec(arb_warning(), 0..4)
                 .prop_map(|entries| Event::Warnings { entries }),
             arb_collection_done(),

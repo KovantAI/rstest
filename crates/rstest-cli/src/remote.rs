@@ -1914,12 +1914,14 @@ mod tests {
         let mut raw = Vec::new();
         std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz.as_slice()), &mut raw)
             .unwrap();
-        let tree: serde_json::Value = rmp_serde::from_slice(&raw).unwrap();
-        assert!(
-            tree["runs"][0]["commit"].is_string(),
-            "{:.200}",
-            tree.to_string()
-        );
+        // Read by name, the other (binary column) fields skipped: a
+        // positional array would hand `runs` the schema number and fail.
+        #[derive(serde::Deserialize)]
+        struct Keyed {
+            runs: Vec<serde_json::Value>,
+        }
+        let tree: Keyed = rmp_serde::from_slice(&raw).unwrap();
+        assert!(tree.runs[0]["commit"].is_string(), "{:?}", tree.runs[0]);
 
         // No history: the field is left out.
         let empty = serde_json::to_value(Base::default()).unwrap();

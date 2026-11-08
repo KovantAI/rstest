@@ -738,3 +738,31 @@ def gate_resource_leak_detection(g, args, binary):
         "has no effect in passthrough mode" in r.stderr and "leaked threads/fds" not in r.stderr,
         f"rc={r.returncode} " + r.stderr[-300:],
     )
+    # R16: a module fixture that never stops its thread leaks past every
+    # module's end; the gate names the fixture, not a test. Its well-behaved
+    # sibling (joined in teardown) is clean.
+    fp = g.tmp / "fixleak"
+    g.write(
+        "fixleak/conftest.py",
+        "import threading, pytest\n"
+        "_never = threading.Event()\n"
+        "@pytest.fixture(scope='module')\n"
+        "def server():\n"
+        "    t = threading.Thread(target=_never.wait, daemon=True); t.start()\n"
+        "    yield t\n"
+        "@pytest.fixture(scope='module')\n"
+        "def good():\n"
+        "    ev = threading.Event()\n"
+        "    t = threading.Thread(target=ev.wait, daemon=True); t.start()\n"
+        "    yield t\n"
+        "    ev.set(); t.join()\n",
+    )
+    for m in "abc":
+        g.write(f"fixleak/test_{m}.py", "def test_x(server, good): pass\n")
+    for mode in (("-n", "0"), ("-n", "2")):
+        r = g.run(*mode, "-p", "no:randomly", "--fail-on-leak", cwd=fp)
+        check(
+            f"leak: a module fixture leaking past its scope fails the gate ({' '.join(mode)})",
+            r.returncode == 1 and "[module fixture] server" in r.stderr and "good" not in r.stderr,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )

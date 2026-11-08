@@ -710,6 +710,7 @@ pub(crate) fn execute_inner(
     // post-run demotion reuses it. Inert under passthrough. Replay never
     // auto-quarantines: the flip history would hide the very failure it
     // re-runs to reproduce.
+    let mut history = crate::reporting::history::RunHistory::default();
     let quarantine = if passthrough {
         None
     } else {
@@ -725,7 +726,7 @@ pub(crate) fn execute_inner(
             cli.auto_quarantine_max
                 .or(settings.auto_quarantine_max)
                 .unwrap_or(crate::cli::AUTO_QUARANTINE_MAX),
-            &crate::reporting::history::load(),
+            &mut history,
             &mut sink,
         )?
     };
@@ -803,7 +804,7 @@ pub(crate) fn execute_inner(
         baseline: &inc.baseline,
         replay: pinned.is_some(),
     };
-    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
+    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, history, &mut sink)
 }
 
 /// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
@@ -2810,6 +2811,10 @@ fn fold_run_event(
         }
         proto::Event::ScopeCosts { costs } => {
             run.add_scope_costs(costs);
+            None
+        }
+        proto::Event::FixtureLeaks { leaks } => {
+            run.add_fixture_leaks(leaks);
             None
         }
         proto::Event::Warnings { entries } => {

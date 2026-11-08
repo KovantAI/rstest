@@ -194,6 +194,18 @@ class ScopeCostsPayload(TypedDict):
     costs: list[ScopeCost]
 
 
+class FixtureLeak(TypedDict):
+    fixture: str  # baseid::argname (argname alone for root/plugin fixtures)
+    scope: str  # class, module or package
+    threads: int  # still alive after its finalizers, summed over leaky setups
+    fds: int
+    instances: int  # setups that leaked (reported only from 2)
+
+
+class FixtureLeaksPayload(TypedDict):
+    leaks: list[FixtureLeak]
+
+
 class CollectErrorPayload(TypedDict):
     path: str
     longrepr: str
@@ -232,6 +244,7 @@ EventKind = Literal[
     "lf_recollected",
     "doctor_fixtures",
     "scope_costs",
+    "fixture_leaks",
     "warnings",
     "collection_done",
     "lazy_ready",
