@@ -292,9 +292,11 @@ def test_eager_runtestloop_runs_all_items_with_nextitem_scoping():
 
 
 def test_eager_runtestloop_serial_items_after_drain_reuse_the_session():
-    # The serial phase sends the drained designate one item at a time: none
-    # may run as pytest's last item (nextitem=None), which would tear the
-    # session down and set its fixtures up again for the next serial test.
+    # The serial phase reaches the drained designate in chunks. New items end
+    # the drain: each serial item waits for its successor (or the next
+    # no_more_items), so s1 runs with s2 as nextitem. Running it with the
+    # Session would tear down its module/class fixtures and set them up
+    # again for s2, from the same module.
     items = [FakeItem("a"), FakeItem("s1"), FakeItem("s2")]
     session, calls = _eager_session(items)
     conn = FakeConn(
@@ -303,11 +305,12 @@ def test_eager_runtestloop_serial_items_after_drain_reuse_the_session():
             {"kind": "no_more_items", "payload": {}},
             {"kind": "run_items", "payload": {"indices": [1]}},
             {"kind": "run_items", "payload": {"indices": [2]}},
+            {"kind": "no_more_items", "payload": {}},
             {"kind": "end_session", "payload": {}},
         ]
     )
     assert ItemDispatchPlugin(conn).pytest_runtestloop(session) is True
-    assert calls == [("a", "<session>"), ("s1", "<session>"), ("s2", "<session>")]
+    assert calls == [("a", "<session>"), ("s1", "s2"), ("s2", "<session>")]
     assert session.torn == [None]  # the session is torn down once, at the end
 
 

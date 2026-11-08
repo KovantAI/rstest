@@ -44,6 +44,7 @@ from gates.dispatch import (
     gate_native_timeout,
     gate_order_fail_fast,
     gate_serial_after_crash,
+    gate_serial_fixture_scope,
     gate_serial_mark,
     gate_session_exit_stops_pool,
     gate_shard_k_n,
@@ -154,6 +155,7 @@ from gates.reporting import (
     gate_report_json_contract,
     gate_resource_leak_detection,
     gate_session_error_output,
+    gate_verbose_skip_reasons,
     gate_warnings,
 )
 from gates.serve_watch import (
@@ -262,7 +264,9 @@ def main():
         gate_lazy_collection,
         gate_serial_mark,
         gate_serial_after_crash,
+        gate_serial_fixture_scope,
         gate_failure_output,
+        gate_verbose_skip_reasons,
         gate_session_error_output,
         gate_x_maxfail,
         gate_maxfail_bound,
