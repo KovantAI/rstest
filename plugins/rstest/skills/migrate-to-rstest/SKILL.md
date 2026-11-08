@@ -46,7 +46,7 @@ a polluter, a recurring flake) belong to the `rstest-triage` skill, which
 drives `replay`, `bisect`, `audit`, `explain`, `flaky` and `since-green`.
 
 Install rstest into the project's environment first (`uv pip install rstest`).
-It runs its own vendored pytest 9.1.1 core, not the installed pytest, but it
+It runs its own vendored pytest 9.2.0 core, not the installed pytest, but it
 loads the project's conftest and installed plugins. A suite pinned to pytest 8
 may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
 

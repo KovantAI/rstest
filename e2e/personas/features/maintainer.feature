@@ -58,7 +58,9 @@ Feature: Suite maintainer
         """
         import subprocess, sys, pytest
 
-        LOOP = 'n = 0\nfor i in range(15_000_000):\n    n += i\n'
+        # Burn a fixed amount of CPU, not a fixed iteration count: a fast
+        # machine finishes 15M iterations under the 1s floor checked below.
+        LOOP = 'import time\nt = time.process_time()\nwhile time.process_time() - t < 0.6:\n    pass\n'
 
         @pytest.mark.parametrize('i', range(2))
         def test_cli_cpu(i):

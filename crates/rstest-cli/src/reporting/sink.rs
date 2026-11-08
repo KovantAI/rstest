@@ -31,6 +31,10 @@ pub struct Sink {
     /// inline failures.
     tb: TbStyle,
     report_chars: String,
+    /// `-vv` or more: `-v` lines show skip/xfail reasons untrimmed.
+    very_verbose: bool,
+    /// Terminal columns, for trimming those reasons at `-v`.
+    columns: usize,
     /// Optional `--stream-json` sink: a side channel that receives one NDJSON
     /// object per test-phase report as the run progresses, independent of the
     /// human stdout/stderr. `None` unless `--stream-json` was given.
@@ -46,6 +50,8 @@ impl Sink {
             palette,
             tb: TbStyle::Full,
             report_chars: "fE".into(),
+            very_verbose: false,
+            columns: super::status::terminal_width(),
             stream: None,
         }
     }
@@ -67,6 +73,8 @@ impl Sink {
             palette: Palette::default(),
             tb: TbStyle::Full,
             report_chars: "fE".into(),
+            very_verbose: false,
+            columns: 80,
             stream: None,
         };
         (sink, captured)
@@ -96,6 +104,21 @@ impl Sink {
     /// Set the run's `-r` chars, resolved once from the session options.
     pub fn set_report_chars(&mut self, chars: String) {
         self.report_chars = chars;
+    }
+
+    /// `-vv` or more (see [`Sink::set_very_verbose`]).
+    pub fn very_verbose(&self) -> bool {
+        self.very_verbose
+    }
+
+    /// Set from the session options' `-v` count, resolved once.
+    pub fn set_very_verbose(&mut self, v: bool) {
+        self.very_verbose = v;
+    }
+
+    /// Terminal columns (the tty, else `COLUMNS`, else 80).
+    pub fn columns(&self) -> usize {
+        self.columns
     }
 
     /// A full stdout line (newline appended).

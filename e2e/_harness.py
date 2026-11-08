@@ -177,7 +177,7 @@ def find_python() -> str:
 
 BASE_DEPS = [
     "msgpack",
-    "pluggy>=1.5",
+    "pluggy>=1.6",
     "iniconfig",
     "packaging",
     "pygments",
@@ -349,6 +349,7 @@ REPLAY_ORDER = fx("replay_order.py")
 
 
 SERIAL = fx("serial.py")
+SERIAL_SCOPE = fx("serial_scope.py")
 
 
 WARN = fx("warn.py")

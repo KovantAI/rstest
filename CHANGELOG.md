@@ -20,6 +20,17 @@ between 0.x releases and are listed here.
   object and reads CPU time from it, which also counts children the test
   never waited for.
 
+- **`@serial` tests of one module share its module and class fixtures.** The
+  serial phase reaches the designated worker a few tests at a time, and the
+  last test of each batch ran as if it were the session's last, tearing down
+  its module and class fixtures for the next serial test from the same module
+  to set up again. Each is now set up once, as under pytest.
+
+- **`-v` shows skip and xfail reasons at `-n 2` and up.** pytest prints
+  `SKIPPED (no db)`, `XFAIL (upstream bug)` and `XPASS (reason)`, trimmed to
+  the terminal width at `-v` and whole at `-vv`; a parallel run printed the
+  bare word. It now matches pytest.
+
 ## 0.10.1 (2026-11-06)
 
 ### Fixes
@@ -293,6 +304,24 @@ between 0.x releases and are listed here.
   or whole on CI and at `-vv`. Lines follow file and line order, so they
   don't change between runs. Errors are headed `ERROR at setup of`,
   `ERROR at teardown of` and `ERROR collecting`, as in pytest.
+
+### Behavior changes
+
+- **The vendored pytest core is now 9.2.0** (was 9.1.1), copied unmodified
+  and verified against the upstream wheel. Your suite runs pytest 9.2's
+  semantics whatever pytest is installed. What changes for a suite:
+  `parametrize`'s `indirect`, `ids` and `scope` are keyword-only; a `str` or
+  `bytes` parameter over 100 characters gets a short id (`test_s[s0]`), so
+  those nodeids change and rstest's durations and run history start over for
+  them (`parametrize_long_str_id_strategy = "legacy"` keeps the old ids); a
+  `-c` path that doesn't exist is a usage error; and a plugin that can't be
+  found exits 4, one that fails to import exits 3. rstest's runtime
+  dependencies follow pytest 9.2's: `pluggy>=1.6`, `iniconfig>=2`,
+  `packaging>=24`, `pygments>=2.15` (and `tomli>=2` below Python 3.11).
+  Plugins that use pytest internals need a 9.2-ready release (pytest-bdd
+  9.0.1, pytest-benchmark 5.3.1); pytest-forked 1.7.5 fails every forked test
+  on 9.2 until its upstream fix ships. See
+  [Upgrading to pytest 9](docs/guides/upgrade-to-pytest9.md).
 
 ### Fixes
 

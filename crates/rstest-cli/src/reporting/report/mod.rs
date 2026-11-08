@@ -8,6 +8,7 @@ use crate::scheduling::proto;
 
 /// Terminal rendering (`print_*`) lives here; the data model stays in this module.
 mod render;
+pub(crate) use render::{trim_message, wcswidth};
 
 /// Per-test phase outcomes, mirroring the compat-harness recorder schema
 /// (rstest-research/harness/recorder.py) so `diff_snapshots.py` can gate

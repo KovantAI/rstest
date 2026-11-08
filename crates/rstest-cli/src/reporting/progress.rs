@@ -2,7 +2,7 @@
 //! in, wrapped with a running percentage when the total is known.
 
 use crate::reporting::color::Palette;
-use crate::reporting::report::TbStyle;
+use crate::reporting::report::{trim_message, wcswidth, TbStyle};
 use crate::reporting::sink::Sink;
 use crate::reporting::status::StatusFooter;
 use crate::scheduling::proto::Report;
@@ -341,8 +341,25 @@ impl Progress {
         // pytest names the subtest: `SUBFAILED(i=1)`.
         let desc = r.subtest_desc.as_deref().unwrap_or_default();
         let word = format!("{}{desc}", kind.word());
+        // pytest: ` (reason)` after SKIPPED / XFAIL / XPASS, trimmed at -v to
+        // what fits before the ` [100%]` column, whole at -vv. Measured
+        // without the `[gwN] ` prefix so the text matches pytest's.
+        let plain = format!("{} {word}", r.nodeid);
+        let reason = skip_reason(r)
+            .filter(|reason| !reason.is_empty())
+            .and_then(|reason| {
+                if sink.very_verbose() {
+                    return Some(reason.to_string());
+                }
+                let used = wcswidth(&plain).unwrap_or(plain.chars().count());
+                let available =
+                    sink.columns() as isize - used as isize - " [100%]".len() as isize - 1;
+                trim_message(reason, available)
+            })
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
         let line = format!(
-            "{prefix}{} {}{pct}",
+            "{prefix}{} {}{reason}{pct}",
             r.nodeid,
             sink.palette().outcome(&word)
         );
@@ -531,6 +548,23 @@ pub(crate) fn collecterror_json(path: &str, longrepr: &str) -> serde_json::Value
         "event": "collecterror",
         "path": path,
         "longrepr": longrepr,
+    })
+}
+
+/// pytest's `_get_raw_skip_reason`: the user's part of a skip/xfail/xpass
+/// reason, without the `Skipped: ` / `reason: ` prefixes pytest adds.
+fn skip_reason(r: &Report) -> Option<&str> {
+    if let Some(reason) = r.xfail_reason.as_deref() {
+        return Some(reason.strip_prefix("reason: ").unwrap_or(reason));
+    }
+    if r.outcome != "skipped" {
+        return None;
+    }
+    let reason = r.skip_reason.as_deref()?;
+    Some(match reason.strip_prefix("Skipped: ") {
+        Some(rest) => rest,
+        None if reason == "Skipped" => "",
+        None => reason,
     })
 }
 
@@ -1079,6 +1113,64 @@ mod tests {
         .map(|w| format!("[gw1] {id} {w}\n"))
         .collect();
         assert_eq!(buf.out(), want, "no total: no percentage, no closing line");
+    }
+
+    #[test]
+    fn verbose_lines_show_skip_and_xfail_reasons_as_pytest() {
+        let skipped = |reason: &str| Report {
+            skip_reason: Some(reason.into()),
+            ..report("call", "skipped")
+        };
+        let xfail = |outcome, reason: &str| Report {
+            xfail_reason: Some(reason.into()),
+            ..xfailed(report("call", outcome))
+        };
+        let long = "x".repeat(50);
+        let reports = [
+            skipped("Skipped: no db"),
+            skipped("Skipped"), // bare pytest.skip(): no reason shown
+            xfail("skipped", "reason: upstream bug"),
+            xfail("passed", "fixed?"),
+            skipped(&format!("Skipped: {long}")),
+            skipped("Skipped: first\nsecond"),
+        ];
+        let render = |very_verbose| {
+            let mut p = Progress::default();
+            p.set_mode(Mode::Verbose);
+            let (mut sink, buf) = Sink::captured(); // 80 columns
+            sink.set_very_verbose(very_verbose);
+            for r in &reports {
+                p.on_report(&mut sink, Some(1), r);
+            }
+            buf.out()
+        };
+        let id = "[gw1] tests/test_a.py::test_x";
+        // -v: 80 - len("<nodeid> SKIPPED") - len(" [100%]") - 1 = 41 columns,
+        // the `[gw1] ` prefix left out as pytest has none.
+        let trimmed = format!("{}...", "x".repeat(35));
+        assert_eq!(
+            render(false),
+            format!(
+                "{id} SKIPPED (no db)\n\
+                 {id} SKIPPED\n\
+                 {id} XFAIL (upstream bug)\n\
+                 {id} XPASS (fixed?)\n\
+                 {id} SKIPPED ({trimmed})\n\
+                 {id} SKIPPED (first)\n"
+            )
+        );
+        // -vv: whole reasons.
+        assert_eq!(
+            render(true),
+            format!(
+                "{id} SKIPPED (no db)\n\
+                 {id} SKIPPED\n\
+                 {id} XFAIL (upstream bug)\n\
+                 {id} XPASS (fixed?)\n\
+                 {id} SKIPPED ({long})\n\
+                 {id} SKIPPED (first\nsecond)\n"
+            )
+        );
     }
 
     #[test]

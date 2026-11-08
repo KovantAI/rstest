@@ -74,7 +74,7 @@ found`, and import errors from a Python older than 3.10).
 ## Your suite runs on pytest 9
 
 Adopting rstest adopts pytest 9. Tests always run on the vendored pytest core
-(currently 9.1.1), whatever pytest version your project or its plugins pin,
+(currently 9.2.0), whatever pytest version your project or its plugins pin,
 and there is no older-core build. A plugin's `pytest<9` install pin is inert
 at runtime: the plugin loads into the vendored core and must support pytest 9
 itself ([Plugin versions vs the vendored core](../concepts/compatibility.md#plugin-versions-vs-the-vendored-core)).
