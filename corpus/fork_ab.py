@@ -45,6 +45,8 @@ def _arm(suite, workers, fork):
         wall = time.monotonic() - t0
         if not snap.exists():
             raise RuntimeError(f"{suite.name}: no snapshot (rc={r.returncode})\n{r.stderr[-600:]}")
+        if not json.loads(snap.read_text())["tests"]:
+            raise RuntimeError(f"{suite.name}: no tests ran (rc={r.returncode})\n{r.stderr[-600:]}")
         return snap, wall
 
     return _awake_run(run)

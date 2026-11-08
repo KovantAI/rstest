@@ -764,3 +764,60 @@ if __name__ == "__main__":  # allow `python corpus/test_bench.py` without pytest
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_suite_resolves_a_relative_wheel_path(tmp_path, monkeypatch):
+    # `uv pip install` runs from the suite checkout, so a relative wheel path
+    # (CI passes `target/wheels/...`) must be pinned to the caller's cwd.
+    monkeypatch.chdir(tmp_path)
+    suite = Suite("s", {}, "target/wheels/rstest.whl", "rstest")
+    assert suite.wheel == str(tmp_path / "target" / "wheels" / "rstest.whl")
+
+
+def test_prepare_only_fails_when_a_suite_is_not_prepared(tmp_path, monkeypatch):
+    import run
+
+    def broken_install(self):
+        raise RuntimeError("install failed")
+
+    monkeypatch.setattr(run.Suite, "fetch", lambda self, lock: None)
+    monkeypatch.setattr(run.Suite, "install", broken_install)
+    monkeypatch.setattr(run, "load_lock", dict)
+    monkeypatch.setattr(run, "save_lock", lambda lock: None)
+    monkeypatch.setattr(run, "_save", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--prepare-only", "--only", "attrs", "--wheel", "w.whl"]
+    )
+    assert run.main() == 1
+
+
+def test_fork_ab_rejects_a_run_that_collected_nothing(tmp_path, monkeypatch):
+    # An unprepared venv collects no tests in ~1s; timing it as an arm would
+    # report a speedup for a suite that never ran.
+    import fork_ab
+    import run
+
+    class FakeSuite:
+        name = "s"
+        dir = tmp_path
+
+        def rstest_argv(self, snap, workers):
+            return ["rstest", "--report-json", str(snap)]
+
+        def env(self):
+            return {}
+
+        def cwd(self):
+            return tmp_path
+
+    def fake_sh(argv, cwd=None, env=None):
+        Path(argv[2]).write_text(json.dumps({"tests": {}, "collect_errors": []}))
+        return type("R", (), {"returncode": 5, "stderr": "no tests ran"})()
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    try:
+        fork_ab._arm(FakeSuite(), "4", fork=False)
+    except RuntimeError as e:
+        assert "no tests" in str(e)
+    else:
+        raise AssertionError("an empty run was timed as a valid arm")
