@@ -1073,7 +1073,10 @@ def test_logreport_marks_subtests_pytest_shows(verbosity, shown):
 
     class FakeSubtestReport(SubtestReport):
         def __init__(self, **kw):
+            # pytest 9.2's nodeid is a property over a structured id.
+            nodeid = kw.pop("nodeid")
             self.__dict__.update(kw)
+            self.nodeid = nodeid
 
     p = _plugin()
     p._config = SimpleNamespace(get_verbosity=lambda kind: verbosity)
