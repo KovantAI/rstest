@@ -58,8 +58,8 @@ def _wrap(gen, body=None):
     raise AssertionError("wrapper hook did not stop")
 
 
-def _fixture(scope):
-    return SimpleNamespace(scope=scope, argname="fx")
+def _fixture(scope, argname="fx", baseid=""):
+    return SimpleNamespace(scope=scope, argname=argname, baseid=baseid)
 
 
 class World:
@@ -291,6 +291,99 @@ def test_fixture_setup_outside_a_test_window_is_ignored(monkeypatch):
     assert tr._current is None
 
 
+def _fixture_instance(tr, w, fx, thread=None, fd=None, release=False):
+    """One setup + finalize of `fx` inside a test window. Leaves `thread` /
+    `fd` alive past the finalizer unless `release`."""
+
+    def setup():
+        def body():
+            if thread is not None:
+                w.threads.add(thread)
+            if fd is not None:
+                w.fds.add(fd)
+
+        _wrap(tr.pytest_fixture_setup(fx, None), body)
+
+    def teardown():
+        if release:
+            w.threads.discard(thread)
+            w.fds.discard(fd)
+        tr.pytest_fixture_post_finalizer(fx, None)
+
+    _test(tr, f"t.py::uses_{thread}_{fd}", setup=setup, teardown=teardown)
+
+
+def test_module_fixture_leaking_in_two_setups_is_a_fixture_leak(monkeypatch):
+    # R16: a module fixture whose resources outlive its scope, every time.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    fx = _fixture("module", "server", "tests")
+    _fixture_instance(tr, w, fx, "srv1", (20, 1, 200))
+    _fixture_instance(tr, w, fx, "srv2", (21, 1, 210))
+    assert tr.fixture_leaks() == [
+        {"fixture": "tests::server", "scope": "module", "threads": 2, "fds": 2, "instances": 2}
+    ]
+    # Still the fixture's, never the tests'.
+    assert tr.pop("t.py::uses_srv2_(21, 1, 210)") == (0, 0)
+
+
+def test_fixture_leaking_only_once_is_not_reported(monkeypatch):
+    # A process-lifetime cache (libc's resolver socket) is created by the
+    # first setup only: one leaky instance is not enough.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    fx = _fixture("class", "client")
+    _fixture_instance(tr, w, fx, fd=(30, 1, 300))
+    _fixture_instance(tr, w, fx, "t2", release=True)
+    assert tr.fixture_leaks() == []
+
+
+def test_fixture_releasing_at_scope_end_is_clean(monkeypatch):
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    fx = _fixture("module", "server")
+    _fixture_instance(tr, w, fx, "a", (40, 1, 400), release=True)
+    _fixture_instance(tr, w, fx, "b", (41, 1, 410), release=True)
+    assert tr.fixture_leaks() == []
+
+
+def test_session_fixture_is_not_checked_at_scope_end(monkeypatch):
+    # Set up once, dies with the process: can't affect a later test.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    fx = _fixture("session", "server")
+    _fixture_instance(tr, w, fx, "s1")
+    _fixture_instance(tr, w, fx, "s2")
+    assert tr.fixture_leaks() == []
+
+
+def test_nested_fixture_resources_belong_to_the_inner_fixture(monkeypatch):
+    # getfixturevalue inside a fixture: the inner one's resources are not the
+    # outer one's leak.
+    w = World(monkeypatch)
+    tr = LeakTracker()
+    _warm(tr)
+    outer, inner = _fixture("module", "outer"), _fixture("module", "inner")
+    for n in (1, 2):
+
+        def setup(n=n):
+            def outer_body():
+                _wrap(tr.pytest_fixture_setup(inner, None), lambda: w.threads.add(f"in{n}"))
+
+            _wrap(tr.pytest_fixture_setup(outer, None), outer_body)
+
+        def teardown():
+            tr.pytest_fixture_post_finalizer(outer, None)
+            tr.pytest_fixture_post_finalizer(inner, None)
+
+        _test(tr, f"t.py::n{n}", setup=setup, teardown=teardown)
+    assert [f["fixture"] for f in tr.fixture_leaks()] == ["inner"]
+
+
 def test_wider_fixture_with_unreadable_fds(monkeypatch):
     w = World(monkeypatch, fds=False)
     tr = LeakTracker()
@@ -361,6 +454,20 @@ def test_non_teardown_report_ignores_deltas(monkeypatch):
     _, payload = p._conn.sent[-1]
     assert "thread_delta" not in payload
     assert "t.py::t" in p._leaks._res  # not consumed on the call report
+
+
+def test_sessionfinish_sends_fixture_leaks(monkeypatch):
+    p = _plugin(monkeypatch)
+    leak = {"fixture": "srv", "scope": "module", "threads": 2, "fds": 0, "instances": 2}
+    monkeypatch.setattr(p._leaks, "fixture_leaks", lambda: [leak])
+    p._send_fixture_leaks()
+    assert p._conn.sent[-1] == ("fixture_leaks", {"leaks": [leak]})
+
+
+def test_sessionfinish_omits_empty_fixture_leaks(monkeypatch):
+    p = _plugin(monkeypatch)
+    p._send_fixture_leaks()
+    assert p._conn.sent == []
 
 
 def test_leakcheck_disabled_has_no_tracker(monkeypatch):

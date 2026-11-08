@@ -7,6 +7,18 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **The run history costs less per run.** `.rstest_cache/history.msgpack`
+  was decoded at the start of every run, again to record the run, and once
+  more for each of `--doctor`, `--html` and `--durations-regress`. It is now
+  read at most once, only when something needs it (not at start with
+  `--auto-quarantine=0`), and stored by column (schema 2) instead of one
+  msgpack value per field, so it decodes about 3x and encodes about 1.5x
+  faster. On pandas (193k tests, 50 runs of history) the per-run overhead
+  drops from 0.85s to 0.40s. A schema 1 file converts on first read.
+  Builds up to 0.10.x can't read schema 2: they treat a local file as
+  corrupt and start it over, and fail to pull a shared cache base a newer
+  build compacted. Upgrade every machine that shares a cache together.
+
 - **`@serial` tests of one module share its module and class fixtures.** The
   serial phase reaches the designated worker a few tests at a time, and the
   last test of each batch ran as if it were the session's last, tearing down

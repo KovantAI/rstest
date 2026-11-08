@@ -957,6 +957,15 @@ class StreamPlugin:
                 for (name, scope), (c, t, const, fp) in self._fixtures.items()
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
+        self._send_fixture_leaks()
+
+    def _send_fixture_leaks(self) -> None:
+        # Wide fixtures that leaked past their scope end (leak check). Sent
+        # after runtestloop's final teardown, so every class/module/package
+        # fixture has been finalized.
+        leaks = self._leaks.fixture_leaks() if self._leaks is not None else []
+        if leaks:
+            self._conn.send("fixture_leaks", {"leaks": leaks})
 
     def _tbstyle(self) -> str:
         option = getattr(self._config, "option", None)
