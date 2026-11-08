@@ -307,6 +307,10 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                     self._conn.send("stopped", {"unrun": list(indices), "reason": _RUN_STOPPED})
                 else:
                     pending.extend(indices)
+                    # New work ends the drain (as in the lazy loop): hold the
+                    # last item for its successor again. The orchestrator
+                    # re-sends no_more_items at its next exhaustion.
+                    draining = False
             elif kind == "node_down":
                 # Crash cleanup on behalf of a dead sibling.
                 self.run_foreign_node_down(session.config, msg["payload"])

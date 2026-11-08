@@ -3,6 +3,21 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **`@serial` tests of one module share its module and class fixtures.** The
+  serial phase reaches the designated worker a few tests at a time, and the
+  last test of each batch ran as if it were the session's last, tearing down
+  its module and class fixtures for the next serial test from the same module
+  to set up again. Each is now set up once, as under pytest.
+
+- **`-v` shows skip and xfail reasons at `-n 2` and up.** pytest prints
+  `SKIPPED (no db)`, `XFAIL (upstream bug)` and `XPASS (reason)`, trimmed to
+  the terminal width at `-v` and whole at `-vv`; a parallel run printed the
+  bare word. It now matches pytest.
+
 ## 0.10.1 (2026-11-06)
 
 ### Fixes

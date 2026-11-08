@@ -27,6 +27,7 @@ from _harness import (
     SCOPE_C,
     SERIAL,
     SERIAL_CRASH,
+    SERIAL_SCOPE,
     STEAL,
     STEAL_CONFTEST,
     STEAL_SMALL,
@@ -238,6 +239,45 @@ def gate_serial_mark(g, args, binary):
         "serial after parallel",
         min(s["start"] for s in serial) >= max(p["end"] for p in par),
     )
+
+
+def gate_serial_fixture_scope(g, args, binary):
+    # Serial tests of one module share its module/class fixtures: one setup
+    # each, as under pytest, though the serial phase reaches the designate a
+    # chunk at a time after it drained. A rerun arriving after that drain
+    # must still run (no held item waiting forever for a successor).
+    print("== serial fixture scope ==")
+    g.write("serialscope/test_scope.py", SERIAL_SCOPE)
+    for n in ("2", "4"):
+        log = g.tmp / f"serial_scope_{n}.jsonl"
+        clear_e2e_log(log)
+        marker = g.tmp / f"serial_scope_marker_{n}"
+        marker.unlink(missing_ok=True)
+        r = g.run(
+            "serialscope",
+            "-n",
+            n,
+            "--reruns",
+            "1",
+            env_extra={"RSTEST_E2E_LOG": str(log), "SERIAL_SCOPE_MARKER": str(marker)},
+            timeout=60,
+        )
+        check(
+            f"serial scope -n {n}: green, rerun ran",
+            "12 passed, 1 flaky" in r.stdout,
+            r.stdout[-250:],
+        )
+        setups = [
+            line
+            for f in g.tmp.glob(log.name + ".*")
+            for line in f.read_text(encoding="utf-8").splitlines()
+        ]
+        # The rerun sets the module fixture up again, as pytest-rerunfailures does.
+        check(
+            f"serial scope -n {n}: module/class fixtures set up once",
+            sorted(setups) == ["class", "module", "module"],
+            f"setups={sorted(setups)}",
+        )
 
 
 def gate_x_maxfail(g, args, binary):

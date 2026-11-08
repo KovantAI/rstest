@@ -319,6 +319,65 @@ def gate_failure_output(g, args, binary):
         )
 
 
+def gate_verbose_skip_reasons(g, args, binary):
+    # pytest -v prints `SKIPPED (reason)` / `XFAIL (reason)`, trimmed to the
+    # terminal at -v and whole at -vv; the parallel -v lines must carry the
+    # same reasons (worker prefix and percentage aside).
+    print("== verbose skip reasons ==")
+    g.write(
+        "vskip/test_v.py",
+        "import pytest\n"
+        "def test_ok(): pass\n"
+        "@pytest.mark.skip(reason='no db')\n"
+        "def test_skip_mark(): pass\n"
+        "def test_skip_call(): pytest.skip('not on this platform')\n"
+        "def test_skip_bare(): pytest.skip()\n"
+        "@pytest.mark.xfail(reason='upstream bug')\n"
+        "def test_xfail(): assert 0\n"
+        "@pytest.mark.xfail(reason='maybe fixed')\n"
+        "def test_xpass(): pass\n"
+        "def test_skip_long():\n"
+        "    pytest.skip('a fairly long reason that will certainly not fit in eighty "
+        "columns of terminal width once the node id is in front of it')\n",
+    )
+    line = re.compile(r"^(?:\[gw\d+\] )?(\S+::\S+) (SKIPPED|XFAIL|XPASS)(.*?)\s*\[\s*\d+%\]$")
+
+    # At -vv pytest wraps a long reason over several lines (its percentage
+    # on the last); rstest keeps it on one. Join pytest's back up.
+    def reasons(out):
+        lines = []
+        for ln in out.splitlines():
+            if (
+                lines
+                and re.search(r" (SKIPPED|XFAIL|XPASS) \(", lines[-1])
+                and not lines[-1].endswith("%]")
+            ):
+                lines[-1] += " " + ln.strip()
+            else:
+                lines.append(ln)
+        return sorted(m.groups() for m in map(line.match, lines) if m)
+
+    for v in ("-v", "-vv"):
+        ref, got = (
+            reasons(
+                g.run(
+                    "vskip",
+                    "-n",
+                    n,
+                    v,
+                    env_extra={"COLUMNS": "80"},
+                    env_drop=("CI", "BUILD_NUMBER"),
+                ).stdout
+            )
+            for n in ("0", "2")
+        )
+        check(
+            f"{v} skip/xfail reasons at -n 2 match pytest",
+            len(ref) == 6 and got == ref,
+            f"{ref}\n{got}",
+        )
+
+
 def gate_session_error_output(g, args, binary):
     print("== session error output ==")
     # A warning raised at unconfigure under `filterwarnings = error` escapes the

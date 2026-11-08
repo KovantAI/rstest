@@ -34,10 +34,11 @@ parallel run.
 Serial tests run in the **designated worker's own session**, not a fresh one:
 they reuse the session-scoped fixtures that worker already built during its
 parallel phase (one instance, on that worker, not a merge of all workers'
-fixtures). Narrower scopes (package, module, class) may be set up again,
-even between two serial tests of one module. So a serial test depending on a
-session fixture gets a normally-constructed one; just don't expect it to see
-state another worker's copy of that fixture accumulated.
+fixtures). Narrower scopes (package, module, class) start fresh for the
+serial phase and are then shared as under pytest: serial tests of one module
+set its module fixtures up once. So a serial test depending on a session
+fixture gets a normally-constructed one; just don't expect it to see state
+another worker's copy of that fixture accumulated.
 
 ## File affinity
 

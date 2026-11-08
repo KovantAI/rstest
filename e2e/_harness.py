@@ -349,6 +349,7 @@ REPLAY_ORDER = fx("replay_order.py")
 
 
 SERIAL = fx("serial.py")
+SERIAL_SCOPE = fx("serial_scope.py")
 
 
 WARN = fx("warn.py")
