@@ -23,7 +23,7 @@ from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _random_order_seed,
-    _randomly_seed,
+    _randomly_workerinput_seed,
     _seed_pytest_mypy,
     _seed_pytest_retry,
     _warn_pytest_pins,
@@ -553,8 +553,9 @@ class StreamPlugin:
             "testrun_uid": run_uid,
             # pytest-randomly's master broadcasts one resolved seed; absent,
             # the plugin KeyErrors at -n >= 2. rstest has no master, so we
-            # derive one run-level seed from the shared uid (all workers agree).
-            "randomly_seed": _randomly_seed(run_uid),
+            # broadcast an explicit --randomly-seed, else derive one run-level
+            # seed from the shared uid (all workers agree).
+            "randomly_seed": _randomly_workerinput_seed(config, run_uid),
             # pytest-random-order reads this key unconditionally when workerinput
             # exists (even with reordering off, its default); absent, it KeyErrors
             # at collection. Shared value so all workers agree (full-collect hash).

@@ -9,6 +9,7 @@ from rstest_worker._internal.plugincompat import (
     _pytest_pin_conflicts,
     _random_order_seed,
     _randomly_seed,
+    _randomly_workerinput_seed,
     _warn_pytest_pins,
 )
 
@@ -74,6 +75,19 @@ def test_random_order_seed_when_plugin_absent_still_derives():
     # harmless shared default; the key is unused when the plugin isn't loaded.
     seed = _random_order_seed(_OptConfig(None, raise_on_get=True), "ff")
     assert seed == "default:" + str(_randomly_seed("ff"))
+
+
+def test_randomly_workerinput_seed_honors_explicit_seed():
+    # pytest-randomly >= 5.1 workers take workerinput verbatim, so an explicit
+    # --randomly-seed=N must be what rstest broadcasts.
+    assert _randomly_workerinput_seed(_OptConfig(1234), "abc123") == 1234
+
+
+def test_randomly_workerinput_seed_derives_from_uid_otherwise():
+    for opt in ("default", "last"):
+        assert _randomly_workerinput_seed(_OptConfig(opt), "ff") == _randomly_seed("ff")
+    plugin_absent = _OptConfig(None, raise_on_get=True)
+    assert _randomly_workerinput_seed(plugin_absent, "ff") == _randomly_seed("ff")
 
 
 class _Plugin:
