@@ -20,9 +20,9 @@ use anyhow::Result;
 use regex::Regex;
 use serde::Serialize;
 
-use super::bisect::MAXFAIL_LIFT;
+use super::bisect::{child_pins, run_selection, MAXFAIL_LIFT};
 use super::check::MigrateMeta;
-use super::{run_session_capture, Outcomes, Phase};
+use super::{collect_session, run_session_capture, Outcomes, Phase};
 use crate::config;
 use crate::reporting::sink::Sink;
 
@@ -86,8 +86,11 @@ pub struct TrialReport {
     /// Tests that failed with xdist hidden.
     pub failed: usize,
     /// Tests that pass with pytest-xdist loaded but fail, skip, or are no
-    /// longer collected with it hidden.
+    /// longer collected with it hidden, every time they were re-run.
     pub regressions: Vec<String>,
+    /// Tests that failed without pytest-xdist in the trial but passed when
+    /// re-run without it: flaky, not a dependency on it. Not blocking.
+    pub flaky: Vec<String>,
     /// Whether the session with xdist hidden started and reported outcomes.
     pub started: bool,
     /// Tests that ran with xdist hidden.
@@ -416,8 +419,87 @@ fn run_trial(
     let (hidden, stderr) = run_session_capture(python, &[], &hidden_args)?;
     let mut report = trial_report(baseline.as_ref(), hidden.as_ref(), &stderr);
     report.baseline_error = baseline_error;
+    if !report.regressions.is_empty() {
+        sink.warn(&format!(
+            "rstest xdist-removal-check: re-running {} test(s) that regressed, pytest-xdist hidden…",
+            report.regressions.len()
+        ));
+        let candidates = std::mem::take(&mut report.regressions);
+        report.regressions = confirm_regressions(python, &hidden_args, &candidates)?;
+        report.flaky = candidates
+            .into_iter()
+            .filter(|id| !report.regressions.contains(id))
+            .collect();
+        // `failed` is reported as "fail with pytest-xdist loaded too": the
+        // flaky ones passed with it, so they don't belong in that count.
+        let flaky_failed = report
+            .flaky
+            .iter()
+            .filter(|id| {
+                hidden
+                    .as_ref()
+                    .and_then(|h| h.get(*id))
+                    .is_some_and(|r| r.phase == Phase::Fail)
+            })
+            .count();
+        report.failed -= flaky_failed;
+    }
     render_trial(&report, sink);
     Ok(report)
+}
+
+/// Re-runs of a test that regressed in the trial before it counts against the
+/// uninstall: one full run can't tell a flaky test from one that needs
+/// pytest-xdist.
+const CONFIRM_RUNS: usize = 2;
+
+/// The `candidates` that still fail, skip or go missing with pytest-xdist
+/// hidden in every one of [`CONFIRM_RUNS`] re-runs of just them (serial, the
+/// trial's options, paths dropped). One that passes in any re-run is flaky:
+/// it failed in the trial for some other reason (an order or a parallel
+/// race), while a real dependency on pytest-xdist fails every time.
+fn confirm_regressions(
+    python: &Path,
+    hidden_args: &[String],
+    candidates: &[String],
+) -> Result<Vec<String>> {
+    let options: Vec<String> = hidden_args
+        .iter()
+        .zip(crate::cli::positional_mask(hidden_args))
+        .filter(|(_, positional)| !positional)
+        .map(|(a, _)| a.clone())
+        .collect();
+    // Pin the re-runs to the collection's rootdir and config, as bisect does:
+    // they select by absolute path, which can resolve another config.
+    let collected = collect_session(python, &options)?;
+    let Some(rootdir) = collected.rootdir.map(PathBuf::from) else {
+        return Ok(candidates.to_vec());
+    };
+    let mut args = match &collected.inifile {
+        Some(ini) => {
+            let cut = collected.confcutdir.map_or(rootdir.clone(), PathBuf::from);
+            child_pins(&rootdir, Path::new(ini), &cut)
+        }
+        None => vec!["--rootdir".into(), rootdir.display().to_string()],
+    };
+    args.extend(options);
+    let mut failing = candidates.to_vec();
+    for _ in 0..CONFIRM_RUNS {
+        if failing.is_empty() {
+            break;
+        }
+        let out = run_selection(python, &rootdir, &args, &failing)?;
+        failing = still_failing(&failing, &out);
+    }
+    Ok(failing)
+}
+
+/// The `ids` that didn't pass in `out` (failed, skipped or not collected).
+fn still_failing(ids: &[String], out: &Outcomes) -> Vec<String> {
+    ids.iter()
+        .filter(|id| out.get(*id).is_none_or(|r| r.phase != Phase::Pass))
+        .cloned()
+        .collect()
 }
 
 /// The stderr tail when pytest-xdist is installed but the run with it loaded
@@ -468,6 +550,7 @@ fn trial_report(
         compared: baseline.is_some(),
         error: None,
         failed: hidden.values().filter(|r| r.phase == Phase::Fail).count(),
+        flaky: Vec::new(),
         regressions,
         started: true,
         tests: hidden.len(),
@@ -489,6 +572,19 @@ fn render_trial(t: &TrialReport, sink: &mut Sink) {
             sink.out_line(&format!("    {line}"));
         }
         return;
+    }
+    if !t.flaky.is_empty() {
+        sink.out_line(&format!(
+            "TRIAL: {} test(s) failed without pytest-xdist but passed when re-run without it \
+             (flaky, not a dependency on it; not blocking):",
+            t.flaky.len()
+        ));
+        for id in t.flaky.iter().take(10) {
+            sink.out_line(&format!("    {id}"));
+        }
+        if t.flaky.len() > 10 {
+            sink.out_line(&format!("    … and {} more", t.flaky.len() - 10));
+        }
     }
     if t.regressions.is_empty() {
         let note = match (t.failed, t.compared) {
@@ -1979,6 +2075,16 @@ def pytest_configure(config):
     }
 
     #[test]
+    fn confirmation_keeps_only_tests_that_fail_again() {
+        // a passes on re-run (flaky), b fails again, c skips, d is gone.
+        let rerun = outcomes(&[("a", Phase::Pass), ("b", Phase::Fail), ("c", Phase::Skip)]);
+        assert_eq!(
+            still_failing(&v(&["a", "b", "c", "d"]), &rerun),
+            v(&["b", "c", "d"])
+        );
+    }
+
+    #[test]
     fn trial_empty_run_after_usage_error_is_not_started() {
         let base = outcomes(&[("a", Phase::Pass)]);
         let err = "pytest.main(): error: unrecognized arguments: -n --dist\n";
@@ -2080,6 +2186,7 @@ def pytest_configure(config):
             serde_json::json!({
                 "compared": false,
                 "failed": 0,
+                "flaky": [],
                 "regressions": [],
                 "started": true,
                 "tests": 0

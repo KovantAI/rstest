@@ -257,10 +257,13 @@ Also run the suite with pytest-xdist hidden from the plugin manager
 would. The `xdist` module stays importable, so `import xdist` sites are
 caught only by the static scan. When pytest-xdist is installed it first runs the suite with it
 loaded, then names every test that passes with it and fails (or is no longer
-collected) without it. If the session with xdist hidden never starts (a usage
-error, a plugin validation error), it prints pytest's error. A regression or a
-session that doesn't start fails the gate. Costs one or two full runs; without
-this flag the command runs nothing.
+collected) without it. Those tests are re-run on their own with xdist hidden,
+up to twice: one that passes in a re-run is listed as flaky (it failed for
+another reason, such as an order or a parallel race) and doesn't block; one
+that fails every time is a regression. If the session with xdist hidden never
+starts (a usage error, a plugin validation error), it prints pytest's error. A
+regression or a session that doesn't start fails the gate. Costs one or two
+full runs, plus the re-runs; without this flag the command runs nothing.
 
 #### `--xdist-removal-json <path>`
 

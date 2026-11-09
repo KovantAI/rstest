@@ -136,6 +136,7 @@ from gates.plugins import (
     gate_silent_master_warning,
     gate_testnodedown_for_crashed_workers,
     gate_xdist_master_side_hooks,
+    gate_xdist_removal_trial_flaky,
 )
 from gates.replay import (
     gate_replay,
@@ -221,6 +222,7 @@ def main():
         gate_pytest_rerunfailures_xdist_no_sock_port_,
         gate_pdb_with_addopts_n_and_xdist,
         gate_looponfail_with_xdist,
+        gate_xdist_removal_trial_flaky,
         gate_pytest_retry_xdist_server_port_self_prov,
         gate_pytest_benchmark_autodisable,
         gate_pytest_html_real_plugin,

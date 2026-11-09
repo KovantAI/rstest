@@ -71,6 +71,18 @@ may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
    `--migrate-check-json` gate (`flag-map.md`).
 4. **Verify.** `rstest` green, outcomes match the pytest baseline, report the
    speedup.
+5. **Drop pytest-xdist** (if the project uses it). rstest is the parallel
+   runner, so the package is dead weight once no CI job falls back to it. Run
+   `rstest xdist-removal-check --xdist-trial`: it scans config, sources and
+   installed plugins for what breaks without it (`-n` / `--dist` in
+   `addopts`, `pytest-xdist` in `required_plugins`, `import xdist`, xdist hooks
+   not marked `optionalhook=True`, `hasplugin("xdist")` gates), then runs the
+   suite with xdist hidden. Fix each `BLOCKS` finding with its `FIX` line
+   (`-n` / `--dist` go to `[tool.rstest]` or the rstest command line), review
+   the `CHANGES` ones, and re-run until it prints **ready**. Tests it lists as
+   flaky failed for another reason and don't block. Then remove pytest-xdist
+   from every dependency list (`pyproject.toml`, requirements files, the lock
+   file) and drop xdist-only flags left in CI.
 
 ### Judgment calls (where you earn your keep)
 
@@ -88,6 +100,12 @@ may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
   interactive: default to the upstream fix and say so.)
 - **Gate CI on *new* issues**, tolerate triaged ones with
   `--migrate-allow <substring>`.
+- **Keep pytest-xdist while it's the fallback.** During a staged rollout a
+  pytest-xdist CI job may still run beside rstest; uninstall only once it's
+  gone. A "session did not start" trial is real: the suite breaks without
+  xdist under plain pytest too. Fix the cause in the error it prints (e.g. a
+  plugin's deprecation warning raised under `filterwarnings = error`: upgrade
+  the plugin or ignore that one warning) rather than keep xdist for it.
 - **`migrate-check` or `audit`?** `migrate-check` is the onboarding preflight
   (unstable ids first, then classification). Once it's clean, `rstest audit`
   is the faster repeat check and prints a paste-ready `@pytest.mark.serial`

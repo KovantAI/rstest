@@ -194,7 +194,7 @@ fn argsfile_body(rootdir: &Path, sel: &[String]) -> String {
 /// Run exactly `sel` (rootdir-relative nodeids) at `-n 0`. The selection rides
 /// a pytest `@argsfile`, not argv: a victim late in a large suite has a prefix
 /// of thousands of ids, past the OS argv limit.
-fn run_selection(
+pub(super) fn run_selection(
     python: &Path,
     rootdir: &Path,
     pytest_args: &[String],
