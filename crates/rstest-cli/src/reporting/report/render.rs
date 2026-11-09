@@ -426,7 +426,7 @@ fn node_markup(palette: crate::reporting::color::Palette, nodeid: &str) -> Strin
 /// pytest's `_pytest._io.wcwidth.wcswidth`: terminal columns, `None` (its
 /// -1) when `s` holds a control char, an ANSI escape included. pytest NFC-
 /// normalizes first; combining marks are zero-wide either way.
-fn wcswidth(s: &str) -> Option<usize> {
+pub(crate) fn wcswidth(s: &str) -> Option<usize> {
     use unicode_width::UnicodeWidthChar;
     s.chars()
         .map(|c| match c as u32 {
@@ -441,10 +441,10 @@ fn wcswidth(s: &str) -> Option<usize> {
 /// pytest's `_format_trimmed(" - {}", msg, available)`: the message's first
 /// line, ellipsized to fit after the ` - ` separator; `None` when not even
 /// the ellipsis fits. A message with no width (control chars) is never
-/// trimmed, as in pytest.
-fn trim_message(msg: &str, available: isize) -> Option<String> {
+/// trimmed, as in pytest. Also serves `" ({})"`, the same 3 columns.
+pub(crate) fn trim_message(msg: &str, available: isize) -> Option<String> {
     let first = msg.lines().next().unwrap_or("");
-    const SEP: isize = 3; // " - "
+    const SEP: isize = 3; // " - " or " ()"
     const ELLIPSIS: &str = "...";
     if SEP + ELLIPSIS.len() as isize > available {
         return None;
@@ -494,6 +494,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         }
     }
 

@@ -94,11 +94,13 @@ access violation (the Windows segfault, `0xC0000005`) shows as
 
 ### Wait-bound and leak diagnostics { #diagnostics }
 
-- **Child CPU time.** Windows reports no CPU time for child processes, so a
-  test that runs a CPU-heavy tool through `subprocess.run` reads as
-  **waiting** in [`--doctor`](doctor.md) and the
-  [wait-bound](wait-bound.md) analysis, where on Linux and macOS it reads as
-  computing.
+- **Child CPU time.** Each worker runs in its own
+  [job object](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
+  and [`--doctor`](doctor.md) reads CPU time from the job, so a test that
+  runs a CPU-heavy tool through `subprocess.run` reads as computing, as on
+  Linux and macOS. The job also counts children the test never waited for,
+  which Linux and macOS miss. A child started with
+  `CREATE_BREAKAWAY_FROM_JOB` leaves the job and is not counted.
 - **File descriptors.** fd leak tracking reads `/proc/self/fd` or `/dev/fd`,
   neither of which exists on Windows, so it is off there; thread leaks are
   still tracked ([Resource leaks](resource-leaks.md)).

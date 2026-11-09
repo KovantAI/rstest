@@ -158,6 +158,51 @@ def gate_looponfail_with_xdist(g, args, binary):
         )
 
 
+def gate_xdist_removal_trial_flaky(g, args, binary):
+    print("== xdist-removal-check --xdist-trial: flaky vs needs xdist ==")
+    # The trial runs the suite once with pytest-xdist loaded, once hidden. A
+    # test that only happened to fail in the hidden run is flaky: re-run, it
+    # passes, and it must not block the uninstall. A test that needs xdist
+    # fails every re-run and still blocks.
+    venv = Path(args.venv + "-xdist").resolve()
+    make_venv(venv, extra_deps=["pytest-xdist"])
+    gx = Gate(binary, venv)
+    count = gx.tmp / "xr_runs"
+    gx.write(
+        "xr/test_flaky.py",
+        "import os\n"
+        "def test_flaky():\n"
+        "    # passes, then fails once (the hidden run), then passes again\n"
+        "    p = os.environ['XR_COUNT']\n"
+        "    n = int(open(p).read()) + 1 if os.path.exists(p) else 1\n"
+        "    open(p, 'w').write(str(n))\n"
+        "    assert n != 2\n",
+    )
+    xr = str(gx.tmp / "xr")
+    count.unlink(missing_ok=True)
+    r = gx.run("xdist-removal-check", "--xdist-trial", cwd=xr, env_extra={"XR_COUNT": str(count)})
+    out = r.stdout + r.stderr
+    check(
+        "xdist trial: a flaky failure doesn't block the removal",
+        r.returncode == 0 and "==> ready" in out and "flaky" in out and "test_flaky" in out,
+        f"rc={r.returncode} " + out[-600:],
+    )
+    gx.write(
+        "xr/test_needs.py",
+        "def test_needs_xdist(request):\n"
+        "    assert request.config.pluginmanager.hasplugin('xdist')\n",
+    )
+    count.unlink(missing_ok=True)
+    r = gx.run("xdist-removal-check", "--xdist-trial", cwd=xr, env_extra={"XR_COUNT": str(count)})
+    out = r.stdout + r.stderr
+    regressed = out.split("fail or skip without it:")[-1].split("==>")[0]
+    check(
+        "xdist trial: a test that needs xdist still blocks, the flaky one doesn't",
+        r.returncode == 1 and "test_needs_xdist" in regressed and "test_flaky" not in regressed,
+        f"rc={r.returncode} " + out[-600:],
+    )
+
+
 def gate_pytest_rerunfailures_xdist_no_sock_port_(g, args, binary):
     print("== pytest-rerunfailures + xdist (no sock_port KeyError) ==")
     # rerunfailures+xdist reads workerinput["sock_port"], a key only an xdist

@@ -19,10 +19,9 @@ use crate::cache;
 use crate::reporting::report::{Run, TestEntry};
 
 pub const FILE: &str = "history.msgpack";
-/// Bump on any change a released build can't read. Unreleased so far: the
-/// layout still changes under 1, and a dev build's cache in an older layout
-/// is a corrupt one (delete it).
-const SCHEMA: u32 = 1;
+/// Bump on any change a released build can't read. 1: one msgpack value per
+/// entry field. 2: columns ([`Packed`]); a 1 file converts on read.
+const SCHEMA: u32 = 2;
 
 /// Outcome names, indexed by [`Entry::outcome`]. Append only: the index is
 /// what's on disk.
@@ -76,7 +75,8 @@ pub struct RunSlice {
     pub tests: HashMap<String, Entry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "Packed")]
 pub struct History {
     schema: u32,
     pub runs: Vec<RunMeta>,
@@ -139,7 +139,11 @@ impl History {
             .tests
             .iter()
             .filter(|(_, s)| {
-                !failing_now(s.iter().map(Entry::outcome_name))
+                // Only a failure or a rerun rescue can flip: skip the
+                // all-green majority before the per-entry run lookups.
+                s.iter()
+                    .any(|e| matches!(e.outcome_name(), "flaky") || is_fail(e.outcome_name()))
+                    && !failing_now(s.iter().map(Entry::outcome_name))
                     && flips(s.iter().filter_map(|e| runs.get(&e.run).map(|r| (*r, e)))) >= min
             })
             .map(|(id, _)| id.clone())
@@ -340,6 +344,14 @@ pub fn from_msgpack(raw: &[u8]) -> Result<Option<History>, rmp_serde::decode::Er
     match rmp_serde::from_slice::<History>(raw) {
         Ok(h) => Ok((h.schema == SCHEMA).then_some(h)),
         Err(e) => match msgpack_schema(raw) {
+            // Converted once: the next record writes it back as schema 2.
+            Some(1) => rmp_serde::from_slice::<V1>(raw).map(|v| {
+                Some(History {
+                    schema: SCHEMA,
+                    runs: v.runs,
+                    tests: v.tests,
+                })
+            }),
             Some(s) if s != u64::from(SCHEMA) => Ok(None),
             _ => Err(e),
         },
@@ -352,10 +364,41 @@ pub fn from_newer_build(raw: &[u8]) -> bool {
     msgpack_schema(raw).is_some_and(|s| s > u64::from(SCHEMA))
 }
 
-/// The `schema` of a msgpack history, either struct encoding.
+/// The `schema` of a msgpack history, either struct encoding, of any layout:
+/// the first field (`to_vec`) or the `schema` key (`to_vec_named`), every
+/// other value skipped unread.
 fn msgpack_schema(raw: &[u8]) -> Option<u64> {
-    let v = rmp_serde::from_slice::<serde_json::Value>(raw).ok()?;
-    v.get("schema").or_else(|| v.get(0))?.as_u64()
+    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct Schema(Option<u64>);
+    impl<'de> Deserialize<'de> for Schema {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Schema;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a history")
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Schema, A::Error> {
+                    let schema = a.next_element::<u64>().ok().flatten();
+                    while a.next_element::<IgnoredAny>()?.is_some() {}
+                    Ok(Schema(schema))
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Schema, A::Error> {
+                    let mut schema = None;
+                    while let Some(k) = a.next_key::<String>()? {
+                        if k == "schema" {
+                            schema = a.next_value::<u64>().ok();
+                        } else {
+                            a.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(Schema(schema))
+                }
+            }
+            d.deserialize_any(V)
+        }
+    }
+    rmp_serde::from_slice::<Schema>(raw).ok()?.0
 }
 
 pub fn load() -> History {
@@ -401,21 +444,250 @@ pub fn slice(run: &Run, epoch: u64, commit: Option<&str>, env: &str) -> Option<R
     })
 }
 
-/// Append this run to the stored history. Best-effort: IO errors are ignored.
-pub fn record(slice: RunSlice) {
-    record_in(&cache::dir(), slice, cap());
+/// A run's view of the history file: read at most once, and only when
+/// something asks (auto-quarantine, the doctor, `--html`, the duration gate,
+/// `record`). On a large suite one read is a few hundred milliseconds.
+#[derive(Default)]
+pub struct RunHistory {
+    loaded: Option<(History, Option<Stamp>)>,
 }
 
-/// `record` against an explicit cache dir and per-test cap.
-fn record_in(dir: &std::path::Path, slice: RunSlice, cap: usize) {
-    // Locked load→append→write: two concurrent sessions in one cwd would
-    // otherwise drop one run's entries.
-    let path = dir.join(FILE);
-    cache::with_lock_in(dir, || {
-        let mut h = load_from(&path);
-        h.append(slice.run, slice.tests.into_iter().collect(), cap);
-        save_to(&path, &h);
-    });
+#[cfg(test)]
+impl From<History> for RunHistory {
+    /// An already-read history (no stamp: `record` re-reads the file).
+    fn from(h: History) -> Self {
+        Self {
+            loaded: Some((h, None)),
+        }
+    }
+}
+
+/// What `record` compares to tell whether the file changed since the run read
+/// it: another session's record or a `--cache-pull` overlay.
+type Stamp = (u64, std::time::SystemTime);
+
+fn stamp(path: &std::path::Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?))
+}
+
+impl RunHistory {
+    /// Whether the file has been read yet.
+    #[cfg(test)]
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.is_some()
+    }
+
+    /// The history, read on first use.
+    pub fn get(&mut self) -> &History {
+        self.get_in(&cache::dir())
+    }
+
+    fn get_in(&mut self, dir: &std::path::Path) -> &History {
+        let path = dir.join(FILE);
+        &self
+            .loaded
+            .get_or_insert_with(|| (load_from(&path), stamp(&path)))
+            .0
+    }
+
+    /// Append this run to the stored history, reusing the copy this run
+    /// already read when the file is unchanged since. Locked load, append,
+    /// write: two concurrent sessions in one cwd would otherwise drop one
+    /// run's entries. Best-effort: IO errors are ignored.
+    pub fn record(self, slice: RunSlice) {
+        self.record_in(&cache::dir(), slice, cap());
+    }
+
+    fn record_in(self, dir: &std::path::Path, slice: RunSlice, cap: usize) {
+        let path = dir.join(FILE);
+        cache::with_lock_in(dir, || {
+            // ponytail: (len, mtime) identity; a same-size rewrite within the
+            // filesystem's mtime tick goes unseen. Hash the file if that bites.
+            let mut h = match self.loaded {
+                Some((h, Some(seen))) if stamp(&path) == Some(seen) => h,
+                _ => load_from(&path),
+            };
+            h.append(slice.run, slice.tests.into_iter().collect(), cap);
+            save_to(&path, &h);
+        });
+    }
+}
+
+/// The on-disk layout (schema 2): columns, not one msgpack value per entry
+/// field. Test ids once, then every entry's fields as flat little-endian byte
+/// blobs (msgpack `bin`), each decoded with one copy. On a 193k-test, 50-run
+/// history that is ~10M entries: per-value parsing was most of a read.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct Packed {
+    schema: u32,
+    runs: Vec<RunMeta>,
+    ids: Vec<String>,
+    /// Per test: how many entries it has (u32).
+    lens: Blob,
+    /// Per entry: the index of its run in `runs` (u32).
+    run: Blob,
+    /// Per entry: the [`Entry::outcome`] byte.
+    outcome: Blob,
+    /// Per entry: call seconds (f32), NaN when the call phase never ran.
+    call: Blob,
+    /// Per entry: setup seconds (f32).
+    setup: Blob,
+}
+
+/// Bytes as a msgpack `bin`, not an array of numbers.
+#[derive(Default)]
+struct Blob(Vec<u8>);
+
+impl Serialize for Blob {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Blob {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = Blob;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("bytes")
+            }
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Blob, E> {
+                Ok(Blob(v.to_vec()))
+            }
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Blob, E> {
+                Ok(Blob(v))
+            }
+        }
+        d.deserialize_byte_buf(V)
+    }
+}
+
+/// [`Packed`] as written: borrows the history's ids and runs.
+#[derive(Serialize)]
+struct PackedOut<'a> {
+    schema: u32,
+    runs: &'a [RunMeta],
+    ids: Vec<&'a str>,
+    lens: Blob,
+    run: Blob,
+    outcome: Blob,
+    call: Blob,
+    setup: Blob,
+}
+
+impl Serialize for History {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // `append` and `merged` keep runs in `seq` order, so a binary search
+        // finds an entry's run: ~10M hash lookups were most of an encode.
+        let sorted = self.runs.windows(2).all(|w| w[0].seq < w[1].seq);
+        let by_seq: HashMap<u64, usize> = if sorted {
+            HashMap::new()
+        } else {
+            self.runs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (r.seq, i))
+                .collect()
+        };
+        let index = |seq: u64| -> Option<u32> {
+            let i = if sorted {
+                self.runs.binary_search_by_key(&seq, |r| r.seq).ok()
+            } else {
+                by_seq.get(&seq).copied()
+            };
+            i.map(|i| i as u32)
+        };
+        let n: usize = self.tests.values().map(VecDeque::len).sum();
+        let mut p = PackedOut {
+            schema: self.schema,
+            runs: &self.runs,
+            ids: Vec::with_capacity(self.tests.len()),
+            lens: Blob(Vec::with_capacity(self.tests.len() * 4)),
+            run: Blob(Vec::with_capacity(n * 4)),
+            outcome: Blob(Vec::with_capacity(n)),
+            call: Blob(Vec::with_capacity(n * 4)),
+            setup: Blob(Vec::with_capacity(n * 4)),
+        };
+        for (id, series) in &self.tests {
+            let mut len = 0u32;
+            // An entry whose run is gone has no context to show; drop it
+            // (append and age keep runs and entries in step, so none are).
+            for (e, i) in series.iter().filter_map(|e| index(e.run).map(|i| (e, i))) {
+                p.run.0.extend(i.to_le_bytes());
+                p.outcome.0.push(e.outcome);
+                p.call.0.extend(e.call.unwrap_or(f32::NAN).to_le_bytes());
+                p.setup.0.extend(e.setup.to_le_bytes());
+                len += 1;
+            }
+            p.ids.push(id);
+            p.lens.0.extend(len.to_le_bytes());
+        }
+        p.serialize(s)
+    }
+}
+
+impl TryFrom<Packed> for History {
+    type Error = String;
+
+    fn try_from(p: Packed) -> Result<Self, String> {
+        let words = |b: &Blob| -> Vec<[u8; 4]> {
+            b.0.chunks_exact(4).map(|c| c.try_into().unwrap()).collect()
+        };
+        let (lens, run, call, setup) = (
+            words(&p.lens),
+            words(&p.run),
+            words(&p.call),
+            words(&p.setup),
+        );
+        let n = p.outcome.0.len();
+        let total: usize = lens.iter().map(|l| u32::from_le_bytes(*l) as usize).sum();
+        if lens.len() != p.ids.len()
+            || p.lens.0.len() != 4 * p.ids.len()
+            || total != n
+            || [&p.run, &p.call, &p.setup]
+                .iter()
+                .any(|b| b.0.len() != 4 * n)
+        {
+            return Err("history columns disagree in length".into());
+        }
+        let mut tests = HashMap::with_capacity(p.ids.len());
+        let mut at = 0;
+        for (id, len) in p.ids.into_iter().zip(&lens) {
+            let len = u32::from_le_bytes(*len) as usize;
+            let mut series = VecDeque::with_capacity(len);
+            for k in at..at + len {
+                let r = u32::from_le_bytes(run[k]) as usize;
+                let meta = p.runs.get(r).ok_or("history entry points past its runs")?;
+                let c = f32::from_le_bytes(call[k]);
+                series.push_back(Entry {
+                    run: meta.seq,
+                    outcome: p.outcome.0[k],
+                    call: (!c.is_nan()).then_some(c),
+                    setup: f32::from_le_bytes(setup[k]),
+                });
+            }
+            at += len;
+            tests.insert(id, series);
+        }
+        Ok(History {
+            schema: p.schema,
+            runs: p.runs,
+            tests,
+        })
+    }
+}
+
+/// Schema 1: what released builds up to 0.10 wrote.
+#[derive(Deserialize)]
+struct V1 {
+    // Read for its position: arrays (`to_vec`) are positional.
+    #[allow(dead_code)]
+    schema: u32,
+    runs: Vec<RunMeta>,
+    tests: HashMap<String, VecDeque<Entry>>,
 }
 
 /// Fold runs pulled from the shared cache into the history file at `path`
@@ -623,6 +895,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// What schema 1 wrote: one msgpack value per entry field.
+    fn v1_bytes(h: &History, named: bool) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct V1Out<'a> {
+            schema: u32,
+            runs: &'a [RunMeta],
+            tests: &'a HashMap<String, VecDeque<Entry>>,
+        }
+        let v1 = V1Out {
+            schema: 1,
+            runs: &h.runs,
+            tests: &h.tests,
+        };
+        if named {
+            rmp_serde::to_vec_named(&v1).unwrap()
+        } else {
+            rmp_serde::to_vec(&v1).unwrap()
+        }
+    }
+
+    fn sample(tests: usize, runs: u64) -> History {
+        let now = crate::time::now_epoch_secs();
+        let mut h = History::default();
+        for r in 0..runs {
+            let entries = (0..tests)
+                .map(|t| {
+                    let outcome = if (r as usize + t) % 7 == 0 {
+                        "failed"
+                    } else {
+                        "passed"
+                    };
+                    let call = (t % 5 != 0).then_some(0.01 * t as f32);
+                    let e = Entry {
+                        call,
+                        setup: 0.002,
+                        ..entry(outcome)
+                    };
+                    (format!("tests/test_m{}.py::test_{t}", t % 9), e)
+                })
+                .collect();
+            h.append(meta(now - runs + r), entries, 50);
+        }
+        h
+    }
+
+    #[test]
+    fn schema_1_history_converts_on_read() {
+        let h = sample(30, 4);
+        for named in [false, true] {
+            let got = from_msgpack(&v1_bytes(&h, named)).unwrap().unwrap();
+            assert_eq!(got, h, "named={named}");
+            assert_eq!(got.schema, SCHEMA);
+        }
+    }
+
+    #[test]
+    fn columns_that_disagree_read_as_corrupt() {
+        let h = sample(3, 2);
+        let mut p: Packed = rmp_serde::from_slice(&rmp_serde::to_vec(&h).unwrap()).unwrap();
+        p.outcome.0.pop();
+        assert!(from_msgpack(&rmp_serde::to_vec(&p).unwrap()).is_err());
+        let mut p: Packed = rmp_serde::from_slice(&rmp_serde::to_vec(&h).unwrap()).unwrap();
+        p.run.0[..4].copy_from_slice(&99u32.to_le_bytes());
+        assert!(from_msgpack(&rmp_serde::to_vec(&p).unwrap()).is_err());
+    }
+
+    #[test]
+    fn schema_is_read_from_either_encoding_and_any_layout() {
+        let mut h = sample(3, 2);
+        h.schema = SCHEMA + 1;
+        let newer = rmp_serde::to_vec(&h).unwrap();
+        assert!(from_newer_build(&newer));
+        assert_eq!(from_msgpack(&newer).unwrap(), None);
+        assert!(from_newer_build(&rmp_serde::to_vec_named(&h).unwrap()));
+        h.schema = SCHEMA;
+        assert!(!from_newer_build(&rmp_serde::to_vec(&h).unwrap()));
+        assert_eq!(msgpack_schema(&v1_bytes(&h, false)), Some(1));
+        assert_eq!(msgpack_schema(&v1_bytes(&h, true)), Some(1));
+    }
+
     #[test]
     fn flippers_catch_intermittent_not_steadily_broken() {
         let mut h = History::default();
@@ -767,11 +1119,67 @@ mod tests {
                     marker_timeout: None,
                     no_rerun: false,
                     subtest_desc: None,
+                    subtest_shown: false,
                     cause: None,
                 },
             );
         }
         run
+    }
+
+    fn one_test_slice(epoch: u64) -> RunSlice {
+        RunSlice {
+            run: meta(epoch),
+            tests: HashMap::from([("t".to_string(), entry("passed"))]),
+        }
+    }
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rstest-history-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn run_history_record_keeps_a_run_written_since_it_was_read() {
+        // Another session records between this run's read and its record:
+        // the stale copy must not overwrite that run.
+        let dir = fresh_dir("concurrent");
+        let now = crate::time::now_epoch_secs();
+        let mut mine = RunHistory::default();
+        assert!(mine.get_in(&dir).is_empty());
+        RunHistory::default().record_in(&dir, one_test_slice(now - 1), 50);
+        mine.record_in(&dir, one_test_slice(now), 50);
+        let h = load_from(&dir.join(FILE));
+        assert_eq!(h.runs.len(), 2, "{:?}", h.runs);
+        assert_eq!(h.tests["t"].len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_history_record_reuses_an_unchanged_read() {
+        // Unchanged since the read (same length and mtime): record appends to
+        // the copy it holds, without decoding the file again. Shown by
+        // swapping the bytes for garbage of the same size and restoring the
+        // mtime: a re-read would see an empty (corrupt) history.
+        let dir = fresh_dir("reuse");
+        let now = crate::time::now_epoch_secs();
+        RunHistory::default().record_in(&dir, one_test_slice(now - 1), 50);
+        let path = dir.join(FILE);
+        let mut mine = RunHistory::default();
+        assert_eq!(mine.get_in(&dir).runs.len(), 1);
+        let (len, mtime) = stamp(&path).unwrap();
+        std::fs::write(&path, vec![0xc1; len as usize]).unwrap(); // 0xc1: never valid msgpack
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        mine.record_in(&dir, one_test_slice(now), 50);
+        assert_eq!(load_from(&path).runs.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -783,7 +1191,7 @@ mod tests {
         assert!(super::slice(&Run::default(), now, Some("c1"), "fp").is_none());
 
         let rec = |run: &Run, at: u64, commit: Option<&str>| {
-            record_in(&dir, super::slice(run, at, commit, "fp").unwrap(), 2);
+            RunHistory::default().record_in(&dir, super::slice(run, at, commit, "fp").unwrap(), 2);
         };
         rec(&run_of(&[("a", "passed")]), now, Some("c1"));
         rec(&run_of(&[("a", "failed"), ("b", "passed")]), now + 1, None);

@@ -44,6 +44,7 @@ from gates.dispatch import (
     gate_native_timeout,
     gate_order_fail_fast,
     gate_serial_after_crash,
+    gate_serial_fixture_scope,
     gate_serial_mark,
     gate_session_exit_stops_pool,
     gate_shard_k_n,
@@ -135,6 +136,7 @@ from gates.plugins import (
     gate_silent_master_warning,
     gate_testnodedown_for_crashed_workers,
     gate_xdist_master_side_hooks,
+    gate_xdist_removal_trial_flaky,
 )
 from gates.replay import (
     gate_replay,
@@ -154,6 +156,7 @@ from gates.reporting import (
     gate_report_json_contract,
     gate_resource_leak_detection,
     gate_session_error_output,
+    gate_verbose_skip_reasons,
     gate_warnings,
 )
 from gates.serve_watch import (
@@ -219,6 +222,7 @@ def main():
         gate_pytest_rerunfailures_xdist_no_sock_port_,
         gate_pdb_with_addopts_n_and_xdist,
         gate_looponfail_with_xdist,
+        gate_xdist_removal_trial_flaky,
         gate_pytest_retry_xdist_server_port_self_prov,
         gate_pytest_benchmark_autodisable,
         gate_pytest_html_real_plugin,
@@ -262,7 +266,9 @@ def main():
         gate_lazy_collection,
         gate_serial_mark,
         gate_serial_after_crash,
+        gate_serial_fixture_scope,
         gate_failure_output,
+        gate_verbose_skip_reasons,
         gate_session_error_output,
         gate_x_maxfail,
         gate_maxfail_bound,

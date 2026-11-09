@@ -50,7 +50,8 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   older than `RSTEST_FLAKE_RETENTION_DAYS` are dropped on read. Not written by
   `rstest replay` or `--dist each`. Shared through `--cache-push` /
   `--cache-pull` (each pushed run carries its own entries; see
-  [Shared cache](#shared-cache-backend)). Safe to delete.
+  [Shared cache](#shared-cache-backend)). Safe to delete. For its size on a
+  large suite, see [History size](#history-size).
 - `report.html`: the history dashboard [`rstest report`](../reference/cli-commands.md#report)
   writes by default. Output, not input: no run reads it; leave it out of a
   CI cache.
@@ -127,6 +128,55 @@ An explicit `RSTEST_CACHE` still takes effect.
 
 Writes are atomic (tmp + rename), so a concurrent reader never sees a
 half-written file.
+
+### History size { #history-size }
+
+`history.msgpack` grows with the number of tests times the runs it keeps,
+until every test holds `RSTEST_HISTORY_RUNS` runs. Each kept result costs 13
+bytes (outcome, call and setup time, and its run), and each test id is
+stored once:
+
+```text
+size ≈ tests × (13 bytes × runs kept + length of the test id)
+```
+
+On pandas (193,843 tests, every one at the default 50 runs), the file is
+154 MB: 126 MB of results and 27 MB of test ids, which are long
+parametrized names there (about 140 bytes each). Each kept run adds about
+2.5 MB.
+
+| Suite | Runs kept | History size |
+|---|---|---|
+| 1,000 tests | 50 | about 0.8 MB |
+| 10,000 tests | 50 | about 8 MB |
+| 50,000 tests | 50 | about 40 MB |
+| 194,000 tests (pandas) | 50 | 154 MB |
+| 194,000 tests (pandas) | 20 | about 78 MB |
+| 194,000 tests (pandas) | 10 | about 52 MB |
+
+A run reads the file once and writes it back, so its cost grows with its
+size: on pandas, the 154 MB history adds about 0.4s to every run.
+
+How many runs to keep depends on what reads them:
+
+- [`--auto-quarantine`](../reference/cli.md#-auto-quarantinen) needs 3
+  flips (a failure right after a pass on the same clean commit), so a
+  handful of recent runs catches most flapping tests; more runs catch
+  rarer ones.
+- [`--durations-regress`](../reference/cli.md#-durations-regress-ratio)
+  compares against a median that settles after
+  10 to 20 runs.
+- [`rstest explain`](../reference/cli-commands.md#explain) and
+  [`rstest report`](../reference/cli-commands.md#report) show the outcome
+  strip and the commit a test broke at as far back as the history goes.
+
+The default of 50 suits suites up to about 50,000 tests. Beyond that,
+`RSTEST_HISTORY_RUNS=20` halves the file and its per-run cost and still
+keeps enough for auto-quarantine and duration regression. Lowering it takes
+effect over the next full run: a test's results are trimmed to the new cap
+when it runs again, so tests left out of the run keep theirs. Results older
+than `RSTEST_FLAKE_RETENTION_DAYS` (default 90) are dropped whatever the
+cap.
 
 ## Shared cache backend
 

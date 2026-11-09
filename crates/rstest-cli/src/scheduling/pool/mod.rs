@@ -569,6 +569,7 @@ pub fn run_pool(
             }
             Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
             Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
+            Ok(Event::FixtureLeaks { leaks }) => run.add_fixture_leaks(leaks),
             Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
             Ok(Event::JunitSuite {
                 name,
@@ -903,7 +904,14 @@ pub fn run_pool(
                 // outstanding floors at 1 until refilled; a 0 threshold deadlocks.
                 if !stopping && s.outstanding.len() <= (chunk / 2).max(1) {
                     if let Some(d) = dispatch.as_mut() {
+                        // An idle worker holds a lone new item (a rerun, the
+                        // serial phase) for its successor: dispatch again, as
+                        // when seeding, to send one or release it.
+                        let idle = s.outstanding.is_empty();
                         dispatch_to(s, d, chunk, idx == designate)?;
+                        if idle {
+                            dispatch_to(s, d, chunk, idx == designate)?;
+                        }
                     }
                 }
             }

@@ -79,6 +79,7 @@ class ReportPayload(_ReportRequired, total=False):
     marker_timeout: float  # call: the test's @pytest.mark.timeout in seconds, when it has one
     no_rerun: bool  # failed: the flaky mark's only_rerun / rerun_except rule out a rerun
     subtest_desc: str  # subtest: its description as pytest prints it ("(i=1)")
+    subtest_shown: bool  # subtest: pytest shows passed/skipped ones (verbosity_subtests > 0)
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------
@@ -193,6 +194,18 @@ class ScopeCostsPayload(TypedDict):
     costs: list[ScopeCost]
 
 
+class FixtureLeak(TypedDict):
+    fixture: str  # baseid::argname (argname alone for root/plugin fixtures)
+    scope: str  # class, module or package
+    threads: int  # still alive after its finalizers, summed over leaky setups
+    fds: int
+    instances: int  # setups that leaked (reported only from 2)
+
+
+class FixtureLeaksPayload(TypedDict):
+    leaks: list[FixtureLeak]
+
+
 class CollectErrorPayload(TypedDict):
     path: str
     longrepr: str
@@ -231,6 +244,7 @@ EventKind = Literal[
     "lf_recollected",
     "doctor_fixtures",
     "scope_costs",
+    "fixture_leaks",
     "warnings",
     "collection_done",
     "lazy_ready",

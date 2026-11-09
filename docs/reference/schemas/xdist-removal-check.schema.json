@@ -146,8 +146,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "flaky": {
+          "description": "Tests that failed without pytest-xdist in the trial but passed when\nre-run without it: flaky, not a dependency on it. Not blocking.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "regressions": {
-          "description": "Tests that pass with pytest-xdist loaded but fail, skip, or are no\nlonger collected with it hidden.",
+          "description": "Tests that pass with pytest-xdist loaded but fail, skip, or are no\nlonger collected with it hidden, every time they were re-run.",
           "type": "array",
           "items": {
             "type": "string"
@@ -168,6 +175,7 @@
         "compared",
         "failed",
         "regressions",
+        "flaky",
         "started",
         "tests"
       ]

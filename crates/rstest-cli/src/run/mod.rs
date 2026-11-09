@@ -357,20 +357,7 @@ fn resolve_run_config(
     for warning in silent_master_plugin_warnings(n, args) {
         sink.warn(&warning);
     }
-    // pytest counts every -v, clustered (`-sv`) or repeated (`-v -v`).
-    let verbosity: usize = args
-        .iter()
-        .map(|a| {
-            if a == "--verbose" {
-                1
-            } else {
-                crate::cli::short_switches(a)
-                    .iter()
-                    .filter(|&&c| c == 'v')
-                    .count()
-            }
-        })
-        .sum();
+    let verbosity = verbosity(args.iter().map(String::as_str));
     let verbose = verbosity >= 1;
     // -vv (or more): pytest shows ALL durations, no hidden-cutoff note.
     let very_verbose = verbosity >= 2;
@@ -525,10 +512,25 @@ pub fn execute(cli: &Cli, args: &[String]) -> Result<i32> {
     execute_inner(cli, args, None)
 }
 
-/// pytest's effective `--tb` style and `-r` chars: ini `addopts`, then
-/// `PYTEST_ADDOPTS`, then the command line, the last one winning (pytest's
-/// own order).
-fn output_opts(args: &[String]) -> (report::TbStyle, String) {
+/// pytest counts every -v, clustered (`-sv`) or repeated (`-v -v`).
+fn verbosity<'a>(opts: impl Iterator<Item = &'a str>) -> usize {
+    opts.map(|a| {
+        if a == "--verbose" {
+            1
+        } else {
+            crate::cli::short_switches(a)
+                .iter()
+                .filter(|&&c| c == 'v')
+                .count()
+        }
+    })
+    .sum()
+}
+
+/// pytest's effective `--tb` style, `-r` chars and `-v` count: ini
+/// `addopts`, then `PYTEST_ADDOPTS`, then the command line, the last one
+/// winning (pytest's own order).
+fn output_opts(args: &[String]) -> (report::TbStyle, String, usize) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project = config::discover(&cwd, &mut std::io::sink());
     let env_addopts = std::env::var("PYTEST_ADDOPTS").unwrap_or_default();
@@ -543,6 +545,7 @@ fn output_opts(args: &[String]) -> (report::TbStyle, String) {
     (
         report::TbStyle::from_opts(opts()),
         report::report_chars(opts()),
+        verbosity(opts()),
     )
 }
 
@@ -559,9 +562,10 @@ pub(crate) fn execute_inner(
     // selection, banner) flows through it. `--color` resolution matches
     // `resolve_run_config`'s (both call `Palette::detect`).
     let mut sink = Sink::stdio(color::Palette::detect(&args));
-    let (tb, report_chars) = output_opts(&args);
+    let (tb, report_chars, verbosity) = output_opts(&args);
     sink.set_tb_style(tb);
     sink.set_report_chars(report_chars);
+    sink.set_very_verbose(verbosity >= 2);
     // `--stream-json FILE`: attach the live per-test NDJSON side channel. FILE
     // may be a regular file or a named pipe the editor already opened for
     // reading (opening a fifo for write blocks until that reader is present).
@@ -706,6 +710,7 @@ pub(crate) fn execute_inner(
     // post-run demotion reuses it. Inert under passthrough. Replay never
     // auto-quarantines: the flip history would hide the very failure it
     // re-runs to reproduce.
+    let mut history = crate::reporting::history::RunHistory::default();
     let quarantine = if passthrough {
         None
     } else {
@@ -721,7 +726,7 @@ pub(crate) fn execute_inner(
             cli.auto_quarantine_max
                 .or(settings.auto_quarantine_max)
                 .unwrap_or(crate::cli::AUTO_QUARANTINE_MAX),
-            &crate::reporting::history::load(),
+            &mut history,
             &mut sink,
         )?
     };
@@ -799,7 +804,7 @@ pub(crate) fn execute_inner(
         baseline: &inc.baseline,
         replay: pinned.is_some(),
     };
-    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, &mut sink)
+    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, history, &mut sink)
 }
 
 /// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
@@ -2808,6 +2813,10 @@ fn fold_run_event(
             run.add_scope_costs(costs);
             None
         }
+        proto::Event::FixtureLeaks { leaks } => {
+            run.add_fixture_leaks(leaks);
+            None
+        }
         proto::Event::Warnings { entries } => {
             warnings.extend(entries);
             None
@@ -4063,6 +4072,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         }
     }
 

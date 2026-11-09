@@ -3,6 +3,72 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **`xdist-removal-check --xdist-trial` doesn't blame a flaky test on the
+  uninstall.** The trial ran the suite once with pytest-xdist loaded and once
+  hidden, and any test that passed in the first and failed in the second
+  blocked the removal, a flaky one included (django-allauth: 4 tests that also
+  fail at random with xdist loaded). Those tests are now re-run on their own
+  with xdist hidden, up to twice: one that passes is listed as flaky and
+  doesn't block; one that fails every time is still a regression. The JSON
+  report's `trial` gains a `flaky` list.
+
+- **The `migrate-to-rstest` skill ends with removing pytest-xdist.** It drives
+  `xdist-removal-check --xdist-trial` to **ready**, then drops the package
+  from the project's dependency lists, as the migration guide already did.
+
+- **An explicit `--randomly-seed=N` applies at `-n 2` and up with
+  pytest-randomly 5.1.** From 5.1 a worker takes its seed from the xdist
+  master and ignores its own `--randomly-seed`. rstest has no master and
+  always sent a seed derived from the run id, so `--randomly-seed=1234` was
+  ignored. rstest now sends the explicit seed.
+
+- **`-v` shows passed and skipped subtests at `-n 2` and up.** pytest prints
+  `SUBPASSED(i=0)` / `SUBSKIPPED[msg]` lines and counts them in the summary
+  (`1 skipped, 2 subtests passed`) whenever `verbosity_subtests` is above 0,
+  which `-v` sets. A parallel run printed only `SUBFAILED` lines and left both
+  counts out. It now matches pytest, in the dots stream too (`u`, `-`). TAP
+  and TeamCity output still emit one result per test.
+
+- **`--doctor` counts child-process CPU on Windows.** `os.times()` reports
+  no child CPU there, so a test that ran a CPU-heavy tool through
+  `subprocess.run` read as waiting. Each worker now runs in its own job
+  object and reads CPU time from it, which also counts children the test
+  never waited for.
+
+- **The run history costs less per run.** `.rstest_cache/history.msgpack`
+  was decoded at the start of every run, again to record the run, and once
+  more for each of `--doctor`, `--html` and `--durations-regress`. It is now
+  read at most once, only when something needs it (not at start with
+  `--auto-quarantine=0`), and stored by column (schema 2) instead of one
+  msgpack value per field, so it decodes about 3x and encodes about 1.5x
+  faster. On pandas (193k tests, 50 runs of history) the per-run overhead
+  drops from 0.85s to 0.40s. A schema 1 file converts on first read.
+  Builds up to 0.10.x can't read schema 2: they treat a local file as
+  corrupt and start it over, and fail to pull a shared cache base a newer
+  build compacted. Upgrade every machine that shares a cache together.
+
+- **`@serial` tests of one module share its module and class fixtures.** The
+  serial phase reaches the designated worker a few tests at a time, and the
+  last test of each batch ran as if it were the session's last, tearing down
+  its module and class fixtures for the next serial test from the same module
+  to set up again. Each is now set up once, as under pytest.
+
+- **`-v` shows skip and xfail reasons at `-n 2` and up.** pytest prints
+  `SKIPPED (no db)`, `XFAIL (upstream bug)` and `XPASS (reason)`, trimmed to
+  the terminal width at `-v` and whole at `-vv`; a parallel run printed the
+  bare word. It now matches pytest.
+
+- **`--fail-on-leak` and `--doctor` catch wide fixtures that leak.** A class,
+  module or package fixture whose thread or fd was still alive after its
+  teardown went unreported. It is now reported as a fixture leak
+  (`+3 threads  [module fixture] server`) and fails `--fail-on-leak`, once at
+  least two of its setups leaked in one worker. A suite that passed the gate
+  before can fail it now. Session fixtures are not checked.
+
 ## 0.10.1 (2026-11-06)
 
 ### Fixes

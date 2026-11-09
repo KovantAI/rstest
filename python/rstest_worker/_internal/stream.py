@@ -23,7 +23,7 @@ from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
     _random_order_seed,
-    _randomly_seed,
+    _randomly_workerinput_seed,
     _seed_pytest_mypy,
     _seed_pytest_retry,
     _warn_pytest_pins,
@@ -177,8 +177,15 @@ def _cpu_now() -> float:
     `time.process_time()` alone misses work a test hands to a subprocess (a
     CLI under test, a compiler), which the doctor would then call "waiting".
     `os.times()` children counters cover every child the test waited for
-    (`subprocess.run`, `check_output`); they stay 0 on Windows.
+    (`subprocess.run`, `check_output`); they stay 0 on Windows, which reads
+    its job object instead (running children count there too).
     """
+    if sys.platform == "win32":
+        from rstest_worker._internal.wincpu import job_cpu_seconds
+
+        cpu = job_cpu_seconds()
+        if cpu is not None:
+            return cpu
     import time
 
     t = os.times()
@@ -546,8 +553,9 @@ class StreamPlugin:
             "testrun_uid": run_uid,
             # pytest-randomly's master broadcasts one resolved seed; absent,
             # the plugin KeyErrors at -n >= 2. rstest has no master, so we
-            # derive one run-level seed from the shared uid (all workers agree).
-            "randomly_seed": _randomly_seed(run_uid),
+            # broadcast an explicit --randomly-seed, else derive one run-level
+            # seed from the shared uid (all workers agree).
+            "randomly_seed": _randomly_workerinput_seed(config, run_uid),
             # pytest-random-order reads this key unconditionally when workerinput
             # exists (even with reordering off, its default); absent, it KeyErrors
             # at collection. Shared value so all workers agree (full-collect hash).
@@ -957,6 +965,15 @@ class StreamPlugin:
                 for (name, scope), (c, t, const, fp) in self._fixtures.items()
             ]
             self._conn.send("doctor_fixtures", {"fixtures": fixtures})
+        self._send_fixture_leaks()
+
+    def _send_fixture_leaks(self) -> None:
+        # Wide fixtures that leaked past their scope end (leak check). Sent
+        # after runtestloop's final teardown, so every class/module/package
+        # fixture has been finalized.
+        leaks = self._leaks.fixture_leaks() if self._leaks is not None else []
+        if leaks:
+            self._conn.send("fixture_leaks", {"leaks": leaks})
 
     def _tbstyle(self) -> str:
         option = getattr(self._config, "option", None)
@@ -978,6 +995,12 @@ class StreamPlugin:
             )
             if callable(describe):
                 payload["subtest_desc"] = str(describe())
+            # pytest shows passed/skipped subtests (`SUBPASSED`, `N subtests
+            # passed`) only at `verbosity_subtests` > 0, which follows -v.
+            if self._config is not None and self._config.get_verbosity(
+                pytest.Config.VERBOSITY_SUBTESTS
+            ):
+                payload["subtest_shown"] = True
         elif self._config is not None and report.when == "call" and report.outcome == "passed":
             # pytest fails a `subtests`-fixture parent with failed subtests
             # only when rendering its status, possibly after this hook ran.

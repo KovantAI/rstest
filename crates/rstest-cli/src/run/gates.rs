@@ -46,12 +46,13 @@ fn write_run_reports(
     run: &report::Run,
     suite_seconds: f64,
     meta: &report::RunMeta,
+    history: &mut history::RunHistory,
 ) -> Result<()> {
     if let Some(path) = junitxml {
         junit::write(path, run, suite_seconds)?;
     }
     if let Some(path) = html {
-        html::write(path, run, meta, &history::load())?;
+        html::write(path, run, meta, history.get())?;
     }
     Ok(())
 }
@@ -434,6 +435,7 @@ pub(super) fn run_post_gates(
     outcome: &mut pool::PoolOutcome,
     args: &[String],
     post: &PostRun,
+    mut history: history::RunHistory,
     sink: &mut Sink,
 ) -> Result<i32> {
     let RunConfig {
@@ -594,7 +596,7 @@ pub(super) fn run_post_gates(
             n,
             coverage_index.as_ref().zip(project.as_ref()),
         )
-        .with_history(&outcome.run, &history::load())
+        .with_history(&outcome.run, history.get())
         .with_fixture_groups(&outcome.run, &outcome.fixture_groups);
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
@@ -663,11 +665,11 @@ pub(super) fn run_post_gates(
                     palette.bold_red("=========== resource leaks ===========")
                 ));
                 for l in leaks.iter().take(20) {
-                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.nodeid));
+                    sink.warn(&format!("  {}  {}", doctor::leak_delta(l), l.label()));
                 }
             }
             sink.warn(&format!(
-                "rstest: --fail-on-leak: {} test(s) leaked threads/fds; close them in \
+                "rstest: --fail-on-leak: {} test(s)/fixture(s) leaked threads/fds; close them in \
                  teardown, or contain one with @pytest.mark.isolated (runs it in a \
                  forked process)",
                 leaks.len()
@@ -694,6 +696,7 @@ pub(super) fn run_post_gates(
         &outcome.run,
         suite_wall,
         &report_meta,
+        &mut history,
     )?;
     // Merged lastfailed: workers' own writes are blocked in pool mode
     // (each knows only its failures); merge this run's outcomes into
@@ -732,7 +735,7 @@ pub(super) fn run_post_gates(
                  (.rstest_cache/durations.json); comparison skipped",
             );
         } else {
-            let rows = durations::regressions(&outcome.run, &baseline, &history::load(), ratio);
+            let rows = durations::regressions(&outcome.run, &baseline, history.get(), ratio);
             if rows.is_empty() {
                 sink.warn(&format!(
                     "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
@@ -807,7 +810,7 @@ pub(super) fn run_post_gates(
             history::slice(&outcome.run, started_epoch, history_commit, env_fp)
         };
         if let Some(slice) = &history_slice {
-            history::record(slice.clone());
+            history.record(slice.clone());
         }
         // --cache-push: publish THIS run's contribution as one immutable
         // segment (from the in-memory Run, not the merged local cache). A push
@@ -1245,7 +1248,7 @@ pub(super) fn quarantine_set(
     file: Option<&std::path::Path>,
     auto: u32,
     max_pct: u32,
-    history: &crate::reporting::history::History,
+    history: &mut crate::reporting::history::RunHistory,
     sink: &mut Sink,
 ) -> Result<Option<Quarantine>> {
     let file_patterns = match file {
@@ -1255,7 +1258,7 @@ pub(super) fn quarantine_set(
     let ids = if auto == 0 {
         Vec::new()
     } else {
-        history.flippers(auto)
+        history.get().flippers(auto)
     };
     if file.is_none() && ids.is_empty() {
         return Ok(None);
@@ -1376,6 +1379,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let mut run = Run::default();
         // Same test failing on two workers => one plain key after merge.
@@ -1416,6 +1420,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let prev: std::collections::BTreeMap<String, serde_json::Value> = [
             "other.py::old_failure", // not run this time: kept
@@ -1479,11 +1484,19 @@ mod tests {
         let html = base.with_extension("html");
 
         // Neither requested => no files, no error.
-        write_run_reports(None, None, &run, 1.0, &meta).unwrap();
+        write_run_reports(None, None, &run, 1.0, &meta, &mut Default::default()).unwrap();
         assert!(!xml.exists() && !html.exists());
 
         // Both requested => both written.
-        write_run_reports(Some(&xml), Some(&html), &run, 1.0, &meta).unwrap();
+        write_run_reports(
+            Some(&xml),
+            Some(&html),
+            &run,
+            1.0,
+            &meta,
+            &mut Default::default(),
+        )
+        .unwrap();
         assert!(xml.exists(), "junit report not written");
         assert!(html.exists(), "html report not written");
 
@@ -1588,7 +1601,7 @@ mod tests {
         sink: &mut Sink,
     ) -> anyhow::Result<regex::RegexSet> {
         let none = crate::reporting::history::History::default();
-        quarantine_set(Some(path), 0, 5, &none, sink).map(|s| s.unwrap().all)
+        quarantine_set(Some(path), 0, 5, &mut none.into(), sink).map(|s| s.unwrap().all)
     }
 
     /// History where `id` has outcomes `outcomes`, one run each.
@@ -1633,7 +1646,7 @@ mod tests {
         let path = write_quarantine("auto", "b.py::*\n");
 
         let (mut sink, cap) = Sink::captured();
-        let set = quarantine_set(Some(&path), 3, 100, &h, &mut sink)
+        let set = quarantine_set(Some(&path), 3, 100, &mut h.clone().into(), &mut sink)
             .unwrap()
             .unwrap()
             .all;
@@ -1648,11 +1661,22 @@ mod tests {
         // Auto alone, below threshold or off: nothing to match, no banner.
         for auto in [4, 0] {
             let (mut sink, cap) = Sink::captured();
-            assert!(quarantine_set(None, auto, 100, &h, &mut sink)
-                .unwrap()
-                .is_none());
+            assert!(
+                quarantine_set(None, auto, 100, &mut h.clone().into(), &mut sink)
+                    .unwrap()
+                    .is_none()
+            );
             assert_eq!(cap.err(), "");
         }
+        // Off: the history file is never read (a large suite's costs a few
+        // hundred milliseconds per run).
+        let mut unread = crate::reporting::history::RunHistory::default();
+        assert!(
+            quarantine_set(None, 0, 100, &mut unread, &mut Sink::captured().0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!unread.is_loaded());
         std::fs::remove_file(&path).ok();
     }
 
@@ -1682,13 +1706,20 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
         let path = write_quarantine("capfile", "t.py::f1\n");
-        let q = quarantine_set(Some(&path), 3, 5, &h, &mut Sink::captured().0)
-            .unwrap()
-            .unwrap();
+        let q = quarantine_set(
+            Some(&path),
+            3,
+            5,
+            &mut h.clone().into(),
+            &mut Sink::captured().0,
+        )
+        .unwrap()
+        .unwrap();
         let run_of = |failing: &[&str], passing: usize| {
             let mut run = Run::default();
             for id in failing {
@@ -1759,12 +1790,13 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
             cause: None,
         };
         let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
         let ids = ["t.py::f1", "t.py::f2", "t.py::f3", "t.py::f4"];
         let h = history_of(&ids.map(|id| (id, flap)));
-        let q = quarantine_set(None, 3, 5, &h, &mut Sink::captured().0)
+        let q = quarantine_set(None, 3, 5, &mut h.clone().into(), &mut Sink::captured().0)
             .unwrap()
             .unwrap();
         // 1000 collected, stopped after 41 reported: in-run cap 50, not 3.

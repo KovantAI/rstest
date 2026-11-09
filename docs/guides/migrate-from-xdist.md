@@ -292,7 +292,8 @@ xdist hook implementations not marked `optionalhook=True`,
 (`pytest.importorskip("xdist")`, or a skip when `import xdist` fails). Each finding comes with its fix. `--xdist-trial`
 then runs the suite with pytest-xdist hidden (`-p no:xdist`, which drops its
 options and hook specs like an uninstall) and names any test that only passes
-with it installed. When it prints `ready`, uninstall pytest-xdist
+with it installed, re-running each on its own so a flaky test isn't blamed on
+the uninstall. When it prints `ready`, uninstall pytest-xdist
 and drop it from your dependency lists. See
 [`xdist-removal-check`](../reference/cli-commands.md#xdist-removal-check).
 
