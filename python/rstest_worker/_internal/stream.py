@@ -177,8 +177,15 @@ def _cpu_now() -> float:
     `time.process_time()` alone misses work a test hands to a subprocess (a
     CLI under test, a compiler), which the doctor would then call "waiting".
     `os.times()` children counters cover every child the test waited for
-    (`subprocess.run`, `check_output`); they stay 0 on Windows.
+    (`subprocess.run`, `check_output`); they stay 0 on Windows, which reads
+    its job object instead (running children count there too).
     """
+    if sys.platform == "win32":
+        from rstest_worker._internal.wincpu import job_cpu_seconds
+
+        cpu = job_cpu_seconds()
+        if cpu is not None:
+            return cpu
     import time
 
     t = os.times()
@@ -987,6 +994,12 @@ class StreamPlugin:
             )
             if callable(describe):
                 payload["subtest_desc"] = str(describe())
+            # pytest shows passed/skipped subtests (`SUBPASSED`, `N subtests
+            # passed`) only at `verbosity_subtests` > 0, which follows -v.
+            if self._config is not None and self._config.get_verbosity(
+                pytest.Config.VERBOSITY_SUBTESTS
+            ):
+                payload["subtest_shown"] = True
         elif self._config is not None and report.when == "call" and report.outcome == "passed":
             # pytest fails a `subtests`-fixture parent with failed subtests
             # only when rendering its status, possibly after this hook ran.

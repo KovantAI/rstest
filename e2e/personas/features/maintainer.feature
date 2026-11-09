@@ -53,8 +53,6 @@ Feature: Suite maintainer
 
   Rule: CPU work in a child process is computing, not waiting
 
-    # os.times() reports no child CPU on Windows.
-    @posix_only
     Scenario: MT-08 subprocess CPU is not reported as wait-bound
       Given a file "test_cli.py" containing:
         """

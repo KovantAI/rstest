@@ -20,6 +20,11 @@ enum OutcomeKind {
     Fail,
     /// A failed subtest: pytest's `u` / `SUBFAILED`.
     SubFail,
+    /// A passed, skipped or xfailed subtest pytest shows (see
+    /// [`Report::subtest_shown`]): `SUBPASSED` / `SUBSKIPPED` / `SUBXFAIL`.
+    SubPass,
+    SubSkip,
+    SubXFail,
     Skip,
     XFail,
     SetupError,
@@ -33,6 +38,11 @@ impl OutcomeKind {
         self != OutcomeKind::TeardownError
     }
 
+    fn is_subtest(self) -> bool {
+        use OutcomeKind::*;
+        matches!(self, SubFail | SubPass | SubSkip | SubXFail)
+    }
+
     /// pytest's single status char (dots / Github / Gitlab / Buildkite / Azure
     /// streams): '.' pass, 'X' xpass, 'F' fail, 's' skip, 'x' xfail, 'E' error.
     fn dot(self) -> char {
@@ -41,7 +51,9 @@ impl OutcomeKind {
             Pass => '.',
             XPass => 'X',
             Fail => 'F',
-            SubFail => 'u',
+            SubFail | SubPass => 'u',
+            SubSkip => '-',
+            SubXFail => 'y',
             Skip => 's',
             XFail => 'x',
             // Failed setup/teardown both draw 'E'.
@@ -57,6 +69,9 @@ impl OutcomeKind {
             XPass => "XPASS",
             Fail => "FAILED",
             SubFail => "SUBFAILED",
+            SubPass => "SUBPASSED",
+            SubSkip => "SUBSKIPPED",
+            SubXFail => "SUBXFAIL",
             Skip => "SKIPPED",
             XFail => "XFAIL",
             SetupError | TeardownError => "ERROR",
@@ -68,11 +83,11 @@ impl OutcomeKind {
     fn symbol(self) -> (&'static str, fn(&Palette, &str) -> String) {
         use OutcomeKind::*;
         match self {
-            Pass => ("✓", Palette::green),
+            Pass | SubPass => ("✓", Palette::green),
             XPass => ("X", Palette::yellow),
             Fail | SubFail => ("✗", Palette::red),
-            Skip => ("s", Palette::yellow),
-            XFail => ("x", Palette::yellow),
+            Skip | SubSkip => ("s", Palette::yellow),
+            XFail | SubXFail => ("x", Palette::yellow),
             SetupError | TeardownError => ("E", Palette::red),
         }
     }
@@ -83,10 +98,17 @@ impl OutcomeKind {
 /// teardown (its own marker after the call already printed).
 fn outcome_kind(r: &Report) -> Option<OutcomeKind> {
     use OutcomeKind::*;
-    // Passing/skipped subtests are not tests of their own (pytest hides them
-    // by default); a failed one shows as pytest's `u`.
+    // A failed subtest shows as pytest's `u`; passing/skipped ones only
+    // when pytest shows them too (`verbosity_subtests`, -v).
     if r.subtest {
-        return (r.outcome == "failed").then_some(SubFail);
+        return match (r.outcome.as_str(), r.wasxfail) {
+            ("failed", _) => Some(SubFail),
+            _ if !r.subtest_shown => None,
+            ("skipped", true) => Some(SubXFail),
+            ("passed", false) => Some(SubPass),
+            ("skipped", false) => Some(SubSkip),
+            _ => None,
+        };
     }
     // Any phase but setup/teardown is the test itself, as pytest shows it
     // (pytest-forked reports a crashed child as `when="???"`).
@@ -237,7 +259,7 @@ impl Progress {
     /// later subtests nor its own report count it again.
     fn count(&mut self, kind: OutcomeKind, r: &Report) {
         let first = match kind {
-            OutcomeKind::SubFail => self.subtest_counted.insert(r.nodeid.clone()),
+            k if k.is_subtest() => self.subtest_counted.insert(r.nodeid.clone()),
             _ => kind.counts_done() && !self.subtest_counted.remove(&r.nodeid),
         };
         if first {
@@ -564,6 +586,7 @@ fn tap_result_line(n: usize, r: &Report) -> Option<String> {
             directive("TODO", Some("unexpectedly passed"))
         ),
         Fail | SubFail => format!("not ok {n} - {}", r.nodeid),
+        SubPass | SubSkip | SubXFail => return None,
         XFail => format!(
             "not ok {n} - {}{}",
             r.nodeid,
@@ -603,6 +626,8 @@ fn teamcity_messages(r: &Report) -> Option<String> {
                 tc_escape(details)
             ))
         }
+        // Not a test of its own: the parent's report carries the verdict.
+        SubPass | SubSkip | SubXFail => return None,
         Skip | XFail => {
             let why = if r.wasxfail {
                 "expected failure (xfail)".to_string()
@@ -702,6 +727,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         }
     }
 
@@ -723,6 +749,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
             ..report("call", outcome)
         };
         assert!(outcome_kind(&sub("passed")).is_none());
@@ -761,6 +788,40 @@ mod tests {
             "tests/test_a.py::test_x SUBFAILED(i=1) [ 50%]\n\
              tests/test_a.py::test_x FAILED [ 50%]\n"
         );
+    }
+
+    #[test]
+    fn shown_subtests_draw_like_pytest_at_verbose() {
+        // verbosity_subtests > 0 (-v): pytest prints passed and skipped
+        // subtests too, at the test's percentage; the test counts once.
+        let sub = |outcome, desc: &str| Report {
+            subtest: true,
+            subtest_shown: true,
+            subtest_desc: Some(desc.into()),
+            ..report("call", outcome)
+        };
+        let (mut sink, buf) = Sink::captured();
+        let mut p = Progress::default();
+        p.set_mode(Mode::Verbose);
+        p.set_total(2);
+        p.on_report(&mut sink, None, &sub("passed", "(i=0)"));
+        p.on_report(&mut sink, None, &sub("skipped", "[sk]"));
+        p.on_report(&mut sink, None, &report("call", "passed"));
+        assert_eq!(
+            buf.out(),
+            "tests/test_a.py::test_x SUBPASSED(i=0) [ 50%]\n\
+             tests/test_a.py::test_x SUBSKIPPED[sk] [ 50%]\n\
+             tests/test_a.py::test_x PASSED [ 50%]\n"
+        );
+        assert_eq!(p.done, 1);
+        // Dots: pytest's `u` and `-`. TAP: not test points of their own.
+        let (mut sink, buf) = Sink::captured();
+        let mut p = Progress::default();
+        p.on_report(&mut sink, None, &sub("passed", ""));
+        p.on_report(&mut sink, None, &sub("skipped", ""));
+        assert_eq!(buf.out(), "u-");
+        assert!(tap_result_line(1, &sub("passed", "")).is_none());
+        assert!(teamcity_messages(&sub("passed", "")).is_none());
     }
 
     #[test]

@@ -222,6 +222,7 @@ pub(crate) fn fabricate_crash_report(
         marker_timeout: None,
         no_rerun: false,
         subtest_desc: None,
+        subtest_shown: false,
     }
 }
 
@@ -252,6 +253,7 @@ pub(crate) fn fabricate_lost_report(nodeid: String, reason: &str) -> proto::Repo
         marker_timeout: None,
         no_rerun: false,
         subtest_desc: None,
+        subtest_shown: false,
     }
 }
 
@@ -518,6 +520,7 @@ mod tests {
             marker_timeout: None,
             no_rerun: false,
             subtest_desc: None,
+            subtest_shown: false,
         }
     }
 

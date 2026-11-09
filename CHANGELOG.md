@@ -7,6 +7,19 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`-v` shows passed and skipped subtests at `-n 2` and up.** pytest prints
+  `SUBPASSED(i=0)` / `SUBSKIPPED[msg]` lines and counts them in the summary
+  (`1 skipped, 2 subtests passed`) whenever `verbosity_subtests` is above 0,
+  which `-v` sets. A parallel run printed only `SUBFAILED` lines and left both
+  counts out. It now matches pytest, in the dots stream too (`u`, `-`). TAP
+  and TeamCity output still emit one result per test.
+
+- **`--doctor` counts child-process CPU on Windows.** `os.times()` reports
+  no child CPU there, so a test that ran a CPU-heavy tool through
+  `subprocess.run` read as waiting. Each worker now runs in its own job
+  object and reads CPU time from it, which also counts children the test
+  never waited for.
+
 - **The run history costs less per run.** `.rstest_cache/history.msgpack`
   was decoded at the start of every run, again to record the run, and once
   more for each of `--doctor`, `--html` and `--durations-regress`. It is now

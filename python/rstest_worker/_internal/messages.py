@@ -79,6 +79,7 @@ class ReportPayload(_ReportRequired, total=False):
     marker_timeout: float  # call: the test's @pytest.mark.timeout in seconds, when it has one
     no_rerun: bool  # failed: the flaky mark's only_rerun / rerun_except rule out a rerun
     subtest_desc: str  # subtest: its description as pytest prints it ("(i=1)")
+    subtest_shown: bool  # subtest: pytest shows passed/skipped ones (verbosity_subtests > 0)
 
 
 # ---- Event payloads (worker -> orchestrator) -------------------------------
