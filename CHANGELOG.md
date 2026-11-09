@@ -20,6 +20,12 @@ between 0.x releases and are listed here.
   `xdist-removal-check --xdist-trial` to **ready**, then drops the package
   from the project's dependency lists, as the migration guide already did.
 
+- **An explicit `--randomly-seed=N` applies at `-n 2` and up with
+  pytest-randomly 5.1.** From 5.1 a worker takes its seed from the xdist
+  master and ignores its own `--randomly-seed`. rstest has no master and
+  always sent a seed derived from the run id, so `--randomly-seed=1234` was
+  ignored. rstest now sends the explicit seed.
+
 - **`-v` shows passed and skipped subtests at `-n 2` and up.** pytest prints
   `SUBPASSED(i=0)` / `SUBSKIPPED[msg]` lines and counts them in the summary
   (`1 skipped, 2 subtests passed`) whenever `verbosity_subtests` is above 0,

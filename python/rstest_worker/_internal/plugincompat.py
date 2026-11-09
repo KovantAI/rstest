@@ -20,6 +20,23 @@ def _randomly_seed(run_uid: Any) -> int:
         return zlib.crc32(str(run_uid).encode("utf-8")) & 0xFFFFFFFF
 
 
+def _randomly_workerinput_seed(config: Any, run_uid: Any) -> int:
+    """The `workerinput["randomly_seed"]` an xdist master would broadcast for
+    pytest-randomly.
+
+    Since pytest-randomly 5.1 a worker takes this key verbatim and ignores its
+    own `--randomly-seed`, because the master already resolved it. rstest has
+    no master, so an explicit integer seed must be broadcast as is; otherwise
+    (`default`, `last`, plugin absent) derive the shared run-level seed."""
+    try:
+        opt = config.getoption("randomly_seed")
+    except Exception:
+        opt = None
+    if isinstance(opt, int):
+        return opt
+    return _randomly_seed(run_uid)
+
+
 def _random_order_seed(config: Any, run_uid: Any) -> str:
     """The `workerinput["random_order_seed"]` an xdist master would broadcast for
     pytest-random-order.
