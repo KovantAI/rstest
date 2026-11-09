@@ -9,7 +9,7 @@ $ rstest --watch
 ```
 
 ```text
-rstest 0.10.1 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.11.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 ...                                                                      [100%]
 
 3 passed in 0.16s

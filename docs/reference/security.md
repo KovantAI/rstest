@@ -324,7 +324,7 @@ lockfile, e.g. pip:
 $ pip install --require-hashes -r requirements.txt
 ```
 
-or pin an exact version (`pip install rstest==0.10.1`). See
+or pin an exact version (`pip install rstest==0.11.0`). See
 [Installation](../getting-started/installation.md#verifying-a-downloaded-wheel)
 for the `SHA256SUMS` file and building from source.
 

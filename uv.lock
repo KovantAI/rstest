@@ -482,7 +482,7 @@ wheels = [
 
 [[package]]
 name = "rstest"
-version = "0.10.1"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
