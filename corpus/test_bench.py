@@ -812,12 +812,17 @@ def test_fork_ab_rejects_a_run_that_collected_nothing(tmp_path, monkeypatch):
 
     def fake_sh(argv, cwd=None, env=None):
         Path(argv[2]).write_text(json.dumps({"tests": {}, "collect_errors": []}))
-        return type("R", (), {"returncode": 5, "stderr": "no tests ran"})()
+        return type(
+            "R", (), {"returncode": 2, "stdout": "ERROR collecting tests/test_x.py", "stderr": ""}
+        )()
 
     monkeypatch.setattr(run, "sh", fake_sh)
     try:
         fork_ab._arm(FakeSuite(), "4", fork=False)
     except RuntimeError as e:
         assert "no tests" in str(e)
+        # rstest reports collection errors on stdout; a stderr-only message
+        # left the CI failure blank (python-dateutil, 2026-11-08).
+        assert "ERROR collecting tests/test_x.py" in str(e)
     else:
         raise AssertionError("an empty run was timed as a valid arm")
