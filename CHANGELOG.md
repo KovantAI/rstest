@@ -7,6 +7,19 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`xdist-removal-check --xdist-trial` doesn't blame a flaky test on the
+  uninstall.** The trial ran the suite once with pytest-xdist loaded and once
+  hidden, and any test that passed in the first and failed in the second
+  blocked the removal, a flaky one included (django-allauth: 4 tests that also
+  fail at random with xdist loaded). Those tests are now re-run on their own
+  with xdist hidden, up to twice: one that passes is listed as flaky and
+  doesn't block; one that fails every time is still a regression. The JSON
+  report's `trial` gains a `flaky` list.
+
+- **The `migrate-to-rstest` skill ends with removing pytest-xdist.** It drives
+  `xdist-removal-check --xdist-trial` to **ready**, then drops the package
+  from the project's dependency lists, as the migration guide already did.
+
 - **An explicit `--randomly-seed=N` applies at `-n 2` and up with
   pytest-randomly 5.1.** From 5.1 a worker takes its seed from the xdist
   master and ignores its own `--randomly-seed`. rstest has no master and

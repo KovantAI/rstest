@@ -48,6 +48,7 @@ Result of the `--xdist-trial` run with `-p no:xdist`.
 | `compared` | boolean | yes | Whether a run with pytest-xdist loaded was compared against (`false` when it isn't installed, so nothing can be called a regression). |
 | `error` | string or null | no | The tail of the child's stderr when the session never started. |
 | `failed` | integer | yes | Tests that failed with xdist hidden. |
-| `regressions` | array of string | yes | Tests that pass with pytest-xdist loaded but fail, skip, or are no longer collected with it hidden. |
+| `flaky` | array of string | yes | Tests that failed without pytest-xdist in the trial but passed when re-run without it: flaky, not a dependency on it. Not blocking. |
+| `regressions` | array of string | yes | Tests that pass with pytest-xdist loaded but fail, skip, or are no longer collected with it hidden, every time they were re-run. |
 | `started` | boolean | yes | Whether the session with xdist hidden started and reported outcomes. |
 | `tests` | integer | yes | Tests that ran with xdist hidden. |
