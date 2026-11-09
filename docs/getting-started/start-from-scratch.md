@@ -129,7 +129,7 @@ not 12:
 
 ```console
 $ rstest -n 4 test_slow.py
-rstest 0.10.1 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.11.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ............ [100%]
 
 12 passed in 3.16s
