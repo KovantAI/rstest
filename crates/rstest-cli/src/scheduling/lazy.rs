@@ -125,6 +125,14 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     known.into_iter().map(|(f, _)| f).chain(unknown).collect()
 }
 
+/// Files per RunFiles: a quarter of a fair share of what's left. The worker
+/// collects a batch in one `perform_collect`, which lists every directory on
+/// the way, so one file per call is quadratic in files per directory; the
+/// shrinking batches keep the tail balanced.
+fn file_batch(remaining: usize, workers: usize) -> usize {
+    remaining.div_ceil(workers.max(1) * 4).min(remaining)
+}
+
 pub fn run_lazy_pool(
     cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
@@ -597,18 +605,22 @@ pub fn run_lazy_pool(
 
         let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
 
-        // File assignment: a worker collects one file at a time, picked
-        // up when it has nothing left to collect and little left to run
-        // (a busy worker must not hoard files an idle one could collect).
+        // File assignment: a worker takes a batch of files (see
+        // `file_batch`), picked up when it has nothing left to collect and
+        // little left to run (a busy worker must not hoard files an idle one
+        // could collect).
         if !stopping {
+            let workers = states.len();
             for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
                 if s.uncollected_files.is_empty() && s.outstanding.len() <= chunk {
-                    if let Some(f) = file_queue.pop_front() {
-                        s.uncollected_files.push(f.clone());
+                    let take = file_batch(file_queue.len(), workers);
+                    let paths: Vec<String> = file_queue.drain(..take).collect();
+                    if !paths.is_empty() {
+                        s.uncollected_files.extend(paths.iter().cloned());
                         // Best-effort, as in the eager pool: a worker that died
                         // (EPIPE) is handled by its reader's error, which puts
-                        // the file back on the queue.
-                        let _ = s.worker.send(&proto::Command::RunFiles { paths: vec![f] });
+                        // the files back on the queue.
+                        let _ = s.worker.send(&proto::Command::RunFiles { paths });
                         s.finishing = false;
                     }
                 }
@@ -881,9 +893,17 @@ fn start_into(
 
 #[cfg(test)]
 mod tests {
-    use super::order_files;
+    use super::{file_batch, order_files};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn file_batch_takes_a_quarter_share_and_at_least_one() {
+        assert_eq!(file_batch(1000, 8), 32);
+        assert_eq!(file_batch(1000, 1), 250);
+        assert_eq!(file_batch(3, 8), 1);
+        assert_eq!(file_batch(0, 8), 0);
+    }
 
     #[test]
     fn order_files_sorts_known_by_total_then_unknown_in_path_order() {

@@ -1,7 +1,7 @@
 """Restore tree-independent conftest fixture visibility for lazy collection.
 
-rstest's D5 lazy collection calls ``Session.perform_collect([file])`` once per
-FILE on one long-lived Session. Vendored pytest 9.2 parses a conftest's
+rstest's D5 lazy collection calls ``Session.perform_collect(files)`` once per
+batch of files on one long-lived Session. Vendored pytest 9.2 parses a conftest's
 fixtures once and files each ``FixtureDef`` under the ``Directory`` node it saw
 first (``FixtureManager._arg2node2fixturedefs``); ``getfixturedefs`` then
 looks them up by NODE IDENTITY (``node2fixturedefs.get(parent)`` for each of

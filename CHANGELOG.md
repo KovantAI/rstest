@@ -14,6 +14,13 @@ between 0.x releases and are listed here.
   framework cost too and allows one worker per 0.25s of work (an extra worker
   costs ~7ms to start): that suite now gets 9 workers, 2.57s down to 0.78s on an
   M4 Max. A suite under about a second still runs on one worker.
+- **`--collect lazy` no longer slows down quadratically with files per
+  directory.** Each worker collected one file per `perform_collect` call, and
+  each call listed the file's whole directory again: 1000 files in one
+  directory took 24.7s at `-n 4` against 2.1s for `--collect full`. Workers
+  now take files in batches and list a directory once per batch (2.9s). Auto
+  mode picks lazy collection for large suites at `-n 8` and up, so this also
+  hit default runs.
 
 ## 0.11.0 (2026-11-09)
 
