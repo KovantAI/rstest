@@ -239,8 +239,9 @@ struct PostRun<'a> {
     /// `--changed`/`--changed-strict` diff base, as resolved for selection.
     changed_base: Option<&'a str>,
     since_green: bool,
-    /// The user narrowed a `--since-green` run (`-k`/`-m`/a path/`--deselect`):
-    /// its green proves nothing about the tests left out, so no baseline.
+    /// The user narrowed a `--since-green` run (`-k`/`-m`/a path/`--deselect`/
+    /// `--budget`): its green proves nothing about the tests left out, so no
+    /// baseline.
     since_green_narrowed: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
@@ -662,7 +663,9 @@ pub(crate) fn execute_inner(
     // a base that fails to resolve aborts here, before any test runs.
     let changed_base = resolve_changed_base(cli, &mut sink)?;
     // Judged on the user's args, before selection swaps in the affected paths.
-    let since_green_narrowed = since_green && crate::since_green::run_narrows_suite(&args, &scope);
+    // A --budget run leaves tests out too.
+    let since_green_narrowed = since_green
+        && (cli.budget.is_some() || crate::since_green::run_narrows_suite(&args, &scope));
     let args = match apply_selection(
         cli,
         args,
@@ -747,6 +750,13 @@ pub(crate) fn execute_inner(
                     .join("\n"),
                 max_pct: q.max_pct,
             });
+    // --budget costs each test its call time plus its median setup from the
+    // run history, which the quarantine set above may already have read.
+    let budget = inc.budget.map(|secs| pool::Budget {
+        secs: secs as f64,
+        label: cli.budget.clone().unwrap_or_default(),
+        setup: history.get().median_setup(),
+    });
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -756,6 +766,7 @@ pub(crate) fn execute_inner(
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            budget: budget.as_ref(),
             lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
             durations: &duration_cache,
@@ -1224,6 +1235,8 @@ fn passthrough_n_warning(
 struct Incremental {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    /// `--budget`, in seconds ([`resolve_budget`]).
+    budget: Option<u64>,
     /// Lazy collection resolved for this run ([`collect_lazy`]), decided once
     /// here and reused by dispatch.
     lazy: bool,
@@ -1337,6 +1350,7 @@ fn resolve_incremental(
         shuffle_seed.is_some(),
         dist_name,
     )?;
+    let budget = resolve_budget(cli.budget.as_deref(), n, passthrough, is_lazy, dist_name)?;
     let active = cli.incremental
         && !since_green
         && cli.changed.is_none()
@@ -1416,6 +1430,7 @@ fn resolve_incremental(
     Ok(Incremental {
         shuffle_seed,
         shard,
+        budget,
         lazy: is_lazy,
         active,
         config,
@@ -1510,6 +1525,7 @@ fn quarantined_exit(
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    budget: Option<&'a pool::Budget>,
     lazy: bool,
     quarantine: Option<&'a gates::Quarantine>,
     durations: &'a DurationCache,
@@ -1530,6 +1546,7 @@ fn dispatch_run(
     let DispatchSelection {
         shuffle_seed,
         shard,
+        budget,
         lazy,
         quarantine,
         durations: duration_cache,
@@ -1765,14 +1782,15 @@ fn dispatch_run(
                  full suite; rerun-on-another-worker semantics do not apply)"
                 );
             }
-            // Only fail-fast load dispatch reads it; the diff costs git calls
-            // and a graph walk, so every other run skips it.
-            let near =
-                if order == pool::Order::FailFast && dist == pool::Dist::Load && pinned.is_none() {
-                    near_changes(env_fp)
-                } else {
-                    std::collections::HashMap::new()
-                };
+            // Only fail-fast load dispatch and --budget read it; the diff
+            // costs git calls and a graph walk, so every other run skips it.
+            let near = if pinned.is_none()
+                && (budget.is_some() || order == pool::Order::FailFast && dist == pool::Dist::Load)
+            {
+                near_changes(env_fp)
+            } else {
+                std::collections::HashMap::new()
+            };
             pool::run_pool(
                 &base_cfg,
                 dist,
@@ -1782,6 +1800,7 @@ fn dispatch_run(
                 shard,
                 skip_ids,
                 &near,
+                budget,
                 pinned,
                 sink,
             )?
@@ -1943,13 +1962,13 @@ impl Drop for SingleWorkerInterrupts {
 }
 
 /// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
-/// fail-fast under `--watch` (surface a red as fast as possible on each save),
-/// throughput otherwise. Where the order has no effect is reported once, at
+/// fail-fast under `--watch` (surface a red as fast as possible on each save)
+/// and `--budget` (what it picks for risk runs first), throughput otherwise. Where the order has no effect is reported once, at
 /// dispatch, by [`order_ignored_warning`].
 fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::Order> {
     Ok(match cli.order.as_deref().or(settings.order.as_deref()) {
         Some(s) => s.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?,
-        None if cli.watch => pool::Order::FailFast,
+        None if cli.watch || cli.budget.is_some() => pool::Order::FailFast,
         None => pool::Order::Throughput,
     })
 }
@@ -2121,6 +2140,7 @@ fn collect_lazy(
         None if cli.shuffle.is_some()
             || cli.incremental
             || cli.shard.is_some()
+            || cli.budget.is_some()
             || matches!(resolve_order(cli, settings), Ok(pool::Order::FailFast)) =>
         {
             Ok(false)
@@ -2681,6 +2701,39 @@ fn resolve_shuffle_seed(
     Ok(Some(seed))
 }
 
+/// Resolve `--budget DURATION` into seconds. It picks from the id list the
+/// pool dispatches, so it needs the parallel pool and full collection, and a
+/// dist mode that dispatches tests (`--dist each` runs all of them everywhere).
+fn resolve_budget(
+    budget: Option<&str>,
+    n: usize,
+    passthrough: bool,
+    is_lazy: bool,
+    dist_name: &str,
+) -> Result<Option<u64>> {
+    let Some(spec) = budget else { return Ok(None) };
+    let secs = parse_duration_secs(spec).map_err(|e| anyhow::anyhow!("--budget: {e}"))?;
+    if secs == 0 {
+        anyhow::bail!("--budget must be more than 0s");
+    }
+    if n <= 1 || passthrough {
+        anyhow::bail!(
+            "--budget needs the parallel pool (-n >= 2, no -s/--pdb/--co); the \
+             single-worker path runs the session's own full suite with no dispatch filter"
+        );
+    }
+    if is_lazy {
+        anyhow::bail!(
+            "--budget is not supported with --collect lazy: it picks from the full \
+             collection (use --collect full)"
+        );
+    }
+    if dist_name == "each" {
+        anyhow::bail!("--budget is not supported with --dist each (every worker runs every test)");
+    }
+    Ok(Some(secs))
+}
+
 /// Resolve `--shard K/N` into an optional `(k, total)` dispatch filter. `1/1` is
 /// the whole suite (no-op). Otherwise it needs the parallel pool, can't combine
 /// with `--shuffle` (shards must partition identically on every machine), and is
@@ -2902,7 +2955,7 @@ mod tests {
         fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
         mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
         parse_duration_secs, parse_numprocesses, print_run_banner, quarantined_exit,
-        reject_looponfail, requests_doctests, resolve_changed_base, resolve_order,
+        reject_looponfail, requests_doctests, resolve_budget, resolve_changed_base, resolve_order,
         resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
         silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
         warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
@@ -3287,6 +3340,41 @@ mod tests {
             resolve_order(&cli(), &settings_order(Some("fail-fast"))).unwrap(),
             pool::Order::FailFast
         );
+    }
+
+    #[test]
+    fn resolve_order_budget_auto_failfast_explicit_wins() {
+        let mut b = cli();
+        b.budget = Some("90s".into());
+        assert_eq!(
+            resolve_order(&b, &settings_order(None)).unwrap(),
+            pool::Order::FailFast
+        );
+        b.order = Some("throughput".into());
+        assert_eq!(
+            resolve_order(&b, &settings_order(None)).unwrap(),
+            pool::Order::Throughput
+        );
+    }
+
+    #[test]
+    fn resolve_budget_parses_and_refuses_what_it_cannot_pick_from() {
+        let ok = |spec| resolve_budget(Some(spec), 4, false, false, "load");
+        assert_eq!(resolve_budget(None, 0, true, true, "each").unwrap(), None);
+        assert_eq!(ok("90s").unwrap(), Some(90));
+        assert_eq!(ok("5m").unwrap(), Some(300));
+        assert_eq!(ok("45").unwrap(), Some(45));
+        let err = |r: anyhow::Result<Option<u64>>| r.unwrap_err().to_string();
+        assert!(err(ok("soon")).starts_with("--budget: invalid duration"));
+        assert!(err(ok("0s")).contains("more than 0s"));
+        for (n, passthrough) in [(1, false), (0, false), (4, true)] {
+            let r = resolve_budget(Some("90s"), n, passthrough, false, "load");
+            assert!(err(r).contains("needs the parallel pool"));
+        }
+        assert!(err(resolve_budget(Some("90s"), 4, false, true, "load")).contains("--collect lazy"));
+        assert!(err(resolve_budget(Some("90s"), 4, false, false, "each")).contains("--dist each"));
+        // Affinity modes still dispatch tests: allowed.
+        assert!(resolve_budget(Some("90s"), 4, false, false, "loadfile").is_ok());
     }
 
     #[test]

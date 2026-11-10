@@ -81,6 +81,12 @@ pub fn run() -> Result<i32> {
         cache::disable_for_run();
     }
     if cli.watch {
+        if cli.budget.is_some() {
+            anyhow::bail!(
+                "--budget is not supported with --watch (each save already runs \
+                 the tests near the change first)"
+            );
+        }
         watch::watch_loop(&cli, &args)?;
         return Ok(0);
     }

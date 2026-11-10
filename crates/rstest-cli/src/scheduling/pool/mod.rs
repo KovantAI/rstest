@@ -127,6 +127,15 @@ fn without_quarantined(
     history
 }
 
+/// `--budget`: the wall time to fill, and each test's median setup seconds
+/// from the run history (its call seconds come from the duration cache).
+pub struct Budget {
+    pub secs: f64,
+    /// As typed (`90s`), for the summary line.
+    pub label: String,
+    pub setup: std::collections::HashMap<String, f64>,
+}
+
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
 /// (`run_lazy_pool`) orchestrators. Bundled so each entry point takes a handful
 /// of mode-specific args on top rather than one flat ~17-arg list.
@@ -305,9 +314,12 @@ pub fn run_pool(
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
-    // `--order fail-fast`: tests near changed code (see
+    // `--order fail-fast` and `--budget`: tests near changed code (see
     // `select::near_changes`). Empty under throughput or with no signal.
     near_changes: &std::collections::HashMap<String, u8>,
+    // `--budget`: run only what fits, picked after the shard and incremental
+    // filters (see `durations::budget_select`).
+    budget: Option<&Budget>,
     // `rstest replay`: a recorded per-worker schedule to re-pin. When Some, the
     // dynamic dispatch queue is bypassed entirely — each worker runs exactly its
     // recorded nodeids in order — and no new journal is written.
@@ -364,9 +376,9 @@ pub fn run_pool(
 
     let duration_cache = crate::scheduling::durations::load();
     let scope_costs = crate::scheduling::durations::load_scope_costs();
-    // Flake history feeds fail-fast ordering; empty (and untouched) under the
-    // throughput default so a cold cache costs nothing.
-    let flake_history = if order == Order::FailFast {
+    // Flake history feeds fail-fast ordering and --budget; empty (and
+    // untouched) under the throughput default so a cold cache costs nothing.
+    let flake_history = if order == Order::FailFast || budget.is_some() {
         without_quarantined(crate::reporting::flakes::load(), quarantine.map(|q| &q.all))
     } else {
         std::collections::HashMap::new()
@@ -781,6 +793,44 @@ pub fn run_pool(
                             }
                             cached_ids.append(&mut cached);
                             Some(run_idx)
+                        };
+                        // --budget: what fits, from what the shard and the
+                        // skip set left. Wall time already spent (pool start,
+                        // collection) comes off the budget.
+                        let keep = match budget {
+                            None => keep,
+                            Some(b) => {
+                                let cost = ids
+                                    .iter()
+                                    .filter_map(|id| {
+                                        let call = duration_cache.get(id).copied();
+                                        let setup = b.setup.get(id).copied();
+                                        (call.is_some() || setup.is_some()).then(|| {
+                                            (id.clone(), call.unwrap_or(0.0) + setup.unwrap_or(0.0))
+                                        })
+                                    })
+                                    .collect();
+                                let spent = spawn_start.elapsed().as_secs_f64();
+                                let in_keep = |i: u64| keep.as_ref().is_none_or(|k| k.contains(&i));
+                                let pick = crate::scheduling::durations::budget_select(
+                                    &ids,
+                                    &cost,
+                                    &scope_costs,
+                                    &flake_history,
+                                    near_changes,
+                                    b.secs - spent,
+                                    states.len(),
+                                    in_keep,
+                                );
+                                sink.warn(&budget_summary(b, &pick, spent, states.len()));
+                                run.budget_skipped = (0..ids.len() as u64)
+                                    .filter(|&i| in_keep(i) && !pick.keep.contains(&i))
+                                    .map(|i| ids[i as usize].clone())
+                                    .collect();
+                                fail_count.set_total(pick.keep.len());
+                                prog.set_total(pick.keep.len());
+                                Some(pick.keep)
+                            }
                         };
                         dispatch = build_dispatch(
                             &ids,
@@ -1576,6 +1626,40 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
 }
 
 /// Split collected indices into (run, cached, skipped_positions) for
+/// The `--budget` line: what was picked and why, against the estimate.
+fn budget_summary(
+    b: &Budget,
+    pick: &crate::scheduling::durations::BudgetPick,
+    spent: f64,
+    workers: usize,
+) -> String {
+    if pick.cold {
+        return format!(
+            "rstest: --budget {}: no recorded durations yet, running all {} test(s) \
+             (this run records them)",
+            b.label, pick.candidates
+        );
+    }
+    let est = spent + pick.est_secs;
+    let over = if est > b.secs {
+        "; over budget: tests in changed test files always run"
+    } else {
+        ""
+    };
+    format!(
+        "rstest: --budget {} -> {} of {} test(s), est. {est:.0}s on {workers} worker(s) \
+         ({} changed-file, {} failed, {} near-change, {} flaky, {} fill){over}",
+        b.label,
+        pick.keep.len(),
+        pick.candidates,
+        pick.changed,
+        pick.failed,
+        pick.near,
+        pick.flaky,
+        pick.fill,
+    )
+}
+
 /// `--incremental`: starting from `keep` (None = every index), deselect any
 /// index whose nodeid is in `skip_ids` and move it to the cached set instead.
 /// Cached nodeids are DEDUPLICATED — parametrized tests can share one nodeid
@@ -1639,6 +1723,41 @@ fn seed_round_due(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_summary_names_the_pick_and_flags_cold_and_overrun() {
+        use crate::scheduling::durations::BudgetPick;
+        let b = Budget {
+            secs: 60.0,
+            label: "1m".into(),
+            setup: Default::default(),
+        };
+        let pick = BudgetPick {
+            keep: [0, 1, 2].into_iter().collect(),
+            est_secs: 50.0,
+            candidates: 10,
+            changed: 1,
+            failed: 1,
+            fill: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            budget_summary(&b, &pick, 4.0, 2),
+            "rstest: --budget 1m -> 3 of 10 test(s), est. 54s on 2 worker(s) \
+             (1 changed-file, 1 failed, 0 near-change, 0 flaky, 1 fill)"
+        );
+        // Collection time counts: 50s of tests after 20s spent is over 60s.
+        assert!(budget_summary(&b, &pick, 20.0, 2)
+            .ends_with("; over budget: tests in changed test files always run"));
+        let cold = BudgetPick {
+            candidates: 10,
+            cold: true,
+            ..Default::default()
+        };
+        assert!(
+            budget_summary(&b, &cold, 4.0, 2).contains("no recorded durations yet, running all 10")
+        );
+    }
 
     fn queue(len: u64, cursor: usize, slow_count: usize, groups: bool) -> Dispatch {
         Dispatch {

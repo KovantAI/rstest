@@ -886,7 +886,7 @@ pub(super) fn run_post_gates(
     // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 && since_green_narrowed {
         sink.warn(
-            "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect); \
+            "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect/--budget); \
              baseline not advanced",
         );
     } else if since_green && exitstatus == 0 {
@@ -939,12 +939,14 @@ pub(super) fn run_post_gates(
     // one says what differs from the last green. On the final exit code, so
     // a gate that turned the run red counts. Not on `replay`: a diagnostic
     // re-run of an old schedule is no baseline. Only a whole-suite run may
-    // record one: a passing `-k`/shard/cached/--changed subset proves nothing.
+    // record one: a passing `-k`/shard/cached/--changed/--budget subset proves
+    // nothing.
     if !replay {
         let full_suite = !passthrough
             && shard.is_none()
             && !since_green
             && changed_base.is_none()
+            && cli.budget.is_none()
             && !cli.watch
             && outcome.run.cached_nodeids().is_empty()
             && !crate::since_green::run_narrows_suite(args, scope);

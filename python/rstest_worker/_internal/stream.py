@@ -45,6 +45,11 @@ _IDENTITY_FIXTURES = ("worker_id", "testrun_uid")
 # Sentinel for "no value fingerprinted yet" in the scope-promotion tracker.
 _UNSET = object()
 
+# Fixture scopes whose setup is costed per scope node (`scope_costs`). The
+# session's nodeid is "" (a rootdir package's too), so its cost is what each
+# worker pays once.
+_COSTED_SCOPES = ("session", "package", "module", "class")
+
 # Scope-promotion fingerprinting only accepts immutable builtin values:
 # exact scalar types, and tuples/frozensets of them. Anything else (a fresh
 # `[]`, a mock, a DataFrame, a lazy QuerySet, a user object) can't be proven
@@ -814,7 +819,7 @@ class StreamPlugin:
         import time
 
         if not self._doctor:
-            if fixturedef.scope not in ("module", "class"):
+            if fixturedef.scope not in _COSTED_SCOPES:
                 return (yield)
             t0 = time.perf_counter()
             try:
@@ -858,7 +863,7 @@ class StreamPlugin:
                     entry[2] = False
 
     def _add_scope_cost(self, fixturedef, request, secs: float) -> None:
-        if fixturedef.scope not in ("module", "class"):
+        if fixturedef.scope not in _COSTED_SCOPES:
             return
         node = getattr(request, "node", None)
         if node is None:

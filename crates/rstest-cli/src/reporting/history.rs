@@ -114,6 +114,19 @@ impl History {
         self.runs.is_empty()
     }
 
+    /// Each test's median setup seconds over its recorded runs.
+    pub fn median_setup(&self) -> HashMap<String, f64> {
+        self.tests
+            .iter()
+            .filter(|(_, e)| !e.is_empty())
+            .map(|(id, entries)| {
+                let mut s: Vec<f32> = entries.iter().map(|e| e.setup).collect();
+                s.sort_by(f32::total_cmp);
+                (id.clone(), f64::from(s[s.len() / 2]))
+            })
+            .collect()
+    }
+
     /// `nodeid`'s entries paired with their run, oldest first.
     pub fn series(&self, nodeid: &str) -> Vec<(&RunMeta, &Entry)> {
         let runs: HashMap<u64, &RunMeta> = self.runs.iter().map(|r| (r.seq, r)).collect();
@@ -731,6 +744,20 @@ mod tests {
             call: Some(0.5),
             setup: 0.1,
         }
+    }
+
+    #[test]
+    fn median_setup_is_per_test_over_its_runs() {
+        let mut h = History::default();
+        for (i, setup) in [0.25f32, 4.0, 0.5].into_iter().enumerate() {
+            let e = Entry {
+                setup,
+                ..entry("passed")
+            };
+            h.append(meta(i as u64), vec![("a".to_string(), e)], 10);
+        }
+        // One slow outlier run doesn't move the median.
+        assert_eq!(h.median_setup(), HashMap::from([("a".to_string(), 0.5)]));
     }
 
     #[test]
