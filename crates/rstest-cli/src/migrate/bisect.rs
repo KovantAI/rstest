@@ -663,7 +663,7 @@ fn bisect(
     if preds.is_empty() && succs.is_empty() {
         sink.out_line(&format!(
             "\n{victim}\n  is the only test collected, so there is no polluter to bisect. \
-             If it still flakes, it's parallel-only (try `rstest migrate-check`)."
+             If it still flakes, it's parallel-only (try `rstest audit`)."
         ));
         write_json(json_path, victim, &rootdir, &cwd, &[], None)?;
         return Ok(Verdict::Done(1));
@@ -698,7 +698,7 @@ fn bisect(
         sink.out_line(&format!(
             "\n{victim}\n  passes at -n 0 with every other test ({}) run before it: the \
              failure does not reproduce from test order. It is likely parallel-only \
-             (concurrency, not ordering); run `rstest migrate-check`.",
+             (concurrency, not ordering); run `rstest audit`.",
             preds.len() + succs.len()
         ));
         write_json(json_path, victim, &rootdir, &cwd, &[], None)?;

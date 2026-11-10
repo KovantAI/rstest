@@ -1,65 +1,65 @@
 {
  "sweep": {
   "environment": {
-   "date": "2026-11-03",
+   "date": "2026-11-10",
    "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
    "machine": "arm64",
    "cpu": "Apple M4 Max (10 performance + 4 efficiency cores)",
    "logical_cpus": 14,
    "python": "3.13.13",
-   "pytest": "9.1.1",
+   "pytest": "9.2.0",
    "pytest_xdist": "3.8.0",
-   "rstest": "rstest 0.10.0",
-   "rstest_commit": "5385822",
-   "load_1m_at_start": 31.18
+   "rstest": "rstest 0.11.0",
+   "rstest_commit": "6a8c9e4",
+   "load_1m_at_start": 5.18
   },
   "repeat": 5,
   "marker": null,
   "baseline": {
-   "median": 15.61,
-   "min": 15.46,
-   "max": 15.92,
+   "median": 15.2,
+   "min": 15.06,
+   "max": 15.23,
    "walls": [
-    15.915,
-    15.833,
-    15.458,
-    15.614,
-    15.477
+    15.228,
+    15.214,
+    15.175,
+    15.2,
+    15.06
    ]
   },
   "points": [
    {
     "workers": 1,
     "rstest": {
-     "median": 15.95,
-     "min": 15.79,
-     "max": 15.96,
+     "median": 15.3,
+     "min": 15.16,
+     "max": 15.32,
      "walls": [
-      15.791,
-      15.956,
-      15.947,
-      15.955,
-      15.804
+      15.32,
+      15.3,
+      15.157,
+      15.314,
+      15.187
      ],
-     "speedup": 0.98,
-     "efficiency": 0.98,
+     "speedup": 0.99,
+     "efficiency": 0.99,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 15.93,
-     "min": 15.82,
-     "max": 15.94,
+     "median": 15.42,
+     "min": 15.13,
+     "max": 17.12,
      "walls": [
-      15.94,
-      15.886,
-      15.937,
-      15.927,
-      15.819
+      15.521,
+      15.416,
+      15.221,
+      17.115,
+      15.128
      ],
-     "speedup": 0.98,
-     "efficiency": 0.98,
+     "speedup": 0.99,
+     "efficiency": 0.99,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -68,32 +68,32 @@
    {
     "workers": 2,
     "rstest": {
-     "median": 8.17,
-     "min": 8.15,
-     "max": 8.2,
+     "median": 7.88,
+     "min": 7.84,
+     "max": 7.89,
      "walls": [
-      8.198,
-      8.19,
-      8.16,
-      8.168,
-      8.15
+      7.878,
+      7.893,
+      7.874,
+      7.843,
+      7.876
      ],
-     "speedup": 1.91,
+     "speedup": 1.93,
      "efficiency": 0.96,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 8.17,
-     "min": 8.15,
-     "max": 8.21,
+     "median": 7.94,
+     "min": 7.93,
+     "max": 7.98,
      "walls": [
-      8.179,
-      8.169,
-      8.205,
-      8.149,
-      8.157
+      7.942,
+      7.933,
+      7.976,
+      7.951,
+      7.944
      ],
      "speedup": 1.91,
      "efficiency": 0.96,
@@ -105,35 +105,35 @@
    {
     "workers": 4,
     "rstest": {
-     "median": 4.23,
-     "min": 4.22,
-     "max": 4.27,
+     "median": 4.14,
+     "min": 4.12,
+     "max": 4.18,
      "walls": [
-      4.268,
-      4.221,
-      4.231,
-      4.244,
-      4.226
+      4.136,
+      4.121,
+      4.176,
+      4.154,
+      4.124
      ],
-     "speedup": 3.69,
+     "speedup": 3.67,
      "efficiency": 0.92,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 4.25,
-     "min": 4.22,
-     "max": 4.34,
+     "median": 4.19,
+     "min": 4.17,
+     "max": 4.21,
      "walls": [
-      4.226,
-      4.247,
-      4.218,
-      4.343,
-      4.308
+      4.168,
+      4.194,
+      4.206,
+      4.191,
+      4.168
      ],
-     "speedup": 3.67,
-     "efficiency": 0.92,
+     "speedup": 3.63,
+     "efficiency": 0.91,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -142,35 +142,35 @@
    {
     "workers": 8,
     "rstest": {
-     "median": 2.57,
-     "min": 2.46,
-     "max": 2.62,
+     "median": 2.27,
+     "min": 2.24,
+     "max": 2.47,
      "walls": [
-      2.46,
-      2.525,
-      2.616,
-      2.62,
-      2.569
+      2.259,
+      2.242,
+      2.29,
+      2.267,
+      2.469
      ],
-     "speedup": 6.07,
-     "efficiency": 0.76,
+     "speedup": 6.7,
+     "efficiency": 0.84,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.59,
-     "min": 2.55,
-     "max": 2.63,
+     "median": 2.41,
+     "min": 2.39,
+     "max": 2.41,
      "walls": [
-      2.629,
-      2.59,
-      2.619,
-      2.554,
-      2.549
+      2.414,
+      2.391,
+      2.4,
+      2.41,
+      2.406
      ],
-     "speedup": 6.03,
-     "efficiency": 0.75,
+     "speedup": 6.31,
+     "efficiency": 0.79,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -179,35 +179,35 @@
    {
     "workers": 10,
     "rstest": {
-     "median": 2.32,
-     "min": 2.3,
-     "max": 2.37,
+     "median": 2.06,
+     "min": 2.06,
+     "max": 2.07,
      "walls": [
-      2.374,
-      2.3,
-      2.347,
-      2.31,
-      2.322
+      2.058,
+      2.057,
+      2.056,
+      2.068,
+      2.058
      ],
-     "speedup": 6.73,
-     "efficiency": 0.67,
+     "speedup": 7.38,
+     "efficiency": 0.74,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.35,
-     "min": 2.32,
-     "max": 2.42,
+     "median": 2.18,
+     "min": 2.18,
+     "max": 2.19,
      "walls": [
-      2.403,
-      2.416,
-      2.351,
-      2.323,
-      2.319
+      2.186,
+      2.182,
+      2.177,
+      2.189,
+      2.178
      ],
-     "speedup": 6.64,
-     "efficiency": 0.66,
+     "speedup": 6.97,
+     "efficiency": 0.7,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -216,35 +216,35 @@
    {
     "workers": 14,
     "rstest": {
-     "median": 2.06,
-     "min": 2.04,
-     "max": 2.16,
+     "median": 1.82,
+     "min": 1.8,
+     "max": 1.87,
      "walls": [
-      2.05,
-      2.061,
-      2.163,
-      2.065,
-      2.042
+      1.802,
+      1.817,
+      1.841,
+      1.87,
+      1.824
      ],
-     "speedup": 7.58,
-     "efficiency": 0.54,
+     "speedup": 8.35,
+     "efficiency": 0.6,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
     },
     "xdist": {
-     "median": 2.22,
-     "min": 2.22,
-     "max": 2.29,
+     "median": 2.0,
+     "min": 2.0,
+     "max": 2.01,
      "walls": [
-      2.224,
-      2.216,
-      2.229,
-      2.219,
-      2.285
+      2.004,
+      2.001,
+      2.005,
+      2.013,
+      2.006
      ],
-     "speedup": 7.03,
-     "efficiency": 0.5,
+     "speedup": 7.6,
+     "efficiency": 0.54,
      "parity": 100.0,
      "tests": 64,
      "mismatch": 0
@@ -252,24 +252,24 @@
    }
   ],
   "commands": {
-   "pytest": "../../corpus/work/scikit-learn/venv/bin/python -m pytest -q -p recorder tests",
-   "rstest": "../../target/release/rstest -n 14 -q --python ../../corpus/work/scikit-learn/venv/bin/python --report-json rstest-14.json tests",
-   "xdist": "../../corpus/work/scikit-learn/venv/bin/python -m pytest -q -p recorder -n 14 tests"
+   "pytest": "python -m pytest -q -p recorder tests",
+   "rstest": "rstest -n 14 -q --python python --report-json rstest-14.json tests",
+   "xdist": "python -m pytest -q -p recorder -n 14 tests"
   }
  },
  "memory": {
   "environment": {
-   "date": "2026-09-30",
+   "date": "2026-11-10",
    "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
    "machine": "arm64",
    "cpu": "Apple M4 Max (10 performance + 4 efficiency cores)",
    "logical_cpus": 14,
    "python": "3.13.13",
-   "pytest": "9.1.1",
+   "pytest": "9.2.0",
    "pytest_xdist": "3.8.0",
-   "rstest": "rstest 0.8.0",
-   "rstest_commit": "caa9bcc",
-   "load_1m_at_start": 2.31
+   "rstest": "rstest 0.11.0",
+   "rstest_commit": "6a8c9e4",
+   "load_1m_at_start": 10.05
   },
   "repeat": 5,
   "marker": "blas",
@@ -278,78 +278,68 @@
     "points": [
      {
       "workers": 1,
-      "max_proc_rss_mib": 415.7,
-      "peak_tree_rss_mib": 424.3
+      "max_proc_rss_mib": 416.6,
+      "peak_tree_rss_mib": 427.6
      },
      {
       "workers": 2,
-      "max_proc_rss_mib": 415.0,
-      "peak_tree_rss_mib": 839.0
+      "max_proc_rss_mib": 417.3,
+      "peak_tree_rss_mib": 842.4
      },
      {
       "workers": 4,
-      "max_proc_rss_mib": 416.8,
-      "peak_tree_rss_mib": 1664.9
+      "max_proc_rss_mib": 415.3,
+      "peak_tree_rss_mib": 1667.8
      },
      {
       "workers": 8,
-      "max_proc_rss_mib": 416.8,
-      "peak_tree_rss_mib": 3328.2
-     },
-     {
-      "workers": 10,
-      "max_proc_rss_mib": 416.4,
-      "peak_tree_rss_mib": 3932.2
+      "max_proc_rss_mib": 417.3,
+      "peak_tree_rss_mib": 3334.8
      },
      {
       "workers": 14,
-      "max_proc_rss_mib": 414.5,
-      "peak_tree_rss_mib": 4540.8
+      "max_proc_rss_mib": 416.0,
+      "peak_tree_rss_mib": 5687.9
      }
     ],
     "fit": {
-     "fixed_mib": 286.2,
-     "per_worker_mib": 333.6,
-     "r2": 0.969
+     "fixed_mib": 41.2,
+     "per_worker_mib": 405.3,
+     "r2": 1.0
     }
    },
    "xdist": {
     "points": [
      {
       "workers": 1,
-      "max_proc_rss_mib": 414.6,
-      "peak_tree_rss_mib": 451.6
+      "max_proc_rss_mib": 414.8,
+      "peak_tree_rss_mib": 452.2
      },
      {
       "workers": 2,
-      "max_proc_rss_mib": 415.0,
-      "peak_tree_rss_mib": 865.0
+      "max_proc_rss_mib": 415.4,
+      "peak_tree_rss_mib": 866.1
      },
      {
       "workers": 4,
-      "max_proc_rss_mib": 415.1,
-      "peak_tree_rss_mib": 1692.9
+      "max_proc_rss_mib": 415.5,
+      "peak_tree_rss_mib": 1697.1
      },
      {
       "workers": 8,
-      "max_proc_rss_mib": 415.2,
-      "peak_tree_rss_mib": 3357.9
-     },
-     {
-      "workers": 10,
-      "max_proc_rss_mib": 415.1,
-      "peak_tree_rss_mib": 3870.6
+      "max_proc_rss_mib": 415.5,
+      "peak_tree_rss_mib": 3358.5
      },
      {
       "workers": 14,
       "max_proc_rss_mib": 345.7,
-      "peak_tree_rss_mib": 4340.7
+      "peak_tree_rss_mib": 4345.1
      }
     ],
     "fit": {
-     "fixed_mib": 363.5,
-     "per_worker_mib": 317.9,
-     "r2": 0.955
+     "fixed_mib": 369.8,
+     "per_worker_mib": 305.9,
+     "r2": 0.958
     }
    }
   },
@@ -358,38 +348,33 @@
     "points": [
      {
       "workers": 1,
-      "max_proc_rss_mib": 39.8,
-      "peak_tree_rss_mib": 48.3
+      "max_proc_rss_mib": 40.6,
+      "peak_tree_rss_mib": 51.4
      },
      {
       "workers": 2,
-      "max_proc_rss_mib": 40.1,
-      "peak_tree_rss_mib": 87.8
+      "max_proc_rss_mib": 40.7,
+      "peak_tree_rss_mib": 91.0
      },
      {
       "workers": 4,
-      "max_proc_rss_mib": 40.0,
-      "peak_tree_rss_mib": 164.2
+      "max_proc_rss_mib": 40.6,
+      "peak_tree_rss_mib": 168.8
      },
      {
       "workers": 8,
-      "max_proc_rss_mib": 40.2,
-      "peak_tree_rss_mib": 317.3
-     },
-     {
-      "workers": 10,
-      "max_proc_rss_mib": 40.3,
-      "peak_tree_rss_mib": 394.2
+      "max_proc_rss_mib": 40.7,
+      "peak_tree_rss_mib": 325.2
      },
      {
       "workers": 14,
-      "max_proc_rss_mib": 40.2,
-      "peak_tree_rss_mib": 548.8
+      "max_proc_rss_mib": 40.7,
+      "peak_tree_rss_mib": 560.9
      }
     ],
     "fit": {
-     "fixed_mib": 10.3,
-     "per_worker_mib": 38.4,
+     "fixed_mib": 12.3,
+     "per_worker_mib": 39.2,
      "r2": 1.0
     }
    },
@@ -397,38 +382,33 @@
     "points": [
      {
       "workers": 1,
-      "max_proc_rss_mib": 38.4,
-      "peak_tree_rss_mib": 75.8
+      "max_proc_rss_mib": 38.7,
+      "peak_tree_rss_mib": 76.5
      },
      {
       "workers": 2,
-      "max_proc_rss_mib": 38.3,
-      "peak_tree_rss_mib": 113.8
+      "max_proc_rss_mib": 38.5,
+      "peak_tree_rss_mib": 114.7
      },
      {
       "workers": 4,
-      "max_proc_rss_mib": 38.5,
-      "peak_tree_rss_mib": 190.3
+      "max_proc_rss_mib": 38.6,
+      "peak_tree_rss_mib": 192.0
      },
      {
       "workers": 8,
-      "max_proc_rss_mib": 38.7,
-      "peak_tree_rss_mib": 343.1
-     },
-     {
-      "workers": 10,
-      "max_proc_rss_mib": 38.8,
-      "peak_tree_rss_mib": 419.5
+      "max_proc_rss_mib": 39.1,
+      "peak_tree_rss_mib": 345.1
      },
      {
       "workers": 14,
-      "max_proc_rss_mib": 39.5,
-      "peak_tree_rss_mib": 572.6
+      "max_proc_rss_mib": 39.8,
+      "peak_tree_rss_mib": 575.5
      }
     ],
     "fit": {
-     "fixed_mib": 37.4,
-     "per_worker_mib": 38.2,
+     "fixed_mib": 38.1,
+     "per_worker_mib": 38.4,
      "r2": 1.0
     }
    }
@@ -436,17 +416,17 @@
  },
  "grid": {
   "environment": {
-   "date": "2026-09-30",
+   "date": "2026-11-10",
    "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
    "machine": "arm64",
    "cpu": "Apple M4 Max (10 performance + 4 efficiency cores)",
    "logical_cpus": 14,
    "python": "3.13.13",
-   "pytest": "9.1.1",
+   "pytest": "9.2.0",
    "pytest_xdist": "3.8.0",
-   "rstest": "rstest 0.8.0",
-   "rstest_commit": "caa9bcc",
-   "load_1m_at_start": 2.29
+   "rstest": "rstest 0.11.0",
+   "rstest_commit": "6a8c9e4",
+   "load_1m_at_start": 4.12
   },
   "repeat": 5,
   "marker": "blas",
@@ -454,9 +434,9 @@
    {
     "workers": 1,
     "threads": "1",
-    "median": 13.45,
-    "min": 13.44,
-    "max": 13.49,
+    "median": 13.32,
+    "min": 13.27,
+    "max": 13.43,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -472,9 +452,9 @@
    {
     "workers": 1,
     "threads": "2",
-    "median": 7.66,
-    "min": 7.56,
-    "max": 7.7,
+    "median": 7.58,
+    "min": 7.44,
+    "max": 7.66,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -490,8 +470,26 @@
    {
     "workers": 1,
     "threads": "4",
-    "median": 7.64,
-    "min": 7.59,
+    "median": 7.48,
+    "min": 7.45,
+    "max": 7.68,
+    "counts": {
+     "collect_errors": 0,
+     "errors": 0,
+     "failed": 0,
+     "flaky": 0,
+     "passed": 32,
+     "quarantined": 0,
+     "skipped": 0,
+     "xfailed": 0,
+     "xpassed": 0
+    }
+   },
+   {
+    "workers": 1,
+    "threads": "unset",
+    "median": 7.5,
+    "min": 7.47,
     "max": 7.67,
     "counts": {
      "collect_errors": 0,
@@ -506,29 +504,11 @@
     }
    },
    {
-    "workers": 1,
-    "threads": "unset",
-    "median": 7.66,
-    "min": 7.59,
-    "max": 8.07,
-    "counts": {
-     "collect_errors": 0,
-     "errors": 0,
-     "failed": 0,
-     "flaky": 0,
-     "passed": 32,
-     "quarantined": 0,
-     "skipped": 0,
-     "xfailed": 0,
-     "xpassed": 0
-    }
-   },
-   {
     "workers": 2,
     "threads": "1",
-    "median": 7.3,
-    "min": 7.23,
-    "max": 7.37,
+    "median": 7.26,
+    "min": 7.22,
+    "max": 7.27,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -544,9 +524,9 @@
    {
     "workers": 2,
     "threads": "2",
-    "median": 6.5,
-    "min": 6.47,
-    "max": 6.51,
+    "median": 6.46,
+    "min": 6.4,
+    "max": 6.63,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -562,9 +542,9 @@
    {
     "workers": 2,
     "threads": "4",
-    "median": 6.42,
-    "min": 6.38,
-    "max": 6.46,
+    "median": 6.48,
+    "min": 6.28,
+    "max": 6.53,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -580,9 +560,9 @@
    {
     "workers": 2,
     "threads": "unset",
-    "median": 6.43,
-    "min": 6.39,
-    "max": 6.48,
+    "median": 6.52,
+    "min": 6.42,
+    "max": 6.64,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -598,9 +578,9 @@
    {
     "workers": 4,
     "threads": "1",
-    "median": 5.96,
-    "min": 5.84,
-    "max": 6.1,
+    "median": 5.85,
+    "min": 5.8,
+    "max": 5.88,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -616,9 +596,9 @@
    {
     "workers": 4,
     "threads": "2",
-    "median": 5.22,
-    "min": 5.19,
-    "max": 5.3,
+    "median": 5.33,
+    "min": 5.29,
+    "max": 5.35,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -634,9 +614,9 @@
    {
     "workers": 4,
     "threads": "4",
-    "median": 5.23,
-    "min": 5.09,
-    "max": 5.29,
+    "median": 5.31,
+    "min": 5.27,
+    "max": 5.38,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -652,9 +632,9 @@
    {
     "workers": 4,
     "threads": "unset",
-    "median": 5.22,
-    "min": 5.18,
-    "max": 5.29,
+    "median": 5.33,
+    "min": 5.21,
+    "max": 5.35,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -670,9 +650,9 @@
    {
     "workers": 10,
     "threads": "1",
-    "median": 5.17,
-    "min": 5.12,
-    "max": 5.21,
+    "median": 5.33,
+    "min": 5.3,
+    "max": 5.39,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -688,9 +668,9 @@
    {
     "workers": 10,
     "threads": "2",
-    "median": 5.28,
-    "min": 5.16,
-    "max": 5.31,
+    "median": 5.41,
+    "min": 5.37,
+    "max": 5.5,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -707,8 +687,8 @@
     "workers": 10,
     "threads": "4",
     "median": 5.33,
-    "min": 5.25,
-    "max": 5.36,
+    "min": 5.27,
+    "max": 5.38,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -725,8 +705,8 @@
     "workers": 10,
     "threads": "unset",
     "median": 5.34,
-    "min": 5.32,
-    "max": 5.4,
+    "min": 5.28,
+    "max": 5.38,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -742,9 +722,9 @@
    {
     "workers": 14,
     "threads": "1",
-    "median": 5.15,
-    "min": 5.09,
-    "max": 5.51,
+    "median": 5.8,
+    "min": 5.64,
+    "max": 5.85,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -760,9 +740,9 @@
    {
     "workers": 14,
     "threads": "2",
-    "median": 5.06,
-    "min": 5.02,
-    "max": 5.16,
+    "median": 5.42,
+    "min": 5.38,
+    "max": 5.49,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -778,9 +758,9 @@
    {
     "workers": 14,
     "threads": "4",
-    "median": 5.05,
-    "min": 5.01,
-    "max": 5.1,
+    "median": 5.44,
+    "min": 5.31,
+    "max": 5.45,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
@@ -796,9 +776,9 @@
    {
     "workers": 14,
     "threads": "unset",
-    "median": 4.98,
-    "min": 4.96,
-    "max": 5.08,
+    "median": 5.38,
+    "min": 5.23,
+    "max": 5.43,
     "counts": {
      "collect_errors": 0,
      "errors": 0,
