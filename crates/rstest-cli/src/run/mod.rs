@@ -9,7 +9,7 @@ mod monorepo;
 
 use std::io::Write;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -255,6 +255,36 @@ struct PostRun<'a> {
     /// `failed` counts onto one test, and a forced CI worker count on a smaller
     /// machine skews the duration baseline).
     replay: bool,
+}
+
+/// What a run is stamped with: `HEAD` (`--since-green`'s record and the
+/// per-test history's commit), the history commit itself (`-dirty` like `git
+/// describe --dirty` when the checkout, not just the rootdir, has uncommitted
+/// changes; `None` under `replay`, which records no history), and the
+/// environment fingerprint (`explain`'s env_changed). The run's own report
+/// files (`outputs`: --junitxml, --html), left over from an earlier run, don't
+/// count as changes.
+struct RunStamp {
+    head: Option<String>,
+    history_commit: Option<String>,
+    env_fp: String,
+}
+
+fn run_stamp(scope: &Path, python: &Path, outputs: &[PathBuf], replay: bool) -> RunStamp {
+    let head = incremental::head_sha();
+    let history_commit = head.as_ref().filter(|_| !replay).map(|h| {
+        let outputs: Vec<&Path> = outputs.iter().map(PathBuf::as_path).collect();
+        if std::env::current_dir().map_or(true, |d| incremental::checkout_dirty(&d, &outputs)) {
+            format!("{h}-dirty")
+        } else {
+            h.clone()
+        }
+    });
+    RunStamp {
+        head,
+        history_commit,
+        env_fp: incremental::env_fingerprint(scope, python),
+    }
 }
 
 /// The resolved run configuration for a single (non-watch) run: everything
@@ -636,26 +666,22 @@ pub(crate) fn execute_inner(
     // last green run's commit. An explicit --changed always wins. `head` is
     // captured up front (it can't change mid-run) so a green run can record it.
     let since_green = cli.since_green && cli.changed.is_none();
-    // `head` on every run (one git call): the per-test history stamps each
-    // run with its commit.
-    let head = incremental::head_sha();
-    // The commit the history stamps on this run, `-dirty` like `git describe
-    // --dirty` when the checkout (not just the rootdir) has uncommitted changes (a config lookup plus two
-    // git calls). The run's own report files (--junitxml, --html), left over
-    // from an earlier run, don't count as changes. Skipped under `replay`,
-    // which records no history.
-    let history_commit = head.as_ref().filter(|_| pinned.is_none()).map(|h| {
-        if std::env::current_dir().map_or(true, |d| {
-            incremental::checkout_dirty(&d, &cli.run_outputs())
-        }) {
-            format!("{h}-dirty")
-        } else {
-            h.clone()
-        }
+    // The run's stamp (four git calls plus the env fingerprint's site-packages
+    // walk) on a thread, overlapping selection and setup. Joined before
+    // dispatch so the `-dirty` probe sees the tree before any test writes to
+    // it, or early under --since-green, whose selection reads head/env_fp.
+    let mut stamp_thread = Some({
+        let (scope, python) = (scope.clone(), python.clone());
+        let outputs: Vec<PathBuf> = cli.run_outputs().into_iter().map(PathBuf::from).collect();
+        let replay = pinned.is_some();
+        std::thread::spawn(move || run_stamp(&scope, &python, &outputs, replay))
     });
-    // Computed on every run: the per-test history stamps each run with its
-    // environment (`explain`'s env_changed).
-    let env_fp = incremental::env_fingerprint(&scope, &python);
+    let mut join_stamp = || {
+        stamp_thread
+            .take()
+            .map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+    };
+    let early_stamp = if since_green { join_stamp() } else { None };
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
     // Resolved once: selection and the post-run diff-coverage gate share it, so
@@ -668,8 +694,9 @@ pub(crate) fn execute_inner(
         args,
         changed_base.clone(),
         since_green,
-        &head,
-        &env_fp,
+        // Read only under --since-green, which joined the stamp above.
+        early_stamp.as_ref().map_or(&None, |s| &s.head),
+        early_stamp.as_ref().map_or("", |s| &s.env_fp),
         &mut sink,
     )? {
         ControlFlow::Continue(args) => args,
@@ -747,6 +774,13 @@ pub(crate) fn execute_inner(
                     .join("\n"),
                 max_pct: q.max_pct,
             });
+    let RunStamp {
+        head,
+        history_commit,
+        env_fp,
+    } = early_stamp
+        .or_else(join_stamp)
+        .expect("run stamp joined once");
     let mut outcome = dispatch_run(
         &cfg,
         cli,
