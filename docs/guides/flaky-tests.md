@@ -95,7 +95,7 @@ Everything that reads the history applies the same window:
 - [`--reruns-only-known-flaky`](#target-reruns-only-known-flaky), which
   retries only tests with a `flaky > 0` record;
 - [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast),
-  which dispatches recently failed and flaky tests first;
+  which dispatches recently failed, recently changed and flaky tests first;
 - [`rstest explain`](../reference/cli-commands.md#explain),
   which reports a test's flake and failure counts.
 

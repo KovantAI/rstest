@@ -34,6 +34,7 @@ from _harness import (
     WINDOWS,
     check,
     clear_e2e_log,
+    git_init_commit,
     read_e2e_rows,
 )
 
@@ -1153,6 +1154,27 @@ def gate_order_fail_fast(g, args, binary):
         "fail-fast: --collect lazy warns it is ignored",
         "ignored under --collect lazy" in r.stderr,
         r.stderr[-300:],
+    )
+    # A test file edited in the working tree leads even on a cold cache (no
+    # flake history): its red surfaces first, not after the 40 clean tests
+    # collected before it.
+    near = g.tmp / "ffnear"
+    shutil.rmtree(near, ignore_errors=True)
+    g.write("ffnear/pytest.ini", "[pytest]\n")
+    for f in "abcdefgh":
+        g.write(
+            f"ffnear/test_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.05)\n" for i in range(5)),
+        )
+    g.write("ffnear/test_z.py", "def test_edited(): assert True\n")
+    git_init_commit(near)
+    g.write("ffnear/test_z.py", "def test_edited(): assert False\n")
+    r = g.run("-n", "2", "-x", "--order", "fail-fast", cwd=str(near))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "fail-fast: test file edited in the working tree runs first",
+        r.returncode == 1 and "test_edited" in r.stdout and (m is None or int(m.group(1)) < 10),
+        r.stdout[-300:] + r.stderr[-200:],
     )
     # Monorepo root validates --order once, before fanning out.
     mono = g.tmp / "ffmono"

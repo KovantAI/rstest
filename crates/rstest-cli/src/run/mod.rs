@@ -759,6 +759,7 @@ pub(crate) fn execute_inner(
             lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
             durations: &duration_cache,
+            env_fp: &env_fp,
         },
         pinned,
         &mut sink,
@@ -1504,13 +1505,15 @@ fn quarantined_exit(
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
 /// the argument budget: the resolved `--shuffle` seed, `--shard` bucket,
 /// lazy-collection choice, `--quarantine` matcher (fail-fast keeps quarantined
-/// tests out of the front), and the run's shared duration cache.
+/// tests out of the front), the run's shared duration cache, and the env
+/// fingerprint (fail-fast diffs against the last green run recorded under it).
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
     lazy: bool,
     quarantine: Option<&'a gates::Quarantine>,
     durations: &'a DurationCache,
+    env_fp: &'a str,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1530,6 +1533,7 @@ fn dispatch_run(
         lazy,
         quarantine,
         durations: duration_cache,
+        env_fp,
     } = selection;
     let RunConfig {
         n,
@@ -1761,6 +1765,14 @@ fn dispatch_run(
                  full suite; rerun-on-another-worker semantics do not apply)"
                 );
             }
+            // Only fail-fast load dispatch reads it; the diff costs git calls
+            // and a graph walk, so every other run skips it.
+            let near =
+                if order == pool::Order::FailFast && dist == pool::Dist::Load && pinned.is_none() {
+                    near_changes(env_fp)
+                } else {
+                    std::collections::HashMap::new()
+                };
             pool::run_pool(
                 &base_cfg,
                 dist,
@@ -1769,11 +1781,29 @@ fn dispatch_run(
                 shuffle_seed,
                 shard,
                 skip_ids,
+                &near,
                 pinned,
                 sink,
             )?
         },
     )
+}
+
+/// [`select::near_changes`] for the project at the cwd, diffed against the last
+/// green commit when one is recorded under `env_fp` (so the whole branch's
+/// work counts, not just uncommitted edits), else HEAD. Same rootdir rule as
+/// `--changed`: with no config file, the cache's base dir.
+fn near_changes(env_fp: &str) -> std::collections::HashMap<String, u8> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return std::collections::HashMap::new();
+    };
+    // discover()'s config warnings were already shown by this run.
+    let mut project = config::discover(&cwd, &mut std::io::sink());
+    if project.inifile.is_none() {
+        project.rootdir = crate::cache::base_dir();
+    }
+    let base = incremental::baseline(&cwd, env_fp);
+    select::near_changes(&project.rootdir, &project, base.as_deref())
 }
 
 /// A pointer at the interpreter when a run failed on missing imports and

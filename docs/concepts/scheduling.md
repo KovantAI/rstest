@@ -73,12 +73,23 @@ fail-fast`](../reference/cli.md#-order-throughputfail-fast) re-sequences the
 `--dist load` queue for the earliest red signal instead:
 
 1. Tests that recently hard-failed, most recent first.
-2. Flaky tests, most recent flake first.
-3. Everything else, in throughput order.
+2. Tests near code that changed, closest first: a test file edited in the
+   working tree, then a test file changed since the last green run, then a
+   test that reaches a changed source file.
+3. Flaky tests, most recent flake first.
+4. Everything else, in throughput order.
 
-The first two groups are read from `.rstest_cache/flakes.json`, each test
-dispatched on its own. At most 128 tests lead, and quarantined tests (from
-the `--quarantine` file or the auto-quarantine set) are never pulled forward.
+Groups 1 and 3 are read from `.rstest_cache/flakes.json`. Group 2 diffs the
+working tree against the last green run's commit (the one
+[`--since-green`](../reference/cli.md#-since-green) uses), or against `HEAD`
+when none is recorded, and maps changed source files to tests the way
+[`--changed`](../reference/cli.md#-changedrev) does: through the coverage map
+when it is warm, else the import graph. Non-Python changes are ignored. When
+more than a quarter of the run's tests reach a changed source file (a change
+to a core module), that tier is dropped, since it no longer singles anything
+out. Each leading test is dispatched on its own. At most 128 tests lead, and
+quarantined tests (from the `--quarantine` file or the auto-quarantine set)
+are never pulled forward as failed or flaky.
 
 With neither the flag nor `[tool.rstest] order` set, rstest picks
 `fail-fast` under `--watch` and `throughput` otherwise.

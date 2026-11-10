@@ -158,6 +158,7 @@ pub(super) fn build_dispatch(
     groups: std::collections::HashMap<String, String>,
     cache: &std::collections::HashMap<String, f64>,
     flakes: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    near: &std::collections::HashMap<String, u8>,
     scope_costs: &std::collections::HashMap<String, f64>,
     workers: usize,
     dist: Dist,
@@ -193,24 +194,15 @@ pub(super) fn build_dispatch(
                 }
             }
             super::Order::Throughput => throughput(ids, cache, &serial_set, &kept),
-            // Fail-fast: suspects (failed/flaky) first, then the throughput
-            // order. The single-dispatch prefix covers the suspects AND the
-            // long poles, so reds spread across workers at once and slow
-            // tests still don't pile onto one worker's chunk.
+            // Fail-fast: suspects (failed, near a change, flaky) first, then
+            // the throughput order. The single-dispatch prefix covers the
+            // suspects AND the long poles, so reds spread across workers at
+            // once and slow tests still don't pile onto one worker's chunk.
             super::Order::FailFast => {
-                use crate::scheduling::durations::{
-                    failfast_order, is_suspect, FAILFAST_SUSPECT_CAP, SLOW_THRESHOLD_SECS,
-                };
-                let order =
-                    failfast_order(ids, cache, flakes, |i| !serial_set.contains(&i) && kept(&i));
-                // Single-dispatch prefix: the (capped) suspect lead, then the
-                // long poles. The order is already filtered, so the cap here
-                // matches the one failfast_order applied.
-                let lead = order
-                    .iter()
-                    .take(FAILFAST_SUSPECT_CAP)
-                    .take_while(|&&i| is_suspect(&ids[i as usize], flakes))
-                    .count();
+                use crate::scheduling::durations::{failfast_order, SLOW_THRESHOLD_SECS};
+                let (order, lead) = failfast_order(ids, cache, flakes, near, |i| {
+                    !serial_set.contains(&i) && kept(&i)
+                });
                 let slow_count = lead
                     + order[lead..]
                         .iter()
@@ -480,6 +472,7 @@ mod tests {
             cache,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             4,
             dist,
             super::super::Order::Throughput,
@@ -549,6 +542,7 @@ mod tests {
             &cache,
             &flakes,
             &HashMap::new(),
+            &HashMap::new(),
             4,
             Dist::Load,
             super::super::Order::FailFast,
@@ -588,6 +582,7 @@ mod tests {
             HashMap::new(),
             &HashMap::new(),
             &flakes,
+            &HashMap::new(),
             &HashMap::new(),
             4,
             Dist::Load,
@@ -822,6 +817,7 @@ mod tests {
             vec![],
             HashMap::new(),
             cache,
+            &HashMap::new(),
             &HashMap::new(),
             scope_costs,
             workers,

@@ -187,13 +187,17 @@ affinity order).
 - `throughput` (default): slowest cached tests first, individually, to pack
   workers for the best wall-clock time.
 - `fail-fast`: earliest **red** signal first. Tests that hard-failed lead
-  (most recent failure first), then flaky tests (most recent flake first),
-  both read from `.rstest_cache/flakes.json`, each dispatched alone so they
-  run in parallel. At most 128 lead, and tests matched by
-  [`--quarantine`](#-quarantine-file) are never pulled forward. The rest
-  follow in `throughput` order. Pair with
+  (most recent failure first), then tests near changed code (test files
+  edited in the working tree, then test files changed since the last green
+  run, then tests that reach a changed source file), then flaky tests (most
+  recent flake first). Failures and flakes come from
+  `.rstest_cache/flakes.json`; changes from `git diff`. Each leading test is
+  dispatched alone so they run in parallel. At most 128 lead, and tests
+  matched by [`--quarantine`](#-quarantine-file) are never pulled forward as
+  failed or flaky. The rest follow in `throughput` order. Pair with
   [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. With
-  a cold `flakes.json` it matches `throughput`.
+  a cold `flakes.json` and no changes it matches `throughput`. Details:
+  [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest picks
 `fail-fast` under [`--watch`](#-watch) and `throughput` otherwise. Where an

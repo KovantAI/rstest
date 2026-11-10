@@ -91,8 +91,8 @@ pub enum Order {
     /// Slow tests first, to pack workers (best wall-clock throughput).
     #[default]
     Throughput,
-    /// Recently failed, then flaky tests first, then the throughput order for
-    /// the rest: earliest red signal, for `--watch` and PR CI (compose with
+    /// Recently failed, then near changed code, then flaky tests first, then
+    /// the throughput order for the rest: earliest red signal, for `--watch` and PR CI (compose with
     /// `--maxfail`).
     FailFast,
 }
@@ -305,6 +305,9 @@ pub fn run_pool(
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
+    // `--order fail-fast`: tests near changed code (see
+    // `select::near_changes`). Empty under throughput or with no signal.
+    near_changes: &std::collections::HashMap<String, u8>,
     // `rstest replay`: a recorded per-worker schedule to re-pin. When Some, the
     // dynamic dispatch queue is bypassed entirely — each worker runs exactly its
     // recorded nodeids in order — and no new journal is written.
@@ -785,6 +788,7 @@ pub fn run_pool(
                             groups.unwrap_or_default(),
                             &duration_cache,
                             &flake_history,
+                            near_changes,
                             &scope_costs,
                             states.len(),
                             dist,

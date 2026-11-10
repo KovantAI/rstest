@@ -3,6 +3,20 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Features
+
+- **`--order fail-fast` runs tests near your changes early.** After tests
+  that recently failed, and before flaky ones, it now runs tests close to
+  what changed: a test file edited in the working tree first, then test files
+  changed since the last green run, then tests that reach a changed source
+  file (coverage map when warm, else the import graph). The diff is against
+  the last green run's commit, or `HEAD` when none is recorded, so a cold
+  cache still gets a useful order. A change that reaches more than a quarter
+  of the run (a core module) doesn't reorder anything. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
 ## 0.11.0 (2026-11-09)
 
 ### Fixes
