@@ -108,7 +108,7 @@ the tree and the rstest release it shipped in:
 
 | Vendored pytest | Change | PR / commit | rstest release |
 |---|---|---|---|
-| **9.2.0** | 9.1.1 → 9.2.0 | pending (`features/pytest/9.2`) | Unreleased |
+| **9.2.0** | 9.1.1 → 9.2.0 | [`dc3bcbf`](https://github.com/KovantAI/rstest/commit/dc3bcbf) · [#206](https://github.com/KovantAI/rstest/pull/206) | 0.10.0 (2026-11-01) |
 | 9.1.1 | 9.1.0 → 9.1.1 | [`54ed39d`](https://github.com/KovantAI/rstest/commit/54ed39d) · [#30](https://github.com/KovantAI/rstest/pull/30) | 0.1.0 (2026-06-23) |
 | 9.1.0 | 9.0.3 → 9.1.0 | [`ab80f28`](https://github.com/KovantAI/rstest/commit/ab80f28) · [#30](https://github.com/KovantAI/rstest/pull/30) | 0.1.0 (2026-06-23) |
 | 9.0.3 | initial vendored core | [`df7dcf1`](https://github.com/KovantAI/rstest/commit/df7dcf1) | 0.0.1 (2026-06-10) |

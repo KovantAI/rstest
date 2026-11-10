@@ -337,9 +337,10 @@ BLAS/`OMP_NUM_THREADS` oversubscription concerns apply here as under xdist; see
 If your suite is **CPU-bound** (real compute per test, no sleeps or socket
 waits) and it already splits cleanly under xdist (`-n 8` ≈ 8× serial, workers
 stay busy, no single long test gating the run), **rstest
-lands at parity on raw speed, not a win.** sympy (3,061 pure-Python compute
-tests) runs 16.1s under rstest `-n 8` and 14.8s under xdist `-n 8`, within
-noise at every worker count from 1 to 14 (see the
+is no faster on raw speed, and xdist can be slightly ahead.** sympy (3,061
+pure-Python compute tests) runs 16.0s under rstest `-n 8` and 14.3s under
+xdist `-n 8`; across worker counts 1 to 14 the two are within noise or xdist
+leads by up to 11% (see the
 [CPU-bound benchmarks](../reference/benchmarks.md#cpu-bound-suites)). Don't
 switch for wall-clock alone.
 
@@ -349,7 +350,7 @@ collection-order batches leave to one worker or start late: a *wait-bound*
 pattern. A CPU-bound suite that
 already spreads evenly has no such slack; both runners saturate your cores,
 neither exceeds them. Measured on an M4 Max (10 performance + 4 efficiency
-cores), sympy scales to 6.3x at `-n 10` and drops to 5.7x at `-n 14`: expect gains
+cores), sympy scales to 6.4x at `-n 10` and 6.5x at `-n 14`: expect gains
 up to your performance-core count, then a flat or falling curve.
 
 **What's still worth it anyway** (beyond the improvements above):

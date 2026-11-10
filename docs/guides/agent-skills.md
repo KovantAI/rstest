@@ -4,9 +4,11 @@ rstest ships two [Agent Skills](https://agentskills.io) that let a coding agent
 (Claude Code, Codex, and others) drive rstest's multi-step workflows for you:
 
 - **`migrate-to-rstest`**: switch a suite or its CI from pytest to rstest, make
-  it parallel-safe, and speed it up. Its readiness lane drives `migrate-check`,
-  applies the fix for each verdict, and sets up `[tool.rstest]` config and a CI
-  gate. Its speed lane drives `--doctor` and turns each finding into an action.
+  it parallel-safe, and speed it up. Its readiness lane runs `try`, drives `migrate-check`,
+  applies the fix for each verdict, sets up `[tool.rstest]` config and a CI
+  gate, and ends by driving `xdist-removal-check --xdist-trial` to **ready**
+  and dropping pytest-xdist from the project's dependency lists. Its speed lane
+  drives `--doctor` and turns each finding into an action.
 - **`rstest-triage`**: debug failures on a suite that already runs on rstest: a
   CI run that is red but passes locally, a test that fails only in parallel, a
   polluter, a flaky test, a hung worker. It drives `replay`, `bisect`, `audit`,

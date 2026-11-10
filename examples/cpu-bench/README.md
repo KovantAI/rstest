@@ -42,25 +42,26 @@ reproducibility check, not a headline.
 ## Measured result
 
 Apple M4 Max (10 performance + 4 efficiency cores, 14 logical CPUs), 36 GB,
-macOS 26.6.1, AC power, 1-minute load 2.2-2.5 at the start of each block
-(just above the tool's 2.0 guard, so treat gaps inside a few percent as noise).
-CPython 3.13.13, pytest 9.1.1, pytest-xdist 3.8.0, rstest 0.8.0 (commit
-`caa9bcc`), 2026-09-30. Median of 5 runs after 1 untimed warm-up, min-max in
+macOS 26.6.1, AC power, 1-minute load 5.18 (sweep), 10.05 (memory) and 4.12
+(grid) at the start of each block, each block starting right after the
+previous one's 14-worker points (above the tool's 2.0 guard, so treat gaps
+inside a few percent as noise). CPython 3.13.13, pytest 9.2.0, pytest-xdist
+3.8.0, rstest 0.11.0 (commit `6a8c9e4`, the `v0.11.0` tag), 2026-11-10. Median of 5 runs after 1 untimed warm-up, min-max in
 parentheses; rstest warm. Every run: 100% per-test outcome parity with the
 serial pytest baseline.
 
 ### Worker sweep
 
-pytest serial: 15.16 s (15.00-15.23).
+pytest serial: 15.20 s (15.06-15.23).
 
 | -n | rstest (s) | speedup | efficiency | xdist (s) | speedup | efficiency |
 |---|---|---|---|---|---|---|
-| 1 | 15.31 (15.12-15.42) | 0.99x | 99% | 15.37 (15.29-15.47) | 0.99x | 99% |
-| 2 | 7.82 (7.81-7.88) | 1.94x | 97% | 8.02 (7.87-8.14) | 1.89x | 95% |
-| 4 | **4.04** (4.03-4.07) | 3.75x | 94% | 4.21 (4.21-4.25) | 3.60x | 90% |
-| 8 | **2.24** (2.21-2.43) | 6.77x | 85% | 2.48 (2.44-2.52) | 6.11x | 76% |
-| 10 | **2.00** (2.00-2.07) | 7.58x | 76% | 2.24 (2.24-2.27) | 6.77x | 68% |
-| 14 | **1.76** (1.74-1.76) | 8.61x | 62% | 2.08 (2.06-2.10) | 7.29x | 52% |
+| 1 | 15.30 (15.16-15.32) | 0.99x | 99% | 15.42 (15.13-17.12) | 0.99x | 99% |
+| 2 | **7.88** (7.84-7.89) | 1.93x | 96% | 7.94 (7.93-7.98) | 1.91x | 96% |
+| 4 | 4.14 (4.12-4.18) | 3.67x | 92% | 4.19 (4.17-4.21) | 3.63x | 91% |
+| 8 | 2.27 (2.24-2.47) | 6.70x | 84% | 2.41 (2.39-2.41) | 6.31x | 79% |
+| 10 | **2.06** (2.06-2.07) | 7.38x | 74% | 2.18 (2.18-2.19) | 6.97x | 70% |
+| 14 | **1.82** (1.80-1.87) | 8.35x | 60% | 2.00 (2.00-2.01) | 7.60x | 54% |
 
 Commands: `python -m pytest -q tests` (serial), `python -m pytest -q -n N tests`
 (xdist), `rstest -n N -q tests`.
@@ -75,9 +76,9 @@ Reading it:
   about 0.25 s split unevenly past `-n 8` (at `-n 14` the busiest worker still
   runs 5 tests, a 1.25 s floor before any start-up cost). A longer suite of the
   same shape flattens later.
-- rstest is ahead of xdist at every `-n` from 4 up, with no overlap in the
-  spreads: 4% at `-n 4`, 15% at `-n 14`. At `-n 1` and `-n 2` the spreads
-  overlap. On a suite this short that gap is
+- rstest is ahead of xdist at `-n 2`, `-n 10` and `-n 14` with no overlap in
+  the spreads: 1% at `-n 2`, 9% at `-n 14`. At `-n 1`, `-n 4` and `-n 8` the
+  spreads overlap. On a suite this short that gap is
   mostly per-run overhead (worker start-up and dispatch), so expect it to
   shrink as a share of wall time on longer suites.
 
@@ -91,25 +92,25 @@ No-op suite (the cost of a worker before any test code):
 
 | | per worker | driver / controller |
 |---|---|---|
-| rstest | 38 MiB | ~10 MiB (Rust orchestrator) |
+| rstest | 39 MiB | ~12 MiB (Rust orchestrator) |
 | pytest-xdist | 38 MiB | ~38 MiB (a full Python process) |
 
 `blas` suite (about 216 MB of arrays per test), in MiB:
 
 | -n | rstest largest process | rstest whole tree | xdist whole tree |
 |---|---|---|---|
-| 1 | 416 | 424 | 452 |
-| 2 | 415 | 839 | 865 |
-| 4 | 417 | 1,665 | 1,693 |
-| 8 | 417 | 3,328 | 3,358 |
-| 10 | 416 | 3,932 | 3,871 |
-| 14 | 414 | 4,541 | 4,341 |
+| 1 | 417 | 428 | 452 |
+| 2 | 417 | 842 | 866 |
+| 4 | 415 | 1,668 | 1,697 |
+| 8 | 417 | 3,335 | 3,358 |
+| 14 | 416 | 5,688 | 4,345 |
 
-Up to `-n 8` the tree peak is exactly driver + N x per-worker peak (8 x 417 =
-3,336). At `-n 10` and `-n 14` it comes in under that: with 32 short tests
-over 14 workers, the workers' peaks stop coinciding. So N x per-worker peak is
-the upper bound, reached whenever all workers are busy at once, which is the
-normal case for a long suite. Size `-n` against it.
+The tree peak is driver + N x per-worker peak (8 x 417 = 3,336; 14 x 406 =
+5,684). With 32 short tests over 14 workers the workers' peaks can stop
+coinciding: in this run they did under xdist (4,345) but not under rstest, and
+the 2026-09-30 run had both at 4,300-4,600. So N x per-worker peak is the upper
+bound, reached whenever all workers are busy at once, which is the normal case
+for a long suite. Size `-n` against it.
 
 ### Worker x BLAS-thread grid
 
@@ -119,11 +120,11 @@ on macOS arm64 uses Accelerate, which reads only the last one). Wall seconds:
 
 | -n | 1 thread | 2 | 4 | unset |
 |---|---|---|---|---|
-| 1 | 13.45 (13.44-13.49) | 7.66 (7.56-7.70) | 7.64 (7.59-7.67) | 7.66 (7.59-8.07) |
-| 2 | 7.30 (7.23-7.37) | 6.50 (6.47-6.51) | 6.42 (6.38-6.46) | 6.43 (6.39-6.48) |
-| 4 | 5.96 (5.84-6.10) | 5.22 (5.19-5.30) | 5.23 (5.09-5.29) | 5.22 (5.18-5.29) |
-| 10 | 5.17 (5.12-5.21) | 5.28 (5.16-5.31) | 5.33 (5.25-5.36) | 5.34 (5.32-5.40) |
-| 14 | 5.15 (5.09-5.51) | 5.06 (5.02-5.16) | 5.05 (5.01-5.10) | 4.98 (4.96-5.08) |
+| 1 | 13.32 (13.27-13.43) | 7.58 (7.44-7.66) | 7.48 (7.45-7.68) | 7.50 (7.47-7.67) |
+| 2 | 7.26 (7.22-7.27) | 6.46 (6.40-6.63) | 6.48 (6.28-6.53) | 6.52 (6.42-6.64) |
+| 4 | 5.85 (5.80-5.88) | 5.33 (5.29-5.35) | 5.31 (5.27-5.38) | 5.33 (5.21-5.35) |
+| 10 | 5.33 (5.30-5.39) | 5.41 (5.37-5.50) | 5.33 (5.27-5.38) | 5.34 (5.28-5.38) |
+| 14 | 5.80 (5.64-5.85) | 5.42 (5.38-5.49) | 5.44 (5.31-5.45) | 5.38 (5.23-5.43) |
 
 No test changed outcome in any cell (these tests compare with a tolerance, so
 this does not rule out a tight `==` flipping; see
@@ -132,17 +133,17 @@ this does not rule out a tight `==` flipping; see
 Reading it (Accelerate, this machine):
 
 - **Below the core count, library threads help.** At `-n 1` a one-thread cap
-  takes 13.4 s against 7.7 s unset; at `-n 4`, 6.0 s against 5.2 s.
-- **At or past the core count, the cap barely matters.** At `-n 10` and
-  `-n 14` the columns sit within about 3% of each other, with no consistent
-  direction: one thread was fastest at `-n 10`, unset was fastest at `-n 14`.
-  No oversubscription penalty showed up.
+  takes 13.3 s against 7.5 s unset; at `-n 4`, 5.9 s against 5.3 s.
+- **At or past the core count, the cap barely matters, or one thread is
+  slower.** At `-n 10` the columns sit within about 2% of each other. At
+  `-n 14` one thread was the slowest cell (5.8 s against 5.4 s unset). No
+  oversubscription penalty showed up for leaving it unset.
 - **So one thread per worker is not a free default.** It costs time at low
-  `-n` and bought at most 3% at high `-n` here.
+  `-n` and bought nothing at high `-n` here.
 - This is Accelerate, whose threads the OS schedules onto shared matrix units.
   OpenBLAS (numpy's Linux wheels) and MKL run their own spinning thread pools
   and can behave differently: the CI workflow runs the same grid on Linux for
   that data point. Measure your own stack with `--grid` before pinning.
-- Past about 4 workers this suite barely scales (13.4 s serial, 5 s best): the
+- Past about 4 workers this suite barely scales (13.3 s serial, 5.3 s best): the
   matrix units and memory bandwidth are shared, so more processes don't add
   throughput. BLAS-heavy suites gain less from `-n` than pure-Python ones.

@@ -88,9 +88,9 @@ Each worker is a full OS process, so memory grows with `-n`. Measured
 peak ≈ orchestrator + N × (worker baseline + your suite's working set)
 ```
 
-- **Worker baseline:** 38 MiB (interpreter, pytest, rstest's worker), the same
-  as a pytest-xdist worker.
-- **Orchestrator:** about 10 MiB for rstest (Rust). xdist's controller is a
+- **Worker baseline:** 39 MiB (interpreter, pytest, rstest's worker), about
+  the same as a pytest-xdist worker (38 MiB).
+- **Orchestrator:** about 12 MiB for rstest (Rust). xdist's controller is a
   Python process: about 38 MiB.
 - **Working set:** your serial run's peak RSS minus the baseline. A suite that
   holds about 400 MiB per worker (the cpu-bench `blas` tests) peaks at 3.3 GiB
@@ -379,6 +379,10 @@ tests, since each bisection costs several runs; run
 each of the others. Reach for
 it instead of running the three commands by hand; see
 [The migrate-check preflight](migrate-from-pytest.md#the-migrate-check-preflight).
+On a suite already running on rstest,
+[`rstest audit`](../reference/cli-commands.md#audit) runs the same
+discriminators as a fix loop and prints a `conftest.py` block that marks the
+serial-fixable tests.
 
 For an order-dependent suite, three more tools go from "it flakes sometimes"
 to a fix:

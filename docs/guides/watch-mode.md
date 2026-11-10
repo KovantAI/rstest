@@ -85,18 +85,18 @@ Each cycle spawns fresh workers at every worker count (nothing is reused
 between cycles), so an edited module is always re-imported from scratch and a
 rerun cannot show a stale-import false green. The price is a small fixed cost
 on top of your tests' own time. Measured from save to result on a one-test
-project (Apple M4 Max, rstest 0.8.0, CPython 3.13; median of 10 saves, min-max
+project (Apple M4 Max, rstest 0.11.0, CPython 3.13; median of 10 saves, min-max
 in parentheses):
 
 | Worker count | Save to rerun start | Rerun (spawn, collect, test, report) | Save to result |
 |---|---|---|---|
-| `-n 0` | 314ms (312-317) | 162ms (159-168) | 476ms (472-482) |
-| `-n 2` | 314ms (311-317) | 202ms (181-211) | 517ms (497-523) |
+| `-n 0` | 319ms (314-323) | 139ms (136-148) | 460ms (450-470) |
+| `-n 2` | 319ms (315-323) | 163ms (161-167) | 483ms (478-487) |
 
 The first column is the 300ms debounce plus file-event delivery; the rerun
-itself costs 160-200ms here, growing with `-n`. Reproduce with
+itself costs 140-165ms here, growing with `-n`. Reproduce with
 `python3 corpus/watch_cycle.py --out <file>`; the measured run is
-[`corpus/bench-results/2026-10-06-watch-cycle.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
+[`corpus/bench-results/2026-11-10-watch-cycle.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
 
 Selection is **incremental** across the session: the import graph stays warm,
 and each save re-parses only files whose mtime or size changed (adding or

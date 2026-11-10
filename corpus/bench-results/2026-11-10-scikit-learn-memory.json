@@ -1,0 +1,115 @@
+{
+ "environment": {
+  "date": "2026-11-10",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 14,
+  "load_1m_at_start": 3.35,
+  "rstest": "rstest 0.11.0",
+  "rstest_commit": "6a8c9e4",
+  "suite_commits": {},
+  "repeat": 5,
+  "warmup": 1,
+  "rstest_cache": "warm",
+  "xdist_dist": "load (xdist default)",
+  "bench_python": "3.13.13",
+  "suite_runtimes": {
+   "scikit-learn": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   }
+  }
+ },
+ "spectrum": [
+  {
+   "suite": "scikit-learn",
+   "pytest_wall": 33.5,
+   "pytest_band": "33.5 (33.2-33.7)",
+   "rstest_wall": 6.9,
+   "rstest_band": "6.9 (6.6-7.0)",
+   "speedup": 4.86,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 3941,
+   "candidate_collect_errors": 0
+  }
+ ],
+ "sweeps": [],
+ "memory": [
+  {
+   "suite": "scikit-learn",
+   "rstest": {
+    "points": [
+     {
+      "workers": 1,
+      "max_proc_rss_mib": 269.6,
+      "peak_tree_rss_mib": 816.7,
+      "wall": 34.6
+     },
+     {
+      "workers": 4,
+      "max_proc_rss_mib": 252.6,
+      "peak_tree_rss_mib": 1698.3,
+      "wall": 11.5
+     },
+     {
+      "workers": 8,
+      "max_proc_rss_mib": 252.5,
+      "peak_tree_rss_mib": 2707.8,
+      "wall": 8.4
+     },
+     {
+      "workers": 14,
+      "max_proc_rss_mib": 244.5,
+      "peak_tree_rss_mib": 3865.4,
+      "wall": 7.3
+     }
+    ],
+    "fit": {
+     "fixed_mib": 701.7,
+     "per_worker_mib": 232.6,
+     "r2": 0.991
+    }
+   },
+   "xdist": {
+    "points": [
+     {
+      "workers": 1,
+      "max_proc_rss_mib": 267.9,
+      "peak_tree_rss_mib": 924.3,
+      "wall": 34.8
+     },
+     {
+      "workers": 4,
+      "max_proc_rss_mib": 249.1,
+      "peak_tree_rss_mib": 2092.2,
+      "wall": 11.5
+     },
+     {
+      "workers": 8,
+      "max_proc_rss_mib": 265.6,
+      "peak_tree_rss_mib": 2819.1,
+      "wall": 8.2
+     },
+     {
+      "workers": 14,
+      "max_proc_rss_mib": 249.2,
+      "peak_tree_rss_mib": 3888.1,
+      "wall": 7.3
+     }
+    ],
+    "fit": {
+     "fixed_mib": 960.2,
+     "per_worker_mib": 217.9,
+     "r2": 0.966
+    }
+   }
+  }
+ ],
+ "grid": null
+}

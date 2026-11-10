@@ -158,13 +158,18 @@ there behaves as the *plugin's* flag, with the plugin's limits:
   written**.
 - `addopts = --html=report.html`: same pattern; pytest-html writes nothing
   in the pool.
+- `addopts = --cov=pkg --cov-report=xml` (pytest-cov): every worker
+  measures, but rstest combines and reports only for a `--cov` on its own
+  command line, so **no `coverage.xml` is written** and the run still exits 0.
+  rstest warns `--cov is set only in addopts`. See
+  [Coverage](coverage.md).
 - `addopts = -n 4 --dist loadgroup` (pytest-xdist): rstest reads neither,
   so `xdist_group` co-location is lost without a warning; see
   [If xdist is still in your ini](migrate-from-xdist.md#if-xdist-is-still-in-your-ini).
 
 Move these to the rstest command line or `[tool.rstest]` (keys exist for
 `reruns`, `numprocesses` and `dist`, e.g. `dist = "loadgroup"`) when you
-switch.
+switch. `--cov` has no `[tool.rstest]` key: pass it on the command line.
 
 ## What changes
 

@@ -31,9 +31,11 @@ the real values.
 `RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT`,
 `RSTEST_JUNITXML`, `RSTEST_RERUNS` (set to `1` under a global `--reruns`, so a
 session's own `-x` / `--maxfail` doesn't count failed attempts the orchestrator
-may retry) and `RSTEST_QUARANTINE` (the `--quarantine` patterns and the auto-quarantined
-nodeids, one anchored regex per line, exempt from `-x` / `--maxfail` the same
-way), plus `RSTEST_NETWORK` (`record` under `--doctor`) and `RSTEST_NETWORK_ALLOW` (the `network-allow` entries, one per
+may retry), `RSTEST_QUARANTINE` (the `--quarantine` file patterns, one anchored
+regex per line, exempt from `-x` / `--maxfail` the same way),
+`RSTEST_AUTO_QUARANTINE` (the auto-quarantined nodeids, one per line, exempt the
+same way) and `RSTEST_AUTO_QUARANTINE_MAX` (their cap, a percent of the session's
+tests), plus `RSTEST_NETWORK` (`record` under `--doctor`) and `RSTEST_NETWORK_ALLOW` (the `network-allow` entries, one per
 line) coordinate
 workers and may change between versions. Don't depend on them. rstest clears
 them before starting each worker and sets only the ones the run needs (for
