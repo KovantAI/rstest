@@ -197,6 +197,39 @@ mod tests {
     }
 
     #[test]
+    fn agent_skills_page_names_every_subcommand_a_skill_runs() {
+        // The migrate skill gained an `xdist-removal-check` step in 0.11.0
+        // while docs/guides/agent-skills.md still described the old flow.
+        use clap::CommandFactory;
+        let page = crate::doc_pages::pages()
+            .into_iter()
+            .find(|(p, _)| p == "docs/guides/agent-skills.md")
+            .expect("agent-skills.md not found")
+            .1;
+        let subs: Vec<String> = crate::cli::Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        let mut missing = Vec::new();
+        for (skill, rel, bytes) in FILES {
+            if *rel != "SKILL.md" {
+                continue;
+            }
+            let text = std::str::from_utf8(bytes).unwrap();
+            for sub in &subs {
+                let run = regex::Regex::new(&format!(r"rstest {}\b", regex::escape(sub))).unwrap();
+                if run.is_match(text) && !page.contains(&format!("`{sub}")) {
+                    missing.push(format!("{skill}: {sub}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "subcommands a skill runs that docs/guides/agent-skills.md doesn't name: {missing:?}"
+        );
+    }
+
+    #[test]
     fn plugin_version_matches_package() {
         // Claude Code only ships a plugin update when `version` changes, so it
         // must be bumped with every release.

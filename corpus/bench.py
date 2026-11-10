@@ -628,7 +628,7 @@ def main():
     #   fastapi          ~2.6x mid gain
     #   anyio            ~3.9x big gain (also the worker-sweep suite)
     #   langgraph        monorepo: N serial per-lib pytest vs one root rstest
-    #                    run; ~7.3x (bench-results/2026-10-06-langgraph.json)
+    #                    run; ~7.5x (bench-results/2026-11-10-langgraph.json)
     # All five are documented at 100% per-test parity, so the parity gate is
     # meaningful (a real regression drops well below --parity-floor).
     ap.add_argument(

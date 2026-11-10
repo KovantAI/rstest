@@ -303,8 +303,9 @@ The leak is only noticed when the garbage collector finalizes the socket,
 which raises an unraisable `ResourceWarning` inside **whatever test is running
 at that moment**, and that test fails. In serial order the collection point is
 stable, so the baseline is clean; under any parallel runner the tests around it
-change and the failure lands somewhere else. The 2026-09-30 benchmark runs
-measured 99.91-99.98% parity (1 to 4 mismatched tests per run; see
+change and the failure lands somewhere else. The 2026-11-10 cold-cache
+benchmark runs measured 99.91-99.98% parity (1 to 4 mismatched tests per run;
+the warm runs that day measured 100%; see
 [Benchmarks](benchmarks.md)). In an earlier sample (2026-09-26, `-n 8`),
 rstest failed
 `test_connector.py::test_tcp_connector_do_not_raise_connector_ssl_error[domain name]`

@@ -272,7 +272,7 @@ seconds of test time), so the same job can pass on one machine and exit 1 on
 another. Pass an explicit `-n 2` or higher with `--shard`. See
 [`--shard`](cli.md#-shard-kn).
 
-## `--reruns`, `--junitxml` or `--timeout` in `addopts` is ignored or rejected
+## `--reruns`, `--junitxml`, `--cov` or `--timeout` in `addopts` is ignored or rejected
 
 rstest reads its own flags only from the command line and `[tool.rstest]`.
 The same flag in pytest's `addopts` or in `PYTEST_ADDOPTS` goes to the pytest
@@ -281,7 +281,11 @@ session inside each worker instead. There it either fails the run with
 the flag, or reaches the plugin rather than rstest: with pytest-rerunfailures
 installed `addopts = --reruns 2` silently gives no reruns under the pool (the
 plugin is neutralized inside workers), and `addopts = --junitxml=x.xml`
-writes no file at `-n 2` or more. Move these flags to the command line or
+writes no file at `-n 2` or more. `addopts = --cov=pkg --cov-report=xml`
+measures in every worker but nothing combines or reports it (no
+`coverage.xml`, exit 0); rstest warns `--cov is set only in addopts`, see
+[Coverage](../guides/coverage.md).
+Move these flags to the command line or
 `[tool.rstest]`. The rstest-owned flags that share a name with a pytest or
 plugin flag are listed under
 [Owned flags that shadow plugin or pytest flags](cli.md#shadowed-flags).

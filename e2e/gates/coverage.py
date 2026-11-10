@@ -80,6 +80,29 @@ def gate_coverage(g, args, binary):
         r.returncode == 0 and "TOTAL" not in r.stdout and "TOTAL" in r.stderr,
         r.stdout[-200:],
     )
+    # --cov only in addopts: workers measure but rstest never combines or
+    # reports, and the run exits 0. Silent until rstest warned (coverage.md).
+    g.write("covaddopts/mypkg/__init__.py", "def used(x):\n    return x * 2\n")
+    g.write(
+        "covaddopts/test_cov.py",
+        "from mypkg import used\n\n\ndef test_used():\n    assert used(2) == 4\n",
+    )
+    g.write("covaddopts/pytest.ini", "[pytest]\naddopts = --cov=mypkg --cov-report=xml\n")
+    addir = g.tmp / "covaddopts"
+    r = g.run("test_cov.py", "-n", "2", cwd=addir, env_extra={"PYTHONPATH": str(addir)})
+    check(
+        "--cov only in addopts warns under the pool",
+        r.returncode == 0 and "--cov is set only in addopts" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run(
+        "test_cov.py", "-n", "2", "--cov=mypkg", cwd=addir, env_extra={"PYTHONPATH": str(addir)}
+    )
+    check(
+        "--cov on the command line: no addopts warning",
+        r.returncode == 0 and "--cov is set only in addopts" not in r.stderr,
+        r.stderr[-300:],
+    )
 
 
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
