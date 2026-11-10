@@ -4,6 +4,7 @@ and lazy (LazyDispatchPlugin)."""
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,6 +48,7 @@ class FakeItem:
     def __init__(self, nodeid, *, location=None, marks=None, closest=None, config=None):
         self.nodeid = nodeid
         self.location = location or (nodeid.split("::")[0], 1, "domain")
+        self.path = Path(nodeid.split("::")[0]).absolute()
         self._marks = marks or []
         self._closest = closest or {}
         self.config = config
@@ -556,6 +558,26 @@ def test_lazy_collection_shares_directory_nodes_across_collects():
     assert rep.result[0] is not first_pkg  # failed report left alone
 
 
+def test_lazy_collection_reuses_a_directory_listing_within_a_batch():
+    # Regression: pytest re-collects a file arg's directory for EVERY arg
+    # (handle_dupes=False), so a batch of N sibling files listed the
+    # directory N times. Directories always go through the cache; other
+    # nodes keep the caller's choice.
+    asked: list[bool] = []
+    session = _lazy_collection_session(SimpleNamespace(cache=None))
+    session._collect_one_node = lambda node, handle_dupes=True: (
+        asked.append(handle_dupes) or SimpleNamespace(passed=False, result=[]),
+        False,
+    )
+    LazyDispatchPlugin(FakeConn()).pytest_collection(session)
+    session._collect_one_node(_fake_dir("tests"), False)
+    session._collect_one_node(SimpleNamespace(nodeid="tests/test_a.py"), False)
+    assert asked == [True, False]
+
+
+_CWD_CONFIG = SimpleNamespace(invocation_params=SimpleNamespace(dir=Path.cwd()))
+
+
 def test_lazy_collect_file_reports_ids_serial_and_flaky():
     conn = FakeConn()
     flaky_mark = SimpleNamespace(kwargs={"reruns": 2})
@@ -563,10 +585,10 @@ def test_lazy_collect_file_reports_ids_serial_and_flaky():
         FakeItem("t.py::a", closest={"serial": SimpleNamespace()}),
         FakeItem("t.py::b", closest={"flaky": flaky_mark}),
     ]
-    session = SimpleNamespace(perform_collect=lambda paths, genitems: items)
+    session = SimpleNamespace(config=_CWD_CONFIG, perform_collect=lambda paths, genitems: items)
     by_id: dict[str, Any] = {}
 
-    n = LazyDispatchPlugin(conn)._collect_file(session, "t.py", by_id)
+    n = LazyDispatchPlugin(conn)._collect_files(session, ["t.py"], by_id)
 
     assert n == 2
     assert set(by_id) == {"t.py::a", "t.py::b"}
@@ -628,7 +650,7 @@ def test_lazy_collect_file_reports_an_ignored_file_empty(tmp_path):
     session, _ = _recursion_session(tmp_path, ["."], {"build"})
     session.perform_collect = lambda paths, genitems: pytest.fail("collected")
     conn = FakeConn()
-    assert LazyDispatchPlugin(conn)._collect_file(session, "build/test_copy.py", {}) == 0
+    assert LazyDispatchPlugin(conn)._collect_files(session, ["build/test_copy.py"], {}) == 0
     assert conn.sent == [("file_collected", {"path": "build/test_copy.py", "ids": []})]
 
 
@@ -643,7 +665,7 @@ def test_lazy_collect_file_reports_its_own_deselected_items(tmp_path):
         return [FakeItem("t.py::a")]
 
     session.perform_collect = collect
-    assert plugin._collect_file(session, "t.py", {}) == 1
+    assert plugin._collect_files(session, ["t.py"], {}) == 1
     assert conn.sent == [("file_collected", {"path": "t.py", "ids": ["t.py::a"], "deselected": 2})]
 
 
@@ -658,6 +680,7 @@ def _lazy_session(perform_collect, *, collectonly=False):
         cache=None,
         hook=SimpleNamespace(pytest_runtest_protocol=protocol),
         getoption=lambda name, default=None: default,
+        invocation_params=_CWD_CONFIG.invocation_params,
     )
 
     def collect(paths, genitems):
@@ -725,6 +748,76 @@ def test_lazy_runtestloop_run_ids_recollects_uncollected_file():
     assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
     assert collected == [["t.py"]]  # collected the id's file
     assert calls == [("t.py::a", "<session>")]
+
+
+def test_lazy_runtestloop_collects_a_file_batch_in_one_perform_collect():
+    # Regression: one perform_collect per file re-listed the whole directory
+    # for every file (quadratic in files per directory). A RunFiles batch is
+    # collected in ONE call and still reported per file.
+    files = {"t.py": ["t.py::a", "t.py::b"], "u.py": ["u.py::x"]}
+    collected: list[list[str]] = []
+
+    def perform_collect(paths):
+        collected.append(paths)
+        return [FakeItem(i) for p in paths for i in files[p]]
+
+    session, calls = _lazy_session(perform_collect)
+    conn = FakeConn(
+        [
+            {"kind": "run_files", "payload": {"paths": ["t.py", "u.py"]}},
+            {"kind": "run_ids", "payload": {"ids": ["t.py::a", "u.py::x"]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert collected == [["t.py", "u.py"]]
+    assert [p for k, p in conn.sent if k == "file_collected"] == [
+        {"path": "t.py", "ids": ["t.py::a", "t.py::b"]},
+        {"path": "u.py", "ids": ["u.py::x"]},
+    ]
+    assert calls == [("t.py::a", "u.py::x"), ("u.py::x", "<session>")]
+    assert session.testscollected == 3
+
+
+def test_lazy_runtestloop_run_ids_recollects_all_their_files_at_once():
+    files = {"t.py": ["t.py::a"], "u.py": ["u.py::x"]}
+    collected: list[list[str]] = []
+
+    def perform_collect(paths):
+        collected.append(paths)
+        return [FakeItem(i) for p in paths for i in files[p]]
+
+    session, calls = _lazy_session(perform_collect)
+    conn = FakeConn(
+        [
+            {"kind": "run_ids", "payload": {"ids": ["t.py::a", "u.py::x"]}},
+            {"kind": "no_more_items", "payload": {}},
+            {"kind": "end_session", "payload": {}},
+        ]
+    )
+    assert LazyDispatchPlugin(conn).pytest_runtestloop(session) is True
+    assert collected == [["t.py", "u.py"]]
+    assert [c[0] for c in calls] == ["t.py::a", "u.py::x"]
+
+
+def test_lazy_collect_files_isolates_a_bad_path_in_its_batch():
+    # A UsageError (path gone since the walk) fails only that file: the
+    # rest of the batch still collects, the bad one reports collect_error.
+    def collect(paths, genitems):
+        if "gone.py" in paths:
+            raise pytest.UsageError("file or directory not found: gone.py")
+        return [FakeItem(f"{p}::a") for p in paths]
+
+    session = SimpleNamespace(config=_CWD_CONFIG, perform_collect=collect)
+    conn = FakeConn()
+    assert LazyDispatchPlugin(conn)._collect_files(session, ["t.py", "gone.py", "u.py"], {}) == 2
+    assert conn.sent == [
+        ("collect_error", {"path": "gone.py", "longrepr": "file or directory not found: gone.py"}),
+        ("file_collected", {"path": "t.py", "ids": ["t.py::a"]}),
+        ("file_collected", {"path": "gone.py", "ids": []}),
+        ("file_collected", {"path": "u.py", "ids": ["u.py::a"]}),
+    ]
 
 
 def test_lazy_runtestloop_run_ids_missing_after_recollect_reports_gap():
