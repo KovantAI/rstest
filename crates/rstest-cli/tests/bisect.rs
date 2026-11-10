@@ -254,7 +254,7 @@ fn passing_after_predecessors_does_not_reproduce() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, 1, "{out}");
     assert!(out.contains("does not reproduce"), "{out}");
-    assert!(out.contains("migrate-check"), "{out}");
+    assert!(out.contains("rstest audit"), "{out}");
     assert_eq!(doc["order_dependent"], false);
     assert_eq!(doc["culprits"], serde_json::json!([]));
 }

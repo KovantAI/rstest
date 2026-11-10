@@ -1,0 +1,45 @@
+{
+ "environment": {
+  "date": "2026-11-10",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 14,
+  "load_1m_at_start": 15.53,
+  "rstest": "rstest 0.11.0",
+  "rstest_commit": "6a8c9e4",
+  "suite_commits": {},
+  "repeat": 5,
+  "warmup": 1,
+  "rstest_cache": "warm",
+  "xdist_dist": "load (xdist default)",
+  "bench_python": "3.13.13",
+  "suite_runtimes": {
+   "langgraph": {
+    "python": "3.12.12",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": null,
+    "rstest_worker": "0.11.0"
+   }
+  }
+ },
+ "spectrum": [
+  {
+   "suite": "langgraph",
+   "pytest_wall": 191.3,
+   "pytest_band": "191.3 (186.6-197.5)",
+   "rstest_wall": 25.6,
+   "rstest_band": "25.6 (24.5-31.7)",
+   "speedup": 7.46,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 10,
+   "baseline_tests": 838,
+   "candidate_collect_errors": 10
+  }
+ ],
+ "sweeps": [],
+ "memory": [],
+ "grid": null
+}

@@ -27,6 +27,11 @@ repo = "https://github.com/aio-libs/aiohttp"
 submodules = true
 install = ["-r requirements/test.in", "-e ."]
 env = { AIOHTTP_NO_EXTENSIONS = "1" }
+# The pinned checkout predates `asyncio_default_fixture_loop_scope`. pytest 9.2
+# applies its `filterwarnings = error` early enough that pytest-asyncio's
+# configure-time deprecation warning becomes an INTERNALERROR under both
+# runners; ignore just that warning so behavior matches the 9.1 runs.
+args = ["-W", 'ignore:The configuration option "asyncio_default_fixture_loop_scope" is unset.:pytest.PytestDeprecationWarning']
 
 [pandas]
 mode = "pyargs"

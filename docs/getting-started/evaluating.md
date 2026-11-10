@@ -50,8 +50,8 @@ so judge speed on the second run (in ephemeral CI, persist `.rstest_cache`).
 
 ## When not to adopt it
 
-- **CPU-bound suites that already split evenly under xdist.** rstest lands at
-  parity with xdist there
+- **CPU-bound suites that already split evenly under xdist.** rstest is no
+  faster than xdist there, and xdist can be up to 11% ahead
   ([CPU-bound suites](../reference/benchmarks.md#cpu-bound-suites)). The
   remaining value is `--doctor`, `--watch` and the rest, not speed; see
   [Already fast under xdist?](../guides/migrate-from-xdist.md#already-fast-cpu-bound).

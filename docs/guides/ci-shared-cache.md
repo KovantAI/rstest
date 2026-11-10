@@ -118,7 +118,7 @@ jobs:
   test:
     needs: resolve
     runs-on: ubuntu-latest
-    strategy: { matrix: { shard: [1, 2, 3, 4] } }
+    strategy: { fail-fast: false, matrix: { shard: [1, 2, 3, 4] } }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -273,7 +273,7 @@ jobs:
   test:
     needs: snapshot
     runs-on: ubuntu-latest
-    strategy: { matrix: { shard: [1, 2, 3, 4] } }
+    strategy: { fail-fast: false, matrix: { shard: [1, 2, 3, 4] } }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -409,6 +409,13 @@ The retried run is cold (even count split), which matters for a shard matrix:
 a shard that falls back partitions differently from its siblings, so gate
 such a matrix with [`shard-verify`](sharding.md#verify-no-test-was-dropped). A
 cold, empty remote is not a failure: the pull succeeds with nothing to merge.
+
+**Upgrade every machine that shares a cache together.** rstest 0.11.0 stores
+`history.msgpack` in a new format (schema 2) that rstest 0.10.x and older can't
+read: an older build treats a local file as corrupt and starts it over, and
+fails to pull a shared cache base that a newer build compacted. Move every CI
+job and developer machine that pulls the same remote to 0.11.0 or later in one
+step. A schema 1 file converts on first read, so upgrading needs no cleanup.
 
 ## One prefix per suite, interpreter, and project
 

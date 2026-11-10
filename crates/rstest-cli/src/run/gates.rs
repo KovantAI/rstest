@@ -143,6 +143,21 @@ fn warn_doctor_gate_passthrough(w: &mut dyn Write, gate_empty: bool, passthrough
     }
 }
 
+/// `--cov` only in `addopts` / `PYTEST_ADDOPTS`: pytest-cov measures in every
+/// pool worker but rstest decides from its own command line whether to
+/// combine and report, so nothing is combined, no `coverage.xml` is written,
+/// and the run still exits 0. Silent until this warning (see coverage.md).
+fn warn_cov_only_in_addopts(w: &mut dyn Write, cli_cov: bool, effective_cov: bool, pooled: bool) {
+    if pooled && effective_cov && !cli_cov {
+        let _ = writeln!(
+            w,
+            "rstest: --cov is set only in addopts/PYTEST_ADDOPTS: coverage is measured \
+             per worker but not combined or reported (no coverage.xml); pass --cov \
+             on the rstest command line"
+        );
+    }
+}
+
 /// The `--durations-regress` ratio must be strictly > 1.0: a test is a
 /// regression only when it is *slower* than baseline by that factor.
 pub(super) fn validate_regress_ratio(ratio: f64) -> Result<()> {
@@ -496,6 +511,16 @@ pub(super) fn run_post_gates(
     // materialized (covtool overwrites the local index) in time to be published.
     let mut exitstatus = outcome.exitstatus;
     let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
+    if !passthrough {
+        warn_cov_only_in_addopts(
+            sink.err(),
+            has_cov,
+            crate::coverage_skip::coverage_requested(&crate::cov_scope::effective_pytest_args(
+                scope, args,
+            )),
+            n > 1 || single_worker_reruns,
+        );
+    }
     let want_diff = cli.cov_diff_fail_under.is_some() || cli.cov_diff_json.is_some();
     if want_diff && !has_cov && !passthrough {
         sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
@@ -1335,8 +1360,8 @@ mod tests {
         diff_cov_gate, finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
         print_warnings_summary, quarantine_note, quarantine_set, reconcile_cov_status,
         report_push_result, resolve_compact_threshold, results_bar_line, stopping_banner,
-        validate_regress_ratio, warn_doctor_gate_passthrough, write_report_json, write_run_reports,
-        write_teamcity_flaky,
+        validate_regress_ratio, warn_cov_only_in_addopts, warn_doctor_gate_passthrough,
+        write_report_json, write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::progress;
@@ -1874,6 +1899,21 @@ mod tests {
             "!!!!!!!!!! stopping after 1 failures !!!!!!!!!!"
         );
         assert!(stopping_banner(3).contains("stopping after 3 failures"));
+    }
+
+    #[test]
+    fn warn_cov_only_in_addopts_fires_only_in_the_pool_without_cli_cov() {
+        let warns = |cli, eff, pooled| {
+            let mut buf = Vec::new();
+            warn_cov_only_in_addopts(&mut buf, cli, eff, pooled);
+            !buf.is_empty()
+        };
+        assert!(warns(false, true, true));
+        // --cov on the command line: rstest combines and reports.
+        assert!(!warns(true, true, true));
+        // In-process session: pytest-cov reports on its own.
+        assert!(!warns(false, true, false));
+        assert!(!warns(false, false, true));
     }
 
     #[test]

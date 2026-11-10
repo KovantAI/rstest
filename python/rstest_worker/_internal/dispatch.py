@@ -404,6 +404,12 @@ def _share_directory_nodes(session) -> None:
         return canonical(collect_path(path, path_cache))
 
     def _collect_one_node(node, handle_dupes=True):
+        # pytest re-collects a file arg's directory for every arg (so a file
+        # given twice runs twice): quadratic in files per directory for a
+        # batch. A lazy batch never repeats a file, so the cached listing
+        # is always right.
+        if isinstance(node, pytest.Directory):
+            handle_dupes = True
         rep, duplicate = collect_one_node(node, handle_dupes)
         if rep.passed:
             rep.result = canonical(rep.result)
@@ -442,34 +448,68 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
         self._conn.send("lazy_ready", payload)
         return True
 
-    def _collect_file(self, session, path, items_by_id):
+    def _collect_by_path(self, session, paths):
+        """Collect `paths` in ONE `perform_collect`, grouping items by the
+        path that produced them. Each call collects every directory on the
+        way afresh, so a call per file is quadratic in files per directory.
+        """
+        by_path = {p: [] for p in paths}
+        if not paths:
+            return by_path
+        try:
+            items = session.perform_collect(list(paths), genitems=True)
+        except pytest.UsageError as e:
+            if len(paths) > 1:
+                # One bad path (e.g. deleted since the walk) must not take
+                # its batch down: retry per file to find it.
+                for p in paths:
+                    by_path.update(self._collect_by_path(session, [p]))
+            else:
+                self._conn.send("collect_error", {"path": paths[0], "longrepr": str(e)})
+            return by_path
+        base = session.config.invocation_params.dir
+        index = {(base / p).absolute(): p for p in paths}
+        # Items arrive in arg order: one whose path matches no arg (a plugin
+        # item off a non-file node) belongs with the file before it.
+        cur = paths[0]
+        for it in items:
+            cur = index.get(it.path, cur)
+            by_path[cur].append(it)
+        return by_path
+
+    def _collect_files(self, session, paths, items_by_id):
         # Eager recursion would never reach an ignored file: report it empty.
         deselected_before = self._deselected
-        items = (
-            []
-            if _ignored_by_recursion(session, path)
-            else session.perform_collect([path], genitems=True)
-        )
-        ids = [it.nodeid for it in items]
-        serial = [it.nodeid for it in items if it.get_closest_marker("serial") is not None]
-        payload: m.FileCollectedPayload = {"path": path, "ids": ids}
-        if serial:
-            payload["serial"] = serial
-        flaky = {}
-        for it in items:
-            if it.get_closest_marker("flaky") is not None:
-                flaky[it.nodeid] = flaky_reruns(it)
-        if flaky:
-            payload["flaky"] = flaky
-        if self._deselected > deselected_before:
-            payload["deselected"] = self._deselected - deselected_before
-        for it in items:
-            items_by_id[it.nodeid] = it
-        # Items are NOT queued here: the orchestrator owns dispatch, chunking
-        # ids back via run_ids (normally to this worker, where they're cached;
-        # to another worker when stealing for balance).
-        self._conn.send("file_collected", payload)
-        return len(items)
+        wanted = [p for p in paths if not _ignored_by_recursion(session, p)]
+        by_path = {p: [] for p in paths}
+        by_path.update(self._collect_by_path(session, wanted))
+        total = 0
+        for path in paths:
+            items = by_path[path]
+            total += len(items)
+            ids = [it.nodeid for it in items]
+            serial = [it.nodeid for it in items if it.get_closest_marker("serial") is not None]
+            payload: m.FileCollectedPayload = {"path": path, "ids": ids}
+            if serial:
+                payload["serial"] = serial
+            flaky = {}
+            for it in items:
+                if it.get_closest_marker("flaky") is not None:
+                    flaky[it.nodeid] = flaky_reruns(it)
+            if flaky:
+                payload["flaky"] = flaky
+            # One perform_collect for the batch: its deselections ride on the
+            # first file (the orchestrator only sums them).
+            if self._deselected > deselected_before:
+                payload["deselected"] = self._deselected - deselected_before
+                deselected_before = self._deselected
+            for it in items:
+                items_by_id[it.nodeid] = it
+            # Items are NOT queued here: the orchestrator owns dispatch, chunking
+            # ids back via run_ids (normally to this worker, where they're cached;
+            # to another worker when stealing for balance).
+            self._conn.send("file_collected", payload)
+        return total
 
     def pytest_runtestloop(self, session):
         from collections import deque
@@ -486,20 +526,18 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
 
         def queue_ids(ids) -> None:
             nonlocal total
+            # Ids not collected here (steal / crash redistribution / serial
+            # phase): collect their whole FILES, all in one go, since a chunk
+            # usually spans few files and per-id collection would re-parse
+            # the module for every id.
+            missing = list(dict.fromkeys(n.split("::", 1)[0] for n in ids if n not in items_by_id))
+            n_before = len(items_by_id)
+            for fresh in self._collect_by_path(session, missing).values():
+                for f in fresh:
+                    items_by_id.setdefault(f.nodeid, f)
+            total += len(items_by_id) - n_before
             for nid in ids:
                 it = items_by_id.get(nid)
-                if it is None:
-                    # Not collected here (steal / crash redistribution /
-                    # serial phase): collect the id's whole FILE once, since
-                    # a stolen chunk is usually from one file and per-id
-                    # collection would re-parse the module for every id.
-                    fpath = nid.split("::", 1)[0]
-                    n_before = len(items_by_id)
-                    fresh = session.perform_collect([fpath], genitems=True)
-                    for f in fresh:
-                        items_by_id.setdefault(f.nodeid, f)
-                    total += len(items_by_id) - n_before
-                    it = items_by_id.get(nid)
                 if it is not None:
                     pending.append(it)
                 else:
@@ -564,7 +602,9 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                 # A collect error in the file surfaces via collectreport
                 # (collect_error on the wire); the orchestrator owns the
                 # abort decision.
-                total += self._collect_file(session, files.popleft(), items_by_id)
+                batch = list(files)
+                files.clear()
+                total += self._collect_files(session, batch, items_by_id)
                 continue
             # The last pending item runs only when its successor is known
             # (nextitem drives fixture teardown scoping) or on drain.

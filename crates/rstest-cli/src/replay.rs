@@ -497,6 +497,25 @@ fn sanitize(id: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn replay_guide_says_the_quarantine_file_still_applies() {
+        // run_replay neutralizes reruns and auto-quarantine but keeps
+        // `--quarantine` / `[tool.rstest] quarantine`, so a listed victim
+        // replays green with no fix. replay.md once said "green means the fix
+        // holds" without that caveat.
+        let page = crate::doc_pages::pages()
+            .into_iter()
+            .find(|(p, _)| p == "docs/guides/replay.md")
+            .expect("replay.md not found")
+            .1;
+        assert!(
+            crate::doc_pages::sentences(&page)
+                .iter()
+                .any(|s| s.contains("quarantine file") && s.contains("still applies")),
+            "docs/guides/replay.md must say the quarantine file still applies under replay"
+        );
+    }
+
     fn journal(uid: &str, assignment: Vec<Vec<&str>>) -> Journal {
         Journal {
             schema: SCHEMA,

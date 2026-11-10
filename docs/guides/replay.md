@@ -108,7 +108,9 @@ To pick the interpreter, pass `--python`:
 Replay forces the recorded worker count (even on a laptop with fewer cores),
 runs each worker's recorded tests in the recorded order, and turns off reruns
 (`@pytest.mark.flaky` and `[tool.rstest] reruns` included), work stealing and
-shuffling. `@pytest.mark.serial` tests still run alone, after every other
+shuffling. Auto-quarantine is off too, but the quarantine file
+(`--quarantine` or `[tool.rstest] quarantine`) still applies: a failure in a
+test it lists is demoted and doesn't fail the replay. `@pytest.mark.serial` tests still run alone, after every other
 worker has finished, as they did on CI. A worker that crashes is replaced and
 the replacement picks up where it died. The test args (paths, `-k`, `-m`) come
 from the journal, so pass none. Recorded `--lf`/`--sw` are ignored with a note:
@@ -119,7 +121,9 @@ that ran before it on that worker hold the likely polluter. To narrow them
 down to the exact polluting test, run
 [`rstest bisect <nodeid>`](../reference/cli-commands.md#bisect-nodeid). Once
 you have a fix, run the same replay command again. Green means the fix holds
-for the schedule that broke CI.
+for the schedule that broke CI, as long as the failing test isn't in the
+quarantine file. If it is, check the summary line shows no `quarantined`
+count.
 
 ## Keeping a journal portable
 

@@ -2066,6 +2066,27 @@ mod tests {
         assert!(super::INTERNAL_ENV.contains(&"RSTEST_NETWORK_ALLOW"));
     }
 
+    #[test]
+    fn every_internal_env_var_is_documented() {
+        // RSTEST_AUTO_QUARANTINE{,_MAX} shipped with environment.md crediting
+        // their payload to RSTEST_QUARANTINE. Every variable rstest sets on a
+        // worker is named in the reference page as inline code.
+        let page = crate::doc_pages::pages()
+            .into_iter()
+            .find(|(p, _)| p == "docs/reference/environment.md")
+            .expect("environment.md not found")
+            .1;
+        let missing: Vec<&str> = super::INTERNAL_ENV
+            .iter()
+            .copied()
+            .filter(|v| !page.contains(&format!("`{v}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "worker env vars missing from docs/reference/environment.md: {missing:?}"
+        );
+    }
+
     fn base_env() -> WorkerEnv {
         WorkerEnv {
             run_uid: "uid-1".into(),

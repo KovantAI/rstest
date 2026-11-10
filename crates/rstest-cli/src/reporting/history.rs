@@ -802,6 +802,24 @@ fn save_to(path: &std::path::Path, h: &History) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shared_cache_guide_names_the_current_history_schema() {
+        // An older build can't read a newer history schema and drops or
+        // fails to pull it, so every machine sharing a cache upgrades
+        // together. 0.11.0's schema 2 shipped with no word of that in the docs;
+        // a bump fails here until ci-shared-cache.md says which release.
+        let page = crate::doc_pages::pages()
+            .into_iter()
+            .find(|(p, _)| p == "docs/guides/ci-shared-cache.md")
+            .expect("ci-shared-cache.md not found")
+            .1;
+        assert!(
+            page.contains(&format!("(schema {SCHEMA})")),
+            "docs/guides/ci-shared-cache.md must name history schema {SCHEMA} \
+             in its upgrade-together note"
+        );
+    }
+
     fn meta(epoch: u64) -> RunMeta {
         RunMeta {
             seq: 0,

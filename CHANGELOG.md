@@ -30,6 +30,16 @@ between 0.x releases and are listed here.
 - **`-v` says what `--order fail-fast` put first**: how many tests lead
   because they recently failed, are near changes, or are flaky.
 
+### Fixes
+
+- **`--collect lazy` no longer slows down quadratically with files per
+  directory.** Each worker collected one file per `perform_collect` call, and
+  each call listed the file's whole directory again: 1000 files in one
+  directory took 24.7s at `-n 4` against 2.1s for `--collect full`. Workers
+  now take files in batches and list a directory once per batch (2.9s). Auto
+  mode picks lazy collection for large suites at `-n 8` and up, so this also
+  hit default runs.
+
 ## 0.11.0 (2026-11-09)
 
 ### Fixes

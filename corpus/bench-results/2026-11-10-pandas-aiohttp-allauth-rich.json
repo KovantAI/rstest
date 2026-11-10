@@ -1,0 +1,264 @@
+{
+ "environment": {
+  "date": "2026-11-10",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 14,
+  "load_1m_at_start": 3.06,
+  "rstest": "rstest 0.11.0",
+  "rstest_commit": "6a8c9e4",
+  "suite_commits": {},
+  "repeat": 5,
+  "warmup": 1,
+  "rstest_cache": "warm",
+  "xdist_dist": "load (xdist default)",
+  "bench_python": "3.13.13",
+  "suite_runtimes": {
+   "pandas": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   },
+   "aiohttp": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   },
+   "django-allauth": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   },
+   "rich": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   }
+  }
+ },
+ "spectrum": [
+  {
+   "suite": "pandas",
+   "pytest_wall": 220.3,
+   "pytest_band": "220.3 (216.7-223.4)",
+   "rstest_wall": 65.0,
+   "rstest_band": "65.0 (57.2-87.1)",
+   "speedup": 3.39,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 193843,
+   "candidate_collect_errors": 0
+  },
+  {
+   "suite": "aiohttp",
+   "pytest_wall": 195.9,
+   "pytest_band": "195.9 (194.9-196.7)",
+   "rstest_wall": 58.0,
+   "rstest_band": "58.0 (58.0-58.1)",
+   "speedup": 3.38,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 4469,
+   "candidate_collect_errors": 0
+  },
+  {
+   "suite": "django-allauth",
+   "pytest_wall": 27.9,
+   "pytest_band": "27.9 (27.8-27.9)",
+   "rstest_wall": 9.1,
+   "rstest_band": "9.1 (9.1-9.2)",
+   "speedup": 3.05,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 2050,
+   "candidate_collect_errors": 0
+  },
+  {
+   "suite": "rich",
+   "pytest_wall": 3.8,
+   "pytest_band": "3.8 (3.8-3.8)",
+   "rstest_wall": 2.6,
+   "rstest_band": "2.6 (2.6-2.6)",
+   "speedup": 1.48,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 981,
+   "candidate_collect_errors": 0
+  }
+ ],
+ "sweeps": [
+  {
+   "suite": "pandas",
+   "pytest_wall": 220.3,
+   "pytest_band": "220.3 (216.7-223.4)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 60.0,
+     "rstest_band": "60.0 (59.2-61.2)",
+     "min": 59.2,
+     "max": 61.16,
+     "speedup": 3.67,
+     "efficiency": 0.46,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 193843,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 123.2,
+      "band": "123.2 (120.6-128.3)",
+      "min": 120.62,
+      "max": 128.33,
+      "speedup": 1.79,
+      "efficiency": 0.22,
+      "parity": 100.0,
+      "parity_missing": 0,
+      "parity_mismatch": 0,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 193843,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  },
+  {
+   "suite": "aiohttp",
+   "pytest_wall": 195.9,
+   "pytest_band": "195.9 (194.9-196.7)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 67.0,
+     "rstest_band": "67.0 (67.0-67.0)",
+     "min": 66.98,
+     "max": 67.04,
+     "speedup": 2.92,
+     "efficiency": 0.37,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 4469,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 161.0,
+      "band": "161.0 (160.9-161.0)",
+      "min": 160.91,
+      "max": 161.05,
+      "speedup": 1.22,
+      "efficiency": 0.15,
+      "parity": 100.0,
+      "parity_missing": 0,
+      "parity_mismatch": 0,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 4469,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  },
+  {
+   "suite": "django-allauth",
+   "pytest_wall": 27.9,
+   "pytest_band": "27.9 (27.8-27.9)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 6.3,
+     "rstest_band": "6.3 (6.2-6.7)",
+     "min": 6.16,
+     "max": 6.73,
+     "speedup": 4.43,
+     "efficiency": 0.55,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 2050,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 9.3,
+      "band": "9.3 (9.2-9.4)",
+      "min": 9.22,
+      "max": 9.36,
+      "speedup": 3.01,
+      "efficiency": 0.38,
+      "parity": 100.0,
+      "parity_missing": 0,
+      "parity_mismatch": 0,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 2050,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  },
+  {
+   "suite": "rich",
+   "pytest_wall": 3.8,
+   "pytest_band": "3.8 (3.8-3.8)",
+   "points": [
+    {
+     "workers": 8,
+     "rstest_wall": 2.6,
+     "rstest_band": "2.6 (2.6-2.6)",
+     "min": 2.62,
+     "max": 2.64,
+     "speedup": 1.45,
+     "efficiency": 0.18,
+     "parity": 100.0,
+     "parity_missing": 0,
+     "parity_mismatch": 0,
+     "parity_unexplained": 0,
+     "baseline_collect_errors": 0,
+     "baseline_tests": 981,
+     "candidate_collect_errors": 0,
+     "xdist": {
+      "wall": 2.8,
+      "band": "2.8 (2.8-3.1)",
+      "min": 2.76,
+      "max": 3.11,
+      "speedup": 1.38,
+      "efficiency": 0.17,
+      "parity": 100.0,
+      "parity_missing": 0,
+      "parity_mismatch": 0,
+      "parity_unexplained": 0,
+      "baseline_collect_errors": 0,
+      "baseline_tests": 981,
+      "candidate_collect_errors": 0
+     }
+    }
+   ]
+  }
+ ],
+ "memory": [],
+ "grid": null
+}
