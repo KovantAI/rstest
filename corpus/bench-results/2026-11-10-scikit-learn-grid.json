@@ -1,0 +1,176 @@
+{
+ "environment": {
+  "date": "2026-11-10",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "logical_cpus": 14,
+  "load_1m_at_start": 9.68,
+  "rstest": "rstest 0.11.0",
+  "rstest_commit": "6a8c9e4",
+  "suite_commits": {},
+  "repeat": 5,
+  "warmup": 1,
+  "rstest_cache": "warm",
+  "xdist_dist": "load (xdist default)",
+  "bench_python": "3.13.13",
+  "suite_runtimes": {
+   "scikit-learn": {
+    "python": "3.13.13",
+    "python_implementation": "CPython",
+    "pytest": "9.2.0",
+    "pytest_xdist": "3.8.0",
+    "rstest_worker": "0.11.0"
+   }
+  }
+ },
+ "spectrum": [
+  {
+   "suite": "scikit-learn",
+   "pytest_wall": 31.6,
+   "pytest_band": "31.6 (31.5-31.6)",
+   "rstest_wall": 7.0,
+   "rstest_band": "7.0 (6.9-7.0)",
+   "speedup": 4.55,
+   "parity": 100.0,
+   "parity_missing": 0,
+   "parity_mismatch": 0,
+   "parity_unexplained": 0,
+   "baseline_collect_errors": 0,
+   "baseline_tests": 3941,
+   "candidate_collect_errors": 0
+  }
+ ],
+ "sweeps": [],
+ "memory": [],
+ "grid": {
+  "suite": "scikit-learn",
+  "threads": [
+   "1",
+   "2",
+   "4",
+   "unset"
+  ],
+  "cells": [
+   {
+    "workers": 1,
+    "threads": "1",
+    "wall": 32.0,
+    "band": "32.0 (31.9-32.2)"
+   },
+   {
+    "workers": 1,
+    "threads": "2",
+    "wall": 31.9,
+    "band": "31.9 (31.9-32.1)"
+   },
+   {
+    "workers": 1,
+    "threads": "4",
+    "wall": 32.0,
+    "band": "32.0 (31.9-32.0)"
+   },
+   {
+    "workers": 1,
+    "threads": "unset",
+    "wall": 32.0,
+    "band": "32.0 (31.9-32.1)"
+   },
+   {
+    "workers": 2,
+    "threads": "1",
+    "wall": 18.1,
+    "band": "18.1 (17.6-18.2)"
+   },
+   {
+    "workers": 2,
+    "threads": "2",
+    "wall": 18.0,
+    "band": "18.0 (17.6-18.2)"
+   },
+   {
+    "workers": 2,
+    "threads": "4",
+    "wall": 18.1,
+    "band": "18.1 (17.6-18.2)"
+   },
+   {
+    "workers": 2,
+    "threads": "unset",
+    "wall": 18.1,
+    "band": "18.1 (17.6-18.1)"
+   },
+   {
+    "workers": 4,
+    "threads": "1",
+    "wall": 11.0,
+    "band": "11.0 (10.6-11.2)"
+   },
+   {
+    "workers": 4,
+    "threads": "2",
+    "wall": 11.1,
+    "band": "11.1 (10.5-11.2)"
+   },
+   {
+    "workers": 4,
+    "threads": "4",
+    "wall": 10.6,
+    "band": "10.6 (10.6-11.2)"
+   },
+   {
+    "workers": 4,
+    "threads": "unset",
+    "wall": 10.9,
+    "band": "10.9 (10.5-11.1)"
+   },
+   {
+    "workers": 10,
+    "threads": "1",
+    "wall": 7.3,
+    "band": "7.3 (7.2-7.5)"
+   },
+   {
+    "workers": 10,
+    "threads": "2",
+    "wall": 7.3,
+    "band": "7.3 (6.8-7.4)"
+   },
+   {
+    "workers": 10,
+    "threads": "4",
+    "wall": 7.2,
+    "band": "7.2 (6.8-7.3)"
+   },
+   {
+    "workers": 10,
+    "threads": "unset",
+    "wall": 7.3,
+    "band": "7.3 (7.2-7.4)"
+   },
+   {
+    "workers": 14,
+    "threads": "1",
+    "wall": 7.1,
+    "band": "7.1 (7.0-7.1)"
+   },
+   {
+    "workers": 14,
+    "threads": "2",
+    "wall": 7.0,
+    "band": "7.0 (7.0-7.0)"
+   },
+   {
+    "workers": 14,
+    "threads": "4",
+    "wall": 7.0,
+    "band": "7.0 (6.5-7.1)"
+   },
+   {
+    "workers": 14,
+    "threads": "unset",
+    "wall": 6.9,
+    "band": "6.9 (6.9-7.0)"
+   }
+  ],
+  "outcome_drift": []
+ }
+}

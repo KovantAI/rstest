@@ -27,7 +27,9 @@ gate compares the `TOTAL` line with pytest-cov's for every report mode, at
     reports it**: no terminal table, no `coverage.xml`, and the per-worker
     `.coverage.<host>.pid<N>.*` data files are left behind. The run still
     exits 0, so a CI step that uploads `coverage.xml` fails later, or
-    uploads a stale file. Move the flags to the command line:
+    uploads a stale file. rstest warns
+    `rstest: --cov is set only in addopts/PYTEST_ADDOPTS` on stderr. Move the
+    flags to the command line:
 
     ```console
     $ rstest --cov=pkg --cov-report=xml

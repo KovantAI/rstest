@@ -110,4 +110,72 @@ mod tests {
             vec!["rstest --python .venv/bin/python try"]
         );
     }
+
+    #[test]
+    fn released_docs_carry_no_unreleased_marker() {
+        // A release bump renames CHANGELOG's `## Unreleased` heading; any
+        // "Unreleased" left in docs/ then describes something that shipped
+        // (security.md listed pytest 9.2.0 as Unreleased two releases on).
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let changelog = std::fs::read_to_string(repo.join("CHANGELOG.md")).unwrap();
+        if changelog.lines().any(|l| l.trim() == "## Unreleased") {
+            return;
+        }
+        let stale: Vec<String> = super::pages()
+            .into_iter()
+            .flat_map(|(page, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, l)| l.contains("Unreleased"))
+                    .map(|(i, _)| format!("{page}:{}", i + 1))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "CHANGELOG has no Unreleased section, but docs still say Unreleased:\n{}",
+            stale.join("\n")
+        );
+    }
+
+    #[test]
+    fn github_shard_matrices_set_fail_fast_false() {
+        // GitHub cancels a matrix's other jobs when one fails, so one red
+        // shard left shard-verify reporting missing shards instead of the real
+        // failure (ci-shared-cache.md's matrices once lacked it).
+        let mut bad = Vec::new();
+        let mut seen = 0;
+        for (page, text) in super::pages() {
+            let (mut block, mut start, mut fenced) = (String::new(), 0, false);
+            for (i, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("```") {
+                    if fenced
+                        && block.contains("strategy")
+                        && block.contains("matrix")
+                        && block.contains("shard")
+                    {
+                        seen += 1;
+                        if !block.contains("fail-fast: false") {
+                            bad.push(format!("{page}:{}", start + 1));
+                        }
+                    }
+                    fenced = !fenced;
+                    block.clear();
+                    start = i;
+                } else if fenced {
+                    block.push_str(line);
+                    block.push('\n');
+                }
+            }
+        }
+        assert!(seen > 0, "no sharded matrix found in the docs");
+        assert!(
+            bad.is_empty(),
+            "sharded GitHub matrix without fail-fast: false:\n{}",
+            bad.join("\n")
+        );
+    }
 }

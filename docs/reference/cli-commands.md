@@ -373,7 +373,7 @@ fail.
 
 It works entirely at `-n 0` (serial), so it isolates **ordering**, not
 concurrency (for parallel-only failures use
-[`migrate-check`](#migrate-check)). The steps:
+[`audit`](#audit)). The steps:
 
 1. **Isolation check.** Runs the victim alone. If it fails by itself, that's a
    plain bug, not an order dependency; reported and done.
@@ -381,7 +381,7 @@ concurrency (for parallel-only failures use
    order). If it passes there, it runs the victim after *every* other test,
    including the ones that collect after it: on CI a polluter can run first
    on another worker's schedule. If it still passes, the failure doesn't come
-   from ordering (likely parallel-only, so try `migrate-check`).
+   from ordering (likely parallel-only, so try [`audit`](#audit)).
 3. **Delta-debug.** [`ddmin`](https://www.st.cs.uni-saarland.de/dd/) over the
    set that reproduced: repeatedly run the victim preceded by a subset of it,
    shrinking toward the **1-minimal** set that still reproduces.

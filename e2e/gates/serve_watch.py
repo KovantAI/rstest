@@ -200,6 +200,15 @@ def gate_bisect(g, args, binary):
         and doc["reproduce_command"] == repro,
         str(doc)[:300],
     )
+    # A test no ordering breaks: likely parallel-only, so bisect points at
+    # `audit`, the fix loop for a suite already on rstest (not the onboarding
+    # `migrate-check`).
+    r = g.run("bisect", "test_pol.py::test_c", cwd=g.tmp / "bisectfix")
+    check(
+        "bisect: no order dependency points at `rstest audit`",
+        "likely parallel-only" in r.stdout and "run `rstest audit`" in r.stdout,
+        f"rc={r.returncode} " + r.stdout[-400:] + r.stderr[-200:],
+    )
     # A nodeid that isn't collected exits 2 without running anything.
     r = g.run("bisect", "test_pol.py::test_nope", cwd=g.tmp / "bisectfix")
     check(
