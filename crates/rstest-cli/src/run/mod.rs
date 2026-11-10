@@ -2385,7 +2385,7 @@ fn auto_workers_by_cpu(args: &[String]) -> usize {
         .unwrap_or(4);
     let Ok(cwd) = std::env::current_dir() else {
         let cache = durations::load();
-        return cap_workers_by_time(cores, cache.values().sum()).max(1);
+        return cap_workers_by_time(cores, cache.values().sum(), cache.len()).max(1);
     };
     let cwd = config::normalize(&cwd);
     let rootdir = crate::cache::rootdir()
@@ -2426,10 +2426,10 @@ fn auto_workers_by_cpu(args: &[String]) -> usize {
         units => cores.min(units),
     };
     if t.cold == 0 && t.tests > 0 {
-        n = cap_workers_by_time(n, t.secs);
+        n = cap_workers_by_time(n, t.secs, t.tests);
     } else if !explicit && !cache.is_empty() {
         // A partly timed whole suite: the cached time is the best estimate.
-        n = cap_workers_by_time(n, cache.values().sum());
+        n = cap_workers_by_time(n, cache.values().sum(), cache.len());
     }
     n.max(1)
 }
@@ -2583,11 +2583,20 @@ fn cap_workers_by_files(n: usize, file_count: usize) -> usize {
     }
 }
 
-/// Cap by suite time from the duration cache: ~2s of test time amortizes one
-/// worker's startup, so a few-second suite needs only a couple. Never drops
-/// below 1 worker.
-fn cap_workers_by_time(n: usize, total_secs: f64) -> usize {
-    let by_time = (total_secs / 2.0).ceil() as usize;
+/// Per-test framework cost the duration cache doesn't see (it times the test,
+/// not the hooks and reporting around it): 10,000 empty tests record 0.0s each
+/// but take 1.83s under serial pytest on an M4 Max.
+const PER_TEST_OVERHEAD_SECS: f64 = 0.0002;
+/// Work one worker must have to pay off its startup. Measured 2026-11-10 on an
+/// M4 Max: each extra worker adds ~7ms of pool startup, so 0.25s keeps a
+/// sub-second suite on 1 worker while 10,000 trivial tests get 8.
+const SECS_PER_WORKER: f64 = 0.25;
+
+/// Cap by suite time from the duration cache plus per-test overhead for its
+/// `tests` tests. Never drops below 1 worker.
+fn cap_workers_by_time(n: usize, total_secs: f64, tests: usize) -> usize {
+    let work = total_secs + tests as f64 * PER_TEST_OVERHEAD_SECS;
+    let by_time = (work / SECS_PER_WORKER).ceil() as usize;
     n.min(by_time.max(1))
 }
 
@@ -4059,10 +4068,16 @@ mod tests {
         assert_eq!(cap_workers_by_files(8, 3), 3);
         assert_eq!(cap_workers_by_files(8, 0), 8);
         assert_eq!(cap_workers_by_files(2, 5), 2);
-        // Time: ~2s per worker, floored at 1.
-        assert_eq!(cap_workers_by_time(8, 10.0), 5); // ceil(10/2)=5
-        assert_eq!(cap_workers_by_time(8, 1.0), 1); // ceil(0.5)=1, max(1)
-        assert_eq!(cap_workers_by_time(8, 0.0), 1); // never below 1
+        // Time: ~0.25s of work per worker, floored at 1.
+        assert_eq!(cap_workers_by_time(8, 1.0, 0), 4); // ceil(1/0.25)=4
+        assert_eq!(cap_workers_by_time(8, 0.1, 0), 1); // ceil(0.4)=1
+        assert_eq!(cap_workers_by_time(8, 0.0, 0), 1); // never below 1
+
+        // 50 trivial tests: 10ms of overhead, 1 worker.
+        assert_eq!(cap_workers_by_time(8, 0.0, 50), 1);
+        // 10,000 trivial tests record 0.0s each but cost ~2s of framework
+        // overhead: they need workers, not 1 (-n auto ran 3x slower than -n 8).
+        assert_eq!(cap_workers_by_time(14, 0.0, 10_000), 8);
     }
 
     #[test]
