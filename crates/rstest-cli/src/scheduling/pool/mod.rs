@@ -115,6 +115,19 @@ impl std::str::FromStr for Order {
     }
 }
 
+/// The `-v` line saying what fail-fast pulled to the front, so a run's order
+/// is explainable.
+fn failfast_note(l: crate::scheduling::durations::FailFastLead) -> String {
+    if l.len() == 0 {
+        return "rstest: fail-fast: no recent failures, changes or flakes; throughput order"
+            .to_string();
+    }
+    format!(
+        "rstest: fail-fast: leading with {} recently failed, {} near changes, {} flaky",
+        l.failed, l.near, l.flaky
+    )
+}
+
 /// Drop quarantined ids from the flake history fail-fast ranks on, so they
 /// fall into the normal (clean) tail instead of leading the queue.
 fn without_quarantined(
@@ -134,6 +147,29 @@ pub struct Budget {
     /// As typed (`90s`), for the summary line.
     pub label: String,
     pub setup: std::collections::HashMap<String, f64>,
+}
+
+/// [`without_quarantined`] for co-failure partners: a quarantined test
+/// neither leads nor gets pulled forward by another's failure.
+fn without_quarantined_partners(
+    mut cofail: crate::reporting::history::CoFail,
+    quarantine: Option<&regex::RegexSet>,
+) -> crate::reporting::history::CoFail {
+    if let Some(q) = quarantine {
+        cofail.retain(|id, _| !q.is_match(id));
+        for partners in cofail.values_mut() {
+            partners.retain(|(b, _)| !q.is_match(b));
+        }
+    }
+    cofail
+}
+
+/// A counted failure of queue item `failed`: pull its co-failure partners
+/// forward (a no-op unless fail-fast found some).
+fn promote_partners(dispatch: &mut Option<Dispatch>, failed: Option<u64>) {
+    if let (Some(d), Some(i)) = (dispatch.as_mut(), failed) {
+        d.promote(i);
+    }
 }
 
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
@@ -316,7 +352,7 @@ pub fn run_pool(
     skip_ids: &std::collections::HashSet<String>,
     // `--order fail-fast` and `--budget`: tests near changed code (see
     // `select::near_changes`). Empty under throughput or with no signal.
-    near_changes: &std::collections::HashMap<String, u8>,
+    near_changes: std::collections::HashMap<String, u8>,
     // `--budget`: run only what fits, picked after the shard and incremental
     // filters (see `durations::budget_select`).
     budget: Option<&Budget>,
@@ -376,13 +412,24 @@ pub fn run_pool(
 
     let duration_cache = crate::scheduling::durations::load();
     let scope_costs = crate::scheduling::durations::load_scope_costs();
-    // Flake history feeds fail-fast ordering and --budget; empty (and
-    // untouched) under the throughput default so a cold cache costs nothing.
-    let flake_history = if order == Order::FailFast || budget.is_some() {
-        without_quarantined(crate::reporting::flakes::load(), quarantine.map(|q| &q.all))
-    } else {
-        std::collections::HashMap::new()
-    };
+    // Fail-fast ranks on flake records, proximity to changes and co-failure
+    // partners; --budget ranks on the first two. All empty (and untouched)
+    // under the throughput default so a cold cache costs nothing. The run
+    // history behind co-failure can be big (tens of MB), so it loads on a
+    // thread while workers spawn and collect, and is joined only when the
+    // queue is built.
+    let mut signals = crate::scheduling::durations::FailFastSignals::default();
+    let mut cofail_job = None;
+    if order == Order::FailFast || budget.is_some() {
+        let q = quarantine.map(|q| q.all.clone());
+        signals.flakes = without_quarantined(crate::reporting::flakes::load(), q.as_ref());
+        signals.near = near_changes;
+        if order == Order::FailFast {
+            cofail_job = Some(std::thread::spawn(move || {
+                without_quarantined_partners(crate::reporting::history::load().cofail(), q.as_ref())
+            }));
+        }
+    }
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
@@ -565,7 +612,11 @@ pub fn run_pool(
                         continue;
                     }
                 }
+                let counted = fail_count.n;
                 fail_count.record(&r);
+                if fail_count.n > counted {
+                    promote_partners(&mut dispatch, states[idx].running);
+                }
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
@@ -816,8 +867,8 @@ pub fn run_pool(
                                     &ids,
                                     &cost,
                                     &scope_costs,
-                                    &flake_history,
-                                    near_changes,
+                                    &signals.flakes,
+                                    &signals.near,
                                     b.secs - spent,
                                     states.len(),
                                     in_keep,
@@ -832,13 +883,15 @@ pub fn run_pool(
                                 Some(pick.keep)
                             }
                         };
+                        if let Some(job) = cofail_job.take() {
+                            signals.cofail = job.join().unwrap_or_default();
+                        }
                         dispatch = build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
                             &duration_cache,
-                            &flake_history,
-                            near_changes,
+                            &signals,
                             &scope_costs,
                             states.len(),
                             dist,
@@ -846,6 +899,11 @@ pub fn run_pool(
                             shuffle,
                             keep.as_ref(),
                         );
+                        if mode == crate::reporting::progress::Mode::Verbose {
+                            if let Some(l) = dispatch.as_ref().and_then(|d| d.failfast) {
+                                sink.warn(&failfast_note(l));
+                            }
+                        }
                     }
                     ids_store.get_or_insert(ids);
                 }
@@ -932,6 +990,7 @@ pub fn run_pool(
                         let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
                         let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
+                        let counted = fail_count.n;
                         orchestrator::finalize_attempt(
                             sink,
                             &mut run,
@@ -945,6 +1004,9 @@ pub fn run_pool(
                                 flaky_key,
                             },
                         );
+                        if fail_count.n > counted {
+                            promote_partners(&mut dispatch, Some(index));
+                        }
                         if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
                             stopping = true;
                             run.stopped_after = Some(fail_count.n);
@@ -1223,6 +1285,8 @@ pub fn run_pool(
                 slow_count: 0,
                 lead_ends: Vec::new(),
                 fixture_groups: Vec::new(),
+                failfast: None,
+                partners: Default::default(),
                 cursor: 0,
                 group_ends: None,
                 requeued: VecDeque::new(),
@@ -1765,6 +1829,8 @@ mod tests {
             slow_count,
             lead_ends: Vec::new(),
             fixture_groups: Vec::new(),
+            failfast: None,
+            partners: Default::default(),
             cursor,
             group_ends: groups.then(|| vec![2, len as usize]),
             requeued: VecDeque::new(),

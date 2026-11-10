@@ -165,6 +165,71 @@ impl History {
         out
     }
 
+    /// Co-failure partners, for `--order fail-fast`: for each test A, the tests
+    /// B that failed in the same runs, scored P(B failed | A failed, B ran).
+    /// Only hard failures count (`failed`/`errors`): a `flaky` rescue is noise
+    /// and a `crashed` test failed because it shared a dead worker, not a
+    /// cause. A mass failure is left out: more than [`COFAIL_MASS_MIN`]
+    /// failures that are also more than [`COFAIL_MASS_PCT`]% of the run (one
+    /// bad commit would link everything to everything), or more than
+    /// [`COFAIL_MAX_RUN_FAILURES`] at all (a big suite's standing breakage;
+    /// it also bounds the pair count, which is quadratic). A partner needs
+    /// [`COFAIL_MIN_RUNS`] shared failing runs and a score of at least
+    /// [`COFAIL_MIN_P`]; each test keeps its best [`COFAIL_MAX_PARTNERS`],
+    /// highest score first.
+    pub fn cofail(&self) -> CoFail {
+        let mut ran: HashMap<u64, usize> = HashMap::new();
+        let mut failed: HashMap<u64, Vec<&str>> = HashMap::new();
+        for (id, series) in &self.tests {
+            for e in series {
+                *ran.entry(e.run).or_default() += 1;
+                if matches!(e.outcome_name(), "failed" | "errors") {
+                    failed.entry(e.run).or_default().push(id);
+                }
+            }
+        }
+        failed.retain(|run, f| {
+            f.len() <= COFAIL_MAX_RUN_FAILURES
+                && f.len() <= COFAIL_MASS_MIN.max(ran[run] * COFAIL_MASS_PCT / 100)
+        });
+        let mut fail_runs: HashMap<&str, Vec<u64>> = HashMap::new();
+        let mut both: HashMap<(&str, &str), u32> = HashMap::new();
+        for (&run, f) in &failed {
+            for &a in f {
+                fail_runs.entry(a).or_default().push(run);
+                for &b in f {
+                    if a != b {
+                        *both.entry((a, b)).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut out = CoFail::new();
+        for ((a, b), n) in both {
+            if n < COFAIL_MIN_RUNS {
+                continue;
+            }
+            // Runs where A failed and B ran: B absent (deselected, a shard)
+            // says nothing about whether it fails with A.
+            let b_runs = &self.tests[b];
+            let ran_with = fail_runs[a]
+                .iter()
+                .filter(|r| b_runs.iter().any(|e| e.run == **r))
+                .count();
+            let p = n as f32 / ran_with as f32;
+            if p >= COFAIL_MIN_P {
+                out.entry(a.to_string())
+                    .or_default()
+                    .push((b.to_string(), p));
+            }
+        }
+        for partners in out.values_mut() {
+            partners.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+            partners.truncate(COFAIL_MAX_PARTNERS);
+        }
+        out
+    }
+
     /// Every run with its entries: the inverse of `append`.
     pub fn into_slices(self) -> Vec<RunSlice> {
         let mut by_seq: HashMap<u64, RunSlice> = self
@@ -256,6 +321,16 @@ impl History {
         self.runs.retain(|r| live.contains(&r.seq));
     }
 }
+
+/// [`History::cofail`]'s result: test -> (partner, score), best first.
+pub type CoFail = HashMap<String, Vec<(String, f32)>>;
+/// A run is a mass failure past this many failures AND [`COFAIL_MASS_PCT`].
+pub const COFAIL_MASS_MIN: usize = 10;
+pub const COFAIL_MASS_PCT: usize = 5;
+pub const COFAIL_MAX_RUN_FAILURES: usize = 100;
+pub const COFAIL_MIN_RUNS: u32 = 2;
+pub const COFAIL_MIN_P: f32 = 0.5;
+pub const COFAIL_MAX_PARTNERS: usize = 32;
 
 /// A failing outcome, as flips and [`failing_now`] read it.
 pub fn is_fail(outcome: &str) -> bool {
@@ -781,6 +856,87 @@ mod tests {
         let epochs: Vec<u64> = h.runs.iter().map(|r| r.epoch).collect();
         assert_eq!(epochs, vec![0, 2, 3, 4]);
         assert_eq!(h.series("b")[0].1.outcome_name(), "failed");
+    }
+
+    /// One run per row: (test, outcome) pairs.
+    fn history_of(runs: &[&[(&str, &str)]]) -> History {
+        let mut h = History::default();
+        for (i, run) in runs.iter().enumerate() {
+            let es = run
+                .iter()
+                .map(|(id, o)| (id.to_string(), entry(o)))
+                .collect();
+            h.append(meta(i as u64), es, 50);
+        }
+        h
+    }
+
+    #[test]
+    fn cofail_links_tests_that_fail_together() {
+        let h = history_of(&[
+            &[("a", "failed"), ("b", "failed"), ("c", "passed")],
+            &[("a", "errors"), ("b", "failed"), ("c", "failed")],
+            // b passed while a failed: P(b|a) = 2/3, P(a|b) = 1.
+            &[("a", "failed"), ("b", "passed"), ("c", "passed")],
+            // b and c absent (deselected): not counted against them.
+            &[("a", "failed")],
+        ]);
+        let cf = h.cofail();
+        assert_eq!(cf["a"], vec![("b".to_string(), 2.0 / 3.0)]);
+        assert_eq!(cf["b"], vec![("a".to_string(), 1.0)]);
+        // a and c shared only one failing run.
+        assert!(!cf.contains_key("c"));
+    }
+
+    #[test]
+    fn cofail_ignores_flakes_crashes_and_mass_failures() {
+        let mass: Vec<(String, &str)> = (0..11).map(|i| (format!("m{i}"), "failed")).collect();
+        let mass: Vec<(&str, &str)> = mass.iter().map(|(id, o)| (id.as_str(), *o)).collect();
+        let mut with_ab = mass.clone();
+        with_ab.extend([("a", "failed"), ("b", "failed")]);
+        let h = history_of(&[
+            &[("a", "failed"), ("b", "flaky")],
+            &[("a", "failed"), ("b", "crashed")],
+            // 13 of 13 failed: a mass failure, so a/b's second shared run
+            // (and every m-pair) is left out.
+            &with_ab,
+            &mass,
+            &[("a", "failed"), ("b", "failed")],
+        ]);
+        assert!(h.cofail().is_empty(), "{:?}", h.cofail());
+        // Past the absolute cap, even a small share of a big run is mass.
+        let big: Vec<String> = (0..101).map(|i| format!("m{i}")).collect();
+        let pad: Vec<String> = (0..10_000).map(|i| format!("ok{i}")).collect();
+        let run: Vec<(&str, &str)> = big
+            .iter()
+            .map(|id| (id.as_str(), "failed"))
+            .chain(pad.iter().map(|id| (id.as_str(), "passed")))
+            .collect();
+        let h = history_of(&[&run, &run]);
+        assert!(h.cofail().is_empty(), "{:?}", h.cofail());
+    }
+
+    #[test]
+    fn cofail_keeps_the_best_partners() {
+        // a fails with 40 tests in two runs; z fails with a only once more.
+        let ids: Vec<String> = (0..40).map(|i| format!("p{i:02}")).collect();
+        let mut run: Vec<(&str, &str)> = ids.iter().map(|id| (id.as_str(), "failed")).collect();
+        run.push(("a", "failed"));
+        // Pad with passes so 41 failures stay under 5% of the run.
+        let pad: Vec<String> = (0..1000).map(|i| format!("ok{i}")).collect();
+        run.extend(pad.iter().map(|id| (id.as_str(), "passed")));
+        let mut h = history_of(&[&run, &run]);
+        assert_eq!(h.cofail()["a"].len(), COFAIL_MAX_PARTNERS);
+        // A partner with a better score ranks first: a fails a third time,
+        // with p39 only (the rest pass).
+        let mut third: Vec<(&str, &str)> = ids
+            .iter()
+            .map(|id| (id.as_str(), if id == "p39" { "failed" } else { "passed" }))
+            .collect();
+        third.push(("a", "failed"));
+        h = history_of(&[&run, &run, &third]);
+        let best = &h.cofail()["a"][0];
+        assert_eq!(best.0, "p39");
     }
 
     #[test]

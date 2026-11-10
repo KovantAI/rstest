@@ -23,7 +23,7 @@
 //! bare timings.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -666,6 +666,34 @@ pub const FAILFAST_SUSPECT_CAP: usize = 128;
 /// pulling them all forward is just the throughput order with worse packing.
 pub const NEAR_AFFECTED_MAX_SHARE: f64 = 0.25;
 
+/// What fail-fast ranks on besides durations: failure/flake records
+/// (`flakes.json`), proximity to changed code ([`crate::select::near_changes`])
+/// and co-failure partners ([`History::cofail`]). Empty = throughput order.
+#[derive(Debug, Default)]
+pub struct FailFastSignals {
+    pub flakes: HashMap<String, FlakeStats>,
+    pub near: HashMap<String, u8>,
+    pub cofail: crate::reporting::history::CoFail,
+}
+
+/// A suspect whose failure follows an earlier suspect's this often is the
+/// same failure cluster, so it doesn't lead alongside it.
+pub const COFAIL_SHADOW_P: f32 = 0.8;
+
+/// What [`failfast_order`] pulled to the front, per group.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct FailFastLead {
+    pub failed: usize,
+    pub near: usize,
+    pub flaky: usize,
+}
+
+impl FailFastLead {
+    pub fn len(&self) -> usize {
+        self.failed + self.near + self.flaky
+    }
+}
+
 /// Fail-fast dispatch order: surface a red as early as possible. Suspects go
 /// first, in three groups:
 /// 1. hard-failed on record, most recent failure first (`failed_epoch` desc,
@@ -676,19 +704,25 @@ pub const NEAR_AFFECTED_MAX_SHARE: f64 = 0.25;
 /// 3. flaky-only, most recent flake first, then flake count.
 ///
 /// Full ties keep collection order (a same-run cohort stays module-contiguous).
-/// At most [`FAILFAST_SUSPECT_CAP`] suspects lead. Everything after is exactly
+/// A suspect that nearly always fails with one ranked ahead of it
+/// ([`COFAIL_SHADOW_P`]) moves behind the other suspects, so the lead covers
+/// distinct failures first. At most [`FAILFAST_SUSPECT_CAP`] suspects lead. Everything after is exactly
 /// [`dispatch_order`]: long poles longest-first, then collection order, so
 /// clean tests keep module locality and workers still pack. Returns the order
-/// and the suspect lead's length; the caller dispatches that lead and the long
-/// poles behind it one test at a time. Only ids passing `include` are
+/// and what the suspect lead is made of; the caller dispatches that lead and
+/// the long poles behind it one test at a time. Only ids passing `include` are
 /// returned. Pairs with `--maxfail`/`-x` for true early exit.
 pub fn failfast_order(
     ids: &[String],
     cache: &HashMap<String, f64>,
-    flakes: &HashMap<String, FlakeStats>,
-    near: &HashMap<String, u8>,
+    signals: &FailFastSignals,
     include: impl Fn(u64) -> bool,
-) -> (Vec<u64>, usize) {
+) -> (Vec<u64>, FailFastLead) {
+    let FailFastSignals {
+        flakes,
+        near,
+        cofail,
+    } = signals;
     // Filter (shard / serial) BEFORE ranking and capping, so the cap and the
     // affected share count only tests this run will actually dispatch.
     let included: Vec<u64> = (0..ids.len() as u64).filter(|&i| include(i)).collect();
@@ -718,11 +752,39 @@ pub fn failfast_order(
             }
         }
     });
+    // One test per co-failure cluster first: a suspect that nearly always
+    // fails along with one already ahead of it goes behind the rest of the
+    // lead (and is the first to fall past the cap).
+    let mut shadowed: HashSet<&str> = HashSet::new();
+    let (mut first, mut behind) = (Vec::new(), Vec::new());
+    for i in suspects {
+        let id = ids[i as usize].as_str();
+        if shadowed.contains(id) {
+            behind.push(i);
+            continue;
+        }
+        let partners = cofail.get(id).into_iter().flatten();
+        shadowed.extend(
+            partners
+                .filter(|(_, p)| *p >= COFAIL_SHADOW_P)
+                .map(|(b, _)| b.as_str()),
+        );
+        first.push(i);
+    }
+    first.extend(behind);
+    let mut suspects = first;
     if suspects.len() > FAILFAST_SUSPECT_CAP {
         clean.extend(suspects.drain(FAILFAST_SUSPECT_CAP..));
         clean.sort_unstable();
     }
-    let lead = suspects.len();
+    let mut lead = FailFastLead::default();
+    for &i in &suspects {
+        match class[i as usize] {
+            Some(Suspect::Failed) => lead.failed += 1,
+            Some(Suspect::Near(_)) => lead.near += 1,
+            _ => lead.flaky += 1,
+        }
+    }
     // Clean tail: reuse throughput ordering over the clean subset.
     let clean_ids: Vec<String> = clean.iter().map(|&i| ids[i as usize].clone()).collect();
     let order = suspects
@@ -1197,7 +1259,16 @@ mod tests {
         // hard-failed first, then flaky, then the clean tail in throughput
         // order: the long pole first, then collection order.
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, &HashMap::new(), |_| true).0,
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![0, 1, 3, 2]
         );
     }
@@ -1240,7 +1311,16 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, &HashMap::new(), |_| true).0,
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0, 2]
         );
     }
@@ -1266,7 +1346,16 @@ mod tests {
             })
             .collect();
         flakes.get_mut(&names[n - 1]).unwrap().last_epoch = 200;
-        let order = failfast_order(&names, &HashMap::new(), &flakes, &HashMap::new(), |_| true).0;
+        let order = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes: flakes.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        )
+        .0;
         assert_eq!(order.len(), n, "a permutation, nothing lost");
         // Newest failure leads, then the tied cohort in collection order
         // (no duration shuffling), capped; overflow rejoins in collection order.
@@ -1307,7 +1396,16 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            failfast_order(&names, &HashMap::new(), &flakes, &HashMap::new(), |_| true).0,
+            failfast_order(
+                &names,
+                &HashMap::new(),
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0]
         );
     }
@@ -1335,9 +1433,15 @@ mod tests {
                 )
             })
             .collect();
-        let order = failfast_order(&names, &HashMap::new(), &flakes, &HashMap::new(), |i| {
-            i % 2 == 1
-        })
+        let order = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes: flakes.clone(),
+                ..Default::default()
+            },
+            |i| i % 2 == 1,
+        )
         .0;
         assert_eq!(order.len(), n / 2);
         assert!(order.iter().all(|i| i % 2 == 1));
@@ -1354,11 +1458,29 @@ mod tests {
         let cache = HashMap::from([("a".to_string(), 0.5), ("b".to_string(), 3.0)]);
         let flakes: HashMap<String, FlakeStats> = HashMap::new();
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, &HashMap::new(), |_| true).0,
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0, 2]
         );
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, &HashMap::new(), |_| true).0,
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             dispatch_order(&names, &cache)
         );
     }
@@ -1408,9 +1530,25 @@ mod tests {
             // A hard failure outranks its own proximity.
             ("t/e.py".to_string(), NEAR_DIRTY_TEST),
         ]);
-        let (order, lead) = failfast_order(&names, &HashMap::new(), &flakes, &near, |_| true);
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes,
+                near,
+                ..Default::default()
+            },
+            |_| true,
+        );
         assert_eq!(&order[..5], &[5, 4, 3, 2, 1]);
-        assert_eq!(lead, 5);
+        assert_eq!(
+            lead,
+            FailFastLead {
+                failed: 1,
+                near: 3,
+                flaky: 1
+            }
+        );
         assert_eq!(&order[5..], &[0, 6, 7, 8, 9, 10, 11]);
     }
 
@@ -1428,14 +1566,28 @@ mod tests {
             ("c.py".to_string(), NEAR_AFFECTED),
             ("d.py".to_string(), NEAR_TEST),
         ]);
-        let (order, lead) =
-            failfast_order(&names, &HashMap::new(), &HashMap::new(), &near, |_| true);
-        assert_eq!((order, lead), (vec![3, 0, 1, 2], 1));
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        );
+        assert_eq!((order, lead.len()), (vec![3, 0, 1, 2], 1));
         // The share counts only tests this run dispatches: with a.py filtered
         // out, the edited file alone still leads (2 of 3 affected).
-        let (order, lead) =
-            failfast_order(&names, &HashMap::new(), &HashMap::new(), &near, |i| i != 0);
-        assert_eq!((order, lead), (vec![3, 1, 2], 1));
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |i| i != 0,
+        );
+        assert_eq!((order, lead.len()), (vec![3, 1, 2], 1));
     }
 
     #[test]
@@ -1447,9 +1599,16 @@ mod tests {
             .iter()
             .map(|id| (crate::text::nodeid_file(id).to_string(), NEAR_TEST))
             .collect();
-        let (order, lead) =
-            failfast_order(&names, &HashMap::new(), &HashMap::new(), &near, |_| true);
-        assert_eq!(lead, FAILFAST_SUSPECT_CAP);
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        );
+        assert_eq!(lead.near, FAILFAST_SUSPECT_CAP);
         assert_eq!(order, (0..n as u64).collect::<Vec<_>>());
     }
 
@@ -1667,6 +1826,40 @@ mod tests {
             |_| false,
         );
         assert_eq!(pick, BudgetPick::default());
+    }
+
+    #[test]
+    fn failfast_puts_one_test_per_cofailure_cluster_first() {
+        use crate::reporting::flakes::FlakeStats;
+        let names: Vec<String> = ["a", "a_twin", "b", "a_loose"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let failed = |epoch| FlakeStats {
+            failed: 1,
+            last_epoch: epoch,
+            ..Default::default()
+        };
+        // Newest failure first: a, a_twin, b, a_loose.
+        let flakes = HashMap::from([
+            ("a".to_string(), failed(40)),
+            ("a_twin".to_string(), failed(30)),
+            ("b".to_string(), failed(20)),
+            ("a_loose".to_string(), failed(10)),
+        ]);
+        // a_twin fails nearly every time a does; a_loose only sometimes.
+        let cofail = HashMap::from([(
+            "a".to_string(),
+            vec![("a_twin".to_string(), 0.9), ("a_loose".to_string(), 0.6)],
+        )]);
+        let signals = FailFastSignals {
+            flakes,
+            cofail,
+            ..Default::default()
+        };
+        let (order, lead) = failfast_order(&names, &HashMap::new(), &signals, |_| true);
+        assert_eq!(order, vec![0, 2, 3, 1]);
+        assert_eq!(lead.failed, 4);
     }
 
     #[test]
