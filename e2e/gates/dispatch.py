@@ -50,6 +50,21 @@ def pkg_auto():
     pass
 """
 
+# Counts pytest_collect_file calls (one per file per directory listing) per
+# worker, appended at session end.
+LAZY_LISTING_COUNTER = """
+import os
+
+CALLS = [0]
+
+def pytest_collect_file(file_path, parent):
+    CALLS[0] += 1
+
+def pytest_sessionfinish(session):
+    with open(os.environ["LISTING_LOG"], "a") as f:
+        f.write(f"{CALLS[0]}\\n")
+"""
+
 LAZY_PKG_TEST = """
 def test_a(pkg_setups, request):
     assert pkg_setups == 1
@@ -138,9 +153,9 @@ def gate_lazy_collection(g, args, binary):
         "3 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-300:],
     )
-    # Each file is its own perform_collect; the package node must be shared
-    # across them, or its fixtures rerun per file and the conftest's autouse
-    # fixtures stop applying after a worker's first file.
+    # Each batch of files is its own perform_collect; the package node must
+    # be shared across them, or its fixtures rerun per batch and the
+    # conftest's autouse fixtures stop applying after a worker's first batch.
     g.write("lazypkg/pkg/__init__.py", "")
     g.write("lazypkg/pkg/conftest.py", LAZY_PKG_CONFTEST)
     for i in range(6):
@@ -150,6 +165,30 @@ def gate_lazy_collection(g, args, binary):
         "lazy: package fixture once per worker, autouse on every file",
         "12 passed" in r.stdout and "failed" not in r.stdout,
         r.stdout[-600:],
+    )
+    # A flat directory of many files: the lazy worker collects files in
+    # batches, each listing the directory once. One listing per file was
+    # quadratic (1000 files: 18.6s vs 0.7s full); count listings, not time.
+    n = 400
+    for i in range(n):
+        g.write(f"flatdir/tests/test_{i}.py", "def test_a(): pass\n")
+    g.write("flatdir/conftest.py", LAZY_LISTING_COUNTER)
+    counts = g.tmp / "flatdir_listings"
+    counts.unlink(missing_ok=True)
+    r = g.run(
+        "tests",
+        "-n",
+        "2",
+        "--collect",
+        "lazy",
+        cwd=g.tmp / "flatdir",
+        env_extra={"LISTING_LOG": str(counts)},
+    )
+    listings = sum(int(x) for x in counts.read_text().split()) / n if counts.exists() else -1
+    check(
+        "lazy: a flat directory is listed per batch, not per file",
+        f"{n} passed" in r.stdout and 0 < listings < n / 4,
+        f"listings={listings} " + r.stdout[-200:],
     )
     g.write("empty/.keep", "")  # self-contained (also written by gate_basics)
     r = g.run("empty", "--collect", "lazy", "-n", "2")
