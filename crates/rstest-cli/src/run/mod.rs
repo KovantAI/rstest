@@ -1879,7 +1879,9 @@ impl SingleWorkerInterrupts {
                         unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
                         return;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Parked, not slept: Drop unparks so its join returns at once
+                    // instead of waiting out the tick after the run.
+                    std::thread::park_timeout(std::time::Duration::from_millis(50));
                 }
             })
         });
@@ -1907,6 +1909,7 @@ impl Drop for SingleWorkerInterrupts {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(t) = self.forwarder.take() {
+            t.thread().unpark();
             let _ = t.join();
         }
     }
@@ -2920,6 +2923,28 @@ mod tests {
         assert!(!missing, "a missing @argsfile names nothing");
         assert!(names_a_selection(&[dir.display().to_string()]));
         assert!(!names_a_selection(&["-k".into(), "smoke".into()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_worker_interrupts_drop_does_not_wait_out_the_poll_tick() {
+        // A 1-test session reports Done a few ms after spawn; dropping the guard
+        // used to join a forwarder mid-`sleep(50ms)`, stalling every short run.
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let guard = super::SingleWorkerInterrupts::install(Some(child.id()));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t = std::time::Instant::now();
+        drop(guard);
+        let took = t.elapsed();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            took < std::time::Duration::from_millis(25),
+            "drop took {took:?}"
+        );
     }
 
     fn cli() -> Cli {
