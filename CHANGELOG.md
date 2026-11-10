@@ -17,6 +17,19 @@ between 0.x releases and are listed here.
   of the run (a core module) doesn't reorder anything. See
   [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
 
+- **`--order fail-fast` learns which tests fail together.** From the run
+  history it pairs tests that hard-failed in the same runs. When a test fails,
+  its partners that haven't run yet jump the queue, so with `--maxfail N` or
+  under `--watch` the next red from the same cause surfaces next. Before the
+  run, a leading test that nearly always fails with one ahead of it moves
+  back, so the first tests out cover distinct failures. Flaky reruns, worker
+  crashes and mass failures are ignored. The history loads in the background
+  while workers start. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
+- **`-v` says what `--order fail-fast` put first**: how many tests lead
+  because they recently failed, are near changes, or are flaky.
+
 ## 0.11.0 (2026-11-09)
 
 ### Fixes

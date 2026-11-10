@@ -91,6 +91,26 @@ out. Each leading test is dispatched on its own. At most 128 tests lead, and
 quarantined tests (from the `--quarantine` file or the auto-quarantine set)
 are never pulled forward as failed or flaky.
 
+Fail-fast also learns which tests fail together, from the run history
+(`.rstest_cache/history.msgpack`, the last 50 runs). Two tests are partners
+when they hard-failed in the same run at least twice and, when the first
+fails, the second fails in at least half the runs it was part of. Flaky
+reruns, worker crashes and mass failures (more than 100 failures, or more
+than 10 that are also over 5% of the run) don't count. Partners change the
+order twice:
+
+- **Before the run:** a leading test that fails along with one ahead of it in
+  at least 80% of runs is the same failure, so it moves behind the other
+  leading tests. The lead then covers distinct failures first.
+- **During the run:** when a test fails, its partners that haven't been
+  dispatched yet jump to the front of the queue, so the next red from the
+  same cause shows up next. This matters with `--maxfail N` above 1, with no
+  limit, and under `--watch`; with `-x` the run stops at the first red.
+
+The history loads on a background thread while workers start, so it adds no
+time to the run. With `-v`, rstest prints what leads the queue, for example
+`rstest: fail-fast: leading with 2 recently failed, 14 near changes, 3 flaky`.
+
 With neither the flag nor `[tool.rstest] order` set, rstest picks
 `fail-fast` under `--watch` and `throughput` otherwise.
 

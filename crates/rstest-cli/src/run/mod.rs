@@ -1781,7 +1781,7 @@ fn dispatch_run(
                 shuffle_seed,
                 shard,
                 skip_ids,
-                &near,
+                near,
                 pinned,
                 sink,
             )?

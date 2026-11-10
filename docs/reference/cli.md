@@ -195,8 +195,10 @@ affinity order).
   dispatched alone so they run in parallel. At most 128 lead, and tests
   matched by [`--quarantine`](#-quarantine-file) are never pulled forward as
   failed or flaky. The rest follow in `throughput` order. Pair with
-  [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. With
-  a cold `flakes.json` and no changes it matches `throughput`. Details:
+  [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. When
+  a test fails, tests that usually fail with it (from the run history) jump
+  the queue. With a cold cache and no changes it matches `throughput`. `-v`
+  prints what leads the queue. Details:
   [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest picks
