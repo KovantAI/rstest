@@ -3,6 +3,18 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **`-n auto` no longer runs a big suite of very fast tests on one worker.**
+  Worker sizing allowed one worker per 2s of cached test time, and tests that
+  finish in well under a millisecond are cached as 0s, so 10,000 of them got 1
+  worker and ran slower than plain pytest. Sizing now counts the per-test
+  framework cost too and allows one worker per 0.25s of work (an extra worker
+  costs ~7ms to start): that suite now gets 9 workers, 2.57s down to 0.78s on an
+  M4 Max. A suite under about a second still runs on one worker.
+
 ## 0.11.0 (2026-11-09)
 
 ### Fixes
