@@ -375,6 +375,21 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
     f.write_all(bytes)?;
+    fsync(&f)
+}
+
+/// `fsync` without the drive-cache flush. On macOS std's `sync_all` issues
+/// `F_FULLFSYNC` (~4ms each, ~50ms per run across the cache writes); plain
+/// `fsync` still orders data before the rename, only power loss inside the
+/// drive's write-cache window can lose it. Elsewhere `sync_all` is plain fsync.
+fn fsync(f: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `f` owns a valid fd for the duration of the call.
+        rc_to_result(unsafe { libc::fsync(f.as_raw_fd()) })
+    }
+    #[cfg(not(target_os = "macos"))]
     f.sync_all()
 }
 
@@ -384,7 +399,7 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
+        let _ = fsync(&d);
     }
     #[cfg(not(unix))]
     let _ = dir;
@@ -492,6 +507,39 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "tmp sidecar leaked: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_atomic_skips_full_fsync_on_macos() {
+        // `F_FULLFSYNC` (std's `sync_all` on macOS) cost ~50ms per 1-test run.
+        // Compare against it on the same filesystem; if it's not slow here (VM,
+        // ramdisk) there's no signal, so skip rather than flake.
+        let base = std::env::temp_dir().join(format!("rstest-cache-fsync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        const N: u32 = 20;
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            let f = std::fs::File::create(base.join(format!("full{i}"))).unwrap();
+            f.sync_all().unwrap();
+            std::fs::File::open(&base).unwrap().sync_all().unwrap();
+        }
+        let full = t.elapsed();
+        if full < std::time::Duration::from_millis(N as u64) {
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            write_atomic(&base.join(format!("w{i}.json")), b"{}").unwrap();
+        }
+        let ours = t.elapsed();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            ours * 2 < full,
+            "write_atomic {ours:?} vs F_FULLFSYNC {full:?}"
+        );
     }
 
     #[test]
