@@ -10,15 +10,12 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from _pytest.terminal import _folded_skips
 
-from rstest_worker._internal import junit
-from rstest_worker._internal import messages as m
 from rstest_worker._internal.leakcheck import LeakTracker
-from rstest_worker._internal.netguard import NetGuard
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
@@ -35,6 +32,10 @@ from rstest_worker._internal.xdistnode import (
     _XdistGatewayShim,
     _XdistNodeShim,
 )
+
+if TYPE_CHECKING:
+    from rstest_worker._internal import messages as m
+    from rstest_worker._internal.netguard import NetGuard
 
 log = logging.getLogger("rstest.worker")
 
@@ -465,10 +466,18 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
-        junit.maybe_register(config, self._conn)
-        self._net = NetGuard.from_env()
-        if self._net is not None:
-            self._net.install()
+        # junit (xml.etree) and netguard (socket, ipaddress) cost ~6ms to
+        # import; load them only when the orchestrator turned them on.
+        if os.environ.get("RSTEST_JUNITXML"):
+            from rstest_worker._internal import junit
+
+            junit.maybe_register(config, self._conn)
+        if os.environ.get("RSTEST_NETWORK") == "record":
+            from rstest_worker._internal.netguard import NetGuard
+
+            self._net = NetGuard.from_env()
+            if self._net is not None:
+                self._net.install()
         if self._leaks is not None and not config.pluginmanager.is_registered(self._leaks):
             config.pluginmanager.register(self._leaks, "rstest-leakcheck")
         worker_id = os.environ.get("RSTEST_WORKER_ID")

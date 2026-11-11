@@ -5,10 +5,13 @@ pass. Two models — eager (ItemDispatchPlugin) and lazy (LazyDispatchPlugin).""
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import pytest
 
-from rstest_worker._internal import messages as m
+if TYPE_CHECKING:
+    # Annotations only: the TypedDict schema costs ~2ms to import.
+    from rstest_worker._internal import messages as m
 from rstest_worker._internal.retry import flaky_reruns
 from rstest_worker._internal.stream import StreamPlugin
 

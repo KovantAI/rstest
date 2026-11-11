@@ -7,6 +7,10 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Each worker starts ~8ms faster.** It no longer imports the junit writer,
+  the `--doctor` network recorder or the message schema unless the run uses
+  them, and the plugin pin check skips importing `packaging` when no plugin
+  requires pytest.
 - **`-n auto` no longer runs a big suite of very fast tests on one worker.**
   Worker sizing allowed one worker per 2s of cached test time, and tests that
   finish in well under a millisecond are cached as 0s, so 10,000 of them got 1

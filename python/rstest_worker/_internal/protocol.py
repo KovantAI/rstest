@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from typing import Literal, cast, overload
+from typing import TYPE_CHECKING, Literal, cast, overload
 
-from rstest_worker._internal import messages as m
+if TYPE_CHECKING:
+    # Annotations only: the TypedDict schema costs ~2ms to import.
+    from rstest_worker._internal import messages as m
 from rstest_worker._internal import mpack
 
 # Upper bound on a single buffered frame. Without it a desynced stream (a stray
