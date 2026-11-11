@@ -1,6 +1,6 @@
 !!! tip "Pin for reproducible CI"
     The recipes use a bare `pip install rstest`. For reproducible builds,
-    pin an exact version (`pip install rstest==0.11.0`) or install from your
+    pin an exact version (`pip install rstest==0.11.1`) or install from your
     lockfile, ideally with hashes (`pip install --require-hashes -r
     requirements.txt`). rstest is alpha (0.x), so a range like `~=0.10` can still
     pull in breaking changes.
