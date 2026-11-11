@@ -55,9 +55,11 @@ pub use scheduling::proto;
 pub fn run() -> Result<i32> {
     let (own_args, args) = cli::split_argv();
     let cli = Cli::parse_from(&own_args);
-    // Clear what killed runs left in the temp dir, then hold this run's folder
-    // until return (subcommands too: bisect and migrate-check use it).
-    scratch::sweep();
+    // Clear what killed runs left in the temp dir, on a thread: listing a temp
+    // dir of thousands of entries costs ~15ms. Joined on return, so a run still
+    // leaves it swept. Then hold this run's folder until return (subcommands
+    // too: bisect and migrate-check use it).
+    let _sweep = scratch::sweep_in_background();
     let _scratch = scratch::claim();
     // Anchor `.rstest_cache` at pytest's rootdir before anything reads it, so
     // a run from a subdirectory shares the project's cache (as `.pytest_cache`).

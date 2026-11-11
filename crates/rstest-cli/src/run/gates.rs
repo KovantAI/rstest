@@ -541,6 +541,8 @@ pub(super) fn run_post_gates(
         (!passthrough && has_cov && !incremental_active).then(remote::load_local_cov_index);
     let prev_index = own_prev_index.as_ref().unwrap_or(prev_index);
     if !passthrough && has_cov {
+        // pytest-cov's workers write their coverage data files on exit.
+        outcome.reap_workers();
         let before = index_mtime();
         // JSON and TAP keep stdout a pure machine stream, so covtool's table
         // and notices go to stderr there instead.
@@ -2418,6 +2420,7 @@ mod tests {
             fork_prewarmed: false,
             peak_rss: None,
             sources: Default::default(),
+            exiting: Vec::new(),
         };
         let (mut sink, _cap) = Sink::captured();
         let stream = sink.attach_captured_stream();

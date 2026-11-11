@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from rstest_worker._internal.messages import FixtureLeak
+if TYPE_CHECKING:
+    from rstest_worker._internal.messages import FixtureLeak
 
 Fd = tuple[int, int, int]
 
