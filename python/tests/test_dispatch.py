@@ -90,6 +90,7 @@ def test_collection_finish_reports_deselected_items(monkeypatch):
 
 def test_collection_finish_full_payload_with_send_ids(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
     conn = FakeConn()
     flaky_mark = SimpleNamespace(kwargs={"reruns": 3}, args=())
     group_mark = SimpleNamespace(args=("g1",), kwargs={})
@@ -121,8 +122,38 @@ def test_collection_finish_full_payload_with_send_ids(monkeypatch):
     assert payload["groups"] == {"1": "g1"}
 
 
+def test_pool_designate_skips_discovery_only_fields(monkeypatch):
+    # gw0 ships ids and scheduling marks, but not locations / marker names:
+    # only --collect-only discovery (a lone worker) reads those, and
+    # item.location is costly on the path every worker waits on.
+    monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    monkeypatch.setenv("RSTEST_WORKER_ID", "gw0")
+
+    class NoLocation(FakeItem):
+        @property
+        def location(self):
+            raise AssertionError("item.location computed for the pool")
+
+        @location.setter
+        def location(self, _value):
+            pass
+
+    conn = FakeConn()
+    serial_mark = SimpleNamespace(args=(), kwargs={})
+    items = [NoLocation("t.py::a", marks=["serial"], closest={"serial": serial_mark})]
+    ItemDispatchPlugin(conn).pytest_collection_finish(
+        SimpleNamespace(items=items, config=SimpleNamespace(cache=None))
+    )
+    payload = conn.sent[0][1]
+    assert payload["ids"] == ["t.py::a"]
+    assert payload["serial"] == [0]
+    assert "locations" not in payload
+    assert "marks" not in payload
+
+
 def test_collection_finish_location_none_lineno_and_no_cache(monkeypatch):
     monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
     conn = FakeConn()
     item = FakeItem("t.py::a", location=(None, None, "a"))
     session = SimpleNamespace(items=[item], config=SimpleNamespace(cache=None))
@@ -150,6 +181,7 @@ def test_collection_finish_without_a_cacheprovider(monkeypatch):
     # `-p no:cacheprovider` leaves config with no `cache` attribute at all;
     # the id-bearing payload must still ship (no cache_dir), not raise.
     monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
     conn = FakeConn()
     session = SimpleNamespace(items=[FakeItem("t.py::a")], config=SimpleNamespace())
     ItemDispatchPlugin(conn).pytest_collection_finish(session)
@@ -219,6 +251,7 @@ def test_session_roots_pyargs_keeps_module_names(tmp_path):
 
 def test_collection_finish_ships_roots_with_ids(monkeypatch, tmp_path):
     monkeypatch.setenv("RSTEST_SEND_IDS", "1")
+    monkeypatch.delenv("RSTEST_WORKER_ID", raising=False)
     conn = FakeConn()
     session = SimpleNamespace(items=[FakeItem("t.py::a")], config=_roots_config(tmp_path))
     ItemDispatchPlugin(conn).pytest_collection_finish(session)

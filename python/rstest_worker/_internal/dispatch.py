@@ -240,18 +240,23 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
         # pandas scale that's 8x15MB saved on the startup path.
         if os.environ.get("RSTEST_SEND_IDS") == "1":
             payload["ids"] = ids
-            # Source location per item (rootdir-relative file + 0-based line),
-            # aligned to `ids`, for --collect-only discovery / editor mapping.
-            # item.location is (relpath, lineno, domain); lineno may be None.
-            payload["locations"] = [
-                [item.location[0] or "", item.location[1]] for item in session.items
-            ]
-            # Every marker name on each item (own + inherited from class/module),
-            # aligned to `ids`, for --collect-only completeness. Names only;
-            # serial/flaky/groups below stay separate for scheduling.
-            payload["marks"] = [
-                sorted({m.name for m in item.iter_markers()}) for item in session.items
-            ]
+            # Only --collect-only discovery reads these, and its lone worker is
+            # the only one without a pool identity (gwN). The pool's designate
+            # skips them: item.location alone costs ~10ms per 1000 items, on
+            # the path every worker waits on before its first test.
+            if "RSTEST_WORKER_ID" not in os.environ:
+                # Source location per item (rootdir-relative file + 0-based
+                # line), aligned to `ids`, for discovery / editor mapping.
+                # item.location is (relpath, lineno, domain); lineno may be None.
+                payload["locations"] = [
+                    [item.location[0] or "", item.location[1]] for item in session.items
+                ]
+                # Every marker name on each item (own + inherited from
+                # class/module), aligned to `ids`. Names only; serial/flaky/
+                # groups below stay separate for scheduling.
+                payload["marks"] = [
+                    sorted({m.name for m in item.iter_markers()}) for item in session.items
+                ]
             # No `cache` attribute at all with `-p no:cacheprovider`.
             cache = getattr(session.config, "cache", None)
             if cache is not None:

@@ -838,7 +838,12 @@ pub(crate) fn execute_inner(
         baseline: &inc.baseline,
         replay: pinned.is_some(),
     };
-    gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, history, &mut sink)
+    let exitstatus =
+        gates::run_post_gates(&cfg, cli, &mut outcome, &args, &post, history, &mut sink);
+    // Never return before the workers do: a caller (or the next --watch run)
+    // may read what they write on exit.
+    outcome.reap_workers();
+    exitstatus
 }
 
 /// Dispatch a subcommand (`rstest verify-vendor` / `try` / `migrate-check` /
@@ -1713,11 +1718,14 @@ fn dispatch_run(
             // for reuse), and restore the default handlers.
             drop(interrupts);
             mark_session_flaky(&mut run, reruns_seen);
-            if session_died {
+            // Reaped after the post-run saves (see `PoolOutcome::exiting`).
+            let exiting = if session_died {
                 w.reap();
+                Vec::new()
             } else {
-                w.shutdown()?;
-            }
+                w.send(&proto::Command::Shutdown)?;
+                vec![w]
+            };
             pool::PoolOutcome {
                 fixture_groups: Vec::new(),
                 run,
@@ -1741,6 +1749,7 @@ fn dispatch_run(
                 // `-n 0` runs the whole suite in one process, a peak that
                 // would undersize the next parallel run.
                 peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
+                exiting,
             }
         } else if path == RunPath::Lazy {
             // Auto-picked (neither --collect nor the setting present)? Say so once,
