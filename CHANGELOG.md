@@ -7,6 +7,10 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Each worker starts ~8ms faster.** It no longer imports the junit writer,
+  the `--doctor` network recorder or the message schema unless the run uses
+  them, and the plugin pin check skips importing `packaging` when no plugin
+  requires pytest.
 - **Parallel runs start their first tests sooner.** The first worker no longer
   computes every test's source location and marker names after collection
   (only `--collect-only --report-json` uses them): ~12ms per 1,000 tests that

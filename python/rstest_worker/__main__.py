@@ -19,7 +19,11 @@ if _vendor not in sys.path:
 # Absolute (not relative) imports: multiprocessing-spawn and anyio
 # to_process re-execute the parent's __main__ file via runpy without
 # package context, where relative imports raise ImportError.
-from rstest_worker._internal import messages as m
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotations only: the TypedDict schema costs ~2ms to import.
+    from rstest_worker._internal import messages as m
 from rstest_worker._internal import protocol, runner_pytest
 
 
