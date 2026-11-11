@@ -308,8 +308,8 @@ pub struct Cli {
 
     /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
     /// to pack workers — the default) or "fail-fast" (recently-failed, then
-    /// flaky tests first, then the throughput order for the rest, for the
-    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// tests near changed code, then flaky tests first, then the throughput
+    /// order for the rest, for the earliest possible red signal). Pairs with `--maxfail`/`-x` for true
     /// early exit. Auto-selects fail-fast under `--watch`. Config
     /// `[tool.rstest] order`.
     #[arg(long, value_name = "MODE")]

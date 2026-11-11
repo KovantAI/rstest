@@ -127,7 +127,8 @@ pool (`RSTEST_WORKER_ID=gw0`), and it is inert under a passthrough flag
 
 Watch reruns default to
 [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast): tests
-that recently failed or flaked (from `flakes.json`) run first, then the rest
+that recently failed, then tests near the files you just edited, then tests
+that flaked (from `flakes.json`) run first, then the rest
 in slow-first throughput order, so a red surfaces as early as possible on each
 save. Pair it with `-x`/`--maxfail=1` to stop at that first red; pass
 `--order throughput` (or set `[tool.rstest] order`) to opt back into packing.

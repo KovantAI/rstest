@@ -5,6 +5,31 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Features
+
+- **`--order fail-fast` runs tests near your changes early.** After tests
+  that recently failed, and before flaky ones, it now runs tests close to
+  what changed: a test file edited in the working tree first, then test files
+  changed since the last green run, then tests that reach a changed source
+  file (coverage map when warm, else the import graph). The diff is against
+  the last green run's commit, or `HEAD` when none is recorded, so a cold
+  cache still gets a useful order. A change that reaches more than a quarter
+  of the run (a core module) doesn't reorder anything. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
+- **`--order fail-fast` learns which tests fail together.** From the run
+  history it pairs tests that hard-failed in the same runs. When a test fails,
+  its partners that haven't run yet jump the queue, so with `--maxfail N` or
+  under `--watch` the next red from the same cause surfaces next. Before the
+  run, a leading test that nearly always fails with one ahead of it moves
+  back, so the first tests out cover distinct failures. Flaky reruns, worker
+  crashes and mass failures are ignored. The history loads in the background
+  while workers start. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
+- **`-v` says what `--order fail-fast` put first**: how many tests lead
+  because they recently failed, are near changes, or are flaky.
+
 ### Fixes
 
 - **`--fork-pool` runs end sooner.** Waiting for forked workers to exit

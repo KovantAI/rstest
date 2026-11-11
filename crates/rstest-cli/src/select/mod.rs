@@ -58,6 +58,60 @@ pub fn targets_as_args(rootdir: &Path, cwd: &Path, targets: &[PathBuf]) -> Vec<S
         .collect()
 }
 
+/// [`near_changes`] tiers, closest first: a test file edited in the working
+/// tree, a test file changed since the base, a test that reaches a changed
+/// source file (coverage index, else import graph).
+pub const NEAR_DIRTY_TEST: u8 = 0;
+pub const NEAR_TEST: u8 = 1;
+pub const NEAR_AFFECTED: u8 = 2;
+
+/// How close each test is to the code that changed since `base` (`None` =
+/// HEAD; the working tree is always included), for `--order fail-fast`. Keys
+/// are rootdir-relative test files, or `file::test` nodeids where the coverage
+/// index is that precise; values are the `NEAR_*` tiers. This ranks, it never
+/// selects: non-Python changes are ignored rather than forcing a full run, and
+/// any failure (no git, a base that no longer exists) yields an empty map.
+pub fn near_changes(
+    rootdir: &Path,
+    project: &crate::config::ProjectConfig,
+    base: Option<&str>,
+) -> std::collections::HashMap<String, u8> {
+    let mut near = std::collections::HashMap::new();
+    let Ok(mut changes) = changed_line_ranges(rootdir, base) else {
+        return near;
+    };
+    changes.retain(|f, _| f.extension().and_then(|e| e.to_str()) == Some("py"));
+    if changes.is_empty() {
+        return near;
+    }
+    let key = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    if let Ok(Selection::Tests(tests)) =
+        affected_with_coverage(rootdir, project, &changes, false, base)
+    {
+        near.extend(tests.iter().map(|t| (key(t), NEAR_AFFECTED)));
+    }
+    // Against HEAD every change is a working-tree change.
+    let dirty: std::collections::HashSet<PathBuf> = match base {
+        Some(_) => changed_files_from_git(rootdir, None)
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        None => changes.keys().cloned().collect(),
+    };
+    for f in changes.keys() {
+        let abs = rootdir.join(f);
+        if crate::collect::is_test_file(&abs, project) && abs.exists() {
+            let tier = if dirty.contains(f) {
+                NEAR_DIRTY_TEST
+            } else {
+                NEAR_TEST
+            };
+            near.insert(key(f), tier);
+        }
+    }
+    near
+}
+
 /// Rule 1: a changed config file or any non-Python file defeats the import
 /// graph - return a full run. Shared by the graph and coverage selectors.
 fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
@@ -83,6 +137,72 @@ fn rule1_full_run(changed: &[PathBuf]) -> Option<Selection> {
 mod tests {
     use super::targets_as_args;
     use std::path::PathBuf;
+
+    #[test]
+    fn near_changes_tiers_edited_tests_and_affected_tests() {
+        use super::{near_changes, NEAR_AFFECTED, NEAR_DIRTY_TEST, NEAR_TEST};
+        use std::collections::HashMap;
+        let held = crate::test_env::lock();
+        let root = std::env::temp_dir().join(format!("rstest-near-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        let root = root.canonicalize().unwrap();
+        // Cold coverage index: graph selection.
+        let _cache = crate::test_env::set_var(&held, "RSTEST_CACHE", root.join(".cache"));
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let write = |rel: &str, body: &str| std::fs::write(root.join(rel), body).unwrap();
+        write("pytest.ini", "[pytest]\n");
+        write(".gitignore", ".cache/\n");
+        write("core.py", "X = 1\n");
+        write("tests/test_core.py", "import core\ndef test_c(): pass\n");
+        write("tests/test_edit.py", "def test_e(): pass\n");
+        write("tests/test_other.py", "def test_o(): pass\n");
+        write("README.md", "hi\n");
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let project = crate::config::discover(&root, &mut std::io::sink());
+        let near = |base| near_changes(&root, &project, base);
+
+        // Working tree vs HEAD. A README edit must not void the ranking the
+        // way it forces --changed into a full run.
+        write("core.py", "X = 2\n");
+        write("tests/test_edit.py", "def test_e(): assert 1\n");
+        write("README.md", "bye\n");
+        assert_eq!(
+            near(None),
+            HashMap::from([
+                ("tests/test_core.py".to_string(), NEAR_AFFECTED),
+                ("tests/test_edit.py".to_string(), NEAR_DIRTY_TEST),
+            ])
+        );
+
+        // Against an older base: committed test edits rank below the one
+        // being edited now.
+        git(&["commit", "-qam", "edits"]);
+        write("tests/test_other.py", "def test_o(): assert 1\n");
+        assert_eq!(
+            near(Some("HEAD~1")),
+            HashMap::from([
+                ("tests/test_core.py".to_string(), NEAR_AFFECTED),
+                ("tests/test_edit.py".to_string(), NEAR_TEST),
+                ("tests/test_other.py".to_string(), NEAR_DIRTY_TEST),
+            ])
+        );
+
+        // A base that no longer resolves is no signal, not an error.
+        assert!(near(Some("0000000000000000000000000000000000000000")).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn targets_are_re_anchored_at_the_cwd() {

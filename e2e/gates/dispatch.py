@@ -34,6 +34,7 @@ from _harness import (
     WINDOWS,
     check,
     clear_e2e_log,
+    git_init_commit,
     read_e2e_rows,
 )
 
@@ -1192,6 +1193,58 @@ def gate_order_fail_fast(g, args, binary):
         "fail-fast: --collect lazy warns it is ignored",
         "ignored under --collect lazy" in r.stderr,
         r.stderr[-300:],
+    )
+    # A test file edited in the working tree leads even on a cold cache (no
+    # flake history): its red surfaces first, not after the 40 clean tests
+    # collected before it.
+    near = g.tmp / "ffnear"
+    shutil.rmtree(near, ignore_errors=True)
+    g.write("ffnear/pytest.ini", "[pytest]\n")
+    for f in "abcdefgh":
+        g.write(
+            f"ffnear/test_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.05)\n" for i in range(5)),
+        )
+    g.write("ffnear/test_z.py", "def test_edited(): assert True\n")
+    git_init_commit(near)
+    g.write("ffnear/test_z.py", "def test_edited(): assert False\n")
+    r = g.run("-n", "2", "-x", "-v", "--order", "fail-fast", cwd=str(near))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "fail-fast: test file edited in the working tree runs first",
+        r.returncode == 1 and "test_edited" in r.stdout and (m is None or int(m.group(1)) < 10),
+        r.stdout[-300:] + r.stderr[-200:],
+    )
+    check(
+        "fail-fast: -v says what leads the queue",
+        "fail-fast: leading with 0 recently failed, 1 near changes, 0 flaky" in r.stderr,
+        r.stderr[-300:],
+    )
+    # Co-failure: a and b failed together in two runs. With no flake record
+    # pulling b forward (flakes.json gone, history kept), a's failure must pull
+    # b, collected last, ahead of the 40 clean tests, so --maxfail 2 stops early.
+    co = g.tmp / "ffco"
+    shutil.rmtree(co, ignore_errors=True)
+    g.write("ffco/pytest.ini", "[pytest]\n")
+    g.write("ffco/test_a.py", "def test_a(): assert False\n")
+    for f in "cdefghij":
+        g.write(
+            f"ffco/test_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.05)\n" for i in range(5)),
+        )
+    g.write("ffco/test_z.py", "def test_b(): assert False\n")
+    for _ in range(2):
+        g.run("-n", "2", cwd=str(co))
+    (co / ".rstest_cache" / "flakes.json").unlink()
+    r = g.run("-n", "2", "--maxfail", "2", "--order", "fail-fast", cwd=str(co))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "fail-fast: a failure pulls its co-failure partner forward",
+        r.returncode == 1
+        and "test_a" in r.stdout
+        and "test_b" in r.stdout
+        and (m is None or int(m.group(1)) < 15),
+        r.stdout[-300:] + r.stderr[-200:],
     )
     # Monorepo root validates --order once, before fanning out.
     mono = g.tmp / "ffmono"
