@@ -7,6 +7,9 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Less per-test overhead in pool workers on macOS.** The check for a
+  pending command before each test now uses `select()` instead of `poll()`,
+  which costs ~6µs per call on macOS (0.3µs now).
 - **Less wait at both ends of a run.** Clearing temp folders left by killed
   runs now happens in the background instead of before the run starts (it
   lists the whole temp dir), and the duration, flake and history saves now
