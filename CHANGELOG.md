@@ -7,6 +7,10 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Parallel runs start their first tests sooner.** The first worker no longer
+  computes every test's source location and marker names after collection
+  (only `--collect-only --report-json` uses them): ~12ms per 1,000 tests that
+  every worker was waiting on.
 - **Less per-test overhead in pool workers on macOS.** The check for a
   pending command before each test now uses `select()` instead of `poll()`,
   which costs ~6µs per call on macOS (0.3µs now).
