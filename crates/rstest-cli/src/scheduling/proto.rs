@@ -427,6 +427,16 @@ pub enum Event {
         /// `-n auto`); absent where it can't be read (Windows).
         #[serde(default)]
         peak_rss: Option<u64>,
+        /// `--fork-pool=app` recording: the modules this worker imported that
+        /// a warm template may import ahead of the fork, in import order.
+        #[serde(default)]
+        imported: Vec<String>,
+        /// `--fork-pool=app` recording: the worker's `sys.path` at session end.
+        #[serde(default)]
+        sys_path: Vec<String>,
+        /// `--fork-pool=app` recording: coverage was tracing in the worker.
+        #[serde(default)]
+        coverage: bool,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -597,7 +607,8 @@ mod tests {
             from_python(serde_json::json!({"kind": "done", "payload": {"exitstatus": 5}})),
             Event::Done {
                 exitstatus: 5,
-                peak_rss: None
+                peak_rss: None,
+                ..
             }
         ));
         assert!(matches!(
@@ -606,7 +617,8 @@ mod tests {
             ),
             Event::Done {
                 exitstatus: 0,
-                peak_rss: Some(1024)
+                peak_rss: Some(1024),
+                ..
             }
         ));
         assert!(matches!(
@@ -815,7 +827,10 @@ mod property {
             (any::<i32>(), proptest::option::of(any::<u64>())).prop_map(
                 |(exitstatus, peak_rss)| Event::Done {
                     exitstatus,
-                    peak_rss
+                    peak_rss,
+                    imported: vec![],
+                    sys_path: vec![],
+                    coverage: false,
                 }
             ),
             (small_str(), small_strs())

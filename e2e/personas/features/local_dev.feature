@@ -701,3 +701,63 @@ Feature: Daily local developer
       When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental --report-json r.json" after clearing stale .coverage files
       Then stdout contains "(2 cached)"
       And every cached test in the report "r.json" carries its lineno
+
+  Rule: --fork-pool=app forks workers from a template that already imported the app (dev-notes/warm-template-plan.md)
+
+    Background:
+      Given a file "slowapp.py" containing:
+        """
+        import os
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imports.log"), "a") as f:
+            f.write(f"{os.getpid()}\n")
+        VALUE = 1
+        """
+      And a file "envapp.py" containing:
+        """
+        import os
+        WID = os.environ.get("PYTEST_XDIST_WORKER")
+        """
+      And 8 files "test_m{i}.py" each containing:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        """
+
+    @macos_only
+    Scenario: DV-19 the second warm run imports the app once, in the template
+      Given I have run "rstest -n 4 --fork-pool=app"
+      And I have run "rstest -n 4 --fork-pool=app"
+      When I note the lines in "imports.log"
+      And I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And "imports.log" gained 1 line
+
+    @macos_only
+    Scenario: DV-19 a module that reads the worker id at import is imported per worker
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And stderr contains "envapp reads PYTEST_XDIST_WORKER at import"
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And stderr does not contain "--fork-pool=app:"
+
+    @macos_only
+    Scenario: DV-19 coverage turns the template off
+      When I run "rstest -n 4 --fork-pool=app --cov=slowapp --cov-report="
+      Then the run succeeds
+      And stderr contains "--fork-pool=app does not support coverage yet"
+
+    @linux_only
+    Scenario: DV-19 --fork-pool=app is macOS-only for now
+      When I note the lines in "imports.log"
+      And I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And stderr contains "--fork-pool=app is macOS-only for now"
+      And "imports.log" gained 4 lines

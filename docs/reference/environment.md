@@ -28,7 +28,7 @@ the real values.
 ## Set by the orchestrator (internal)
 
 `RSTEST_BASETEMP`, `RSTEST_SEND_IDS`, `RSTEST_DOCTOR`, `RSTEST_TIMEOUT`,
-`RSTEST_LEAKCHECK`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT`,
+`RSTEST_LEAKCHECK`, `RSTEST_WARM_RECORD`, `RSTEST_WARM_MANIFEST`, `RSTEST_WARM_RESULT`, `RSTEST_DEBUGPY_PORT`, `RSTEST_STREAM_OUTPUT`,
 `RSTEST_JUNITXML`, `RSTEST_RERUNS` (set to `1` under a global `--reruns`, so a
 session's own `-x` / `--maxfail` doesn't count failed attempts the orchestrator
 may retry), `RSTEST_QUARANTINE` (the `--quarantine` file patterns, one anchored

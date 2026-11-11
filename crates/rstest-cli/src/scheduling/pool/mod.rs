@@ -192,6 +192,10 @@ pub struct PoolOutcome {
     /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
     /// don't spawn a pool). Feeds the `--doctor` report.
     pub fork_prewarmed: bool,
+    /// `--fork-pool=app`: the modules the workers imported, for the manifest.
+    pub warm_record: crate::scheduling::warm::Record,
+    /// `--fork-pool=app`: what the template imported (set after the run).
+    pub warm: Option<crate::scheduling::warm::Stats>,
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
@@ -395,6 +399,7 @@ pub fn run_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut peak_rss: Option<u64> = None;
+    let mut warm_record = crate::scheduling::warm::Record::default();
     // Reference collection: (count, hash) from whichever worker reports first.
     let mut reference: Option<(u64, String)> = None;
     // Designate's id list, retained for crash-report nodeids.
@@ -959,9 +964,13 @@ pub fn run_pool(
             Ok(Event::Done {
                 exitstatus,
                 peak_rss: peak,
+                imported,
+                sys_path,
+                coverage,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
+                warm_record.merge(imported, sys_path, coverage);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own (see Stopped) never ran what
@@ -1560,6 +1569,8 @@ pub fn run_pool(
         collection_size,
         startup_seconds,
         fork_prewarmed,
+        warm_record,
+        warm: None,
         sources,
         peak_rss,
         exiting,

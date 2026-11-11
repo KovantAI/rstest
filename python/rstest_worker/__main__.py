@@ -80,6 +80,19 @@ def _fork_pool(argv: list[str]) -> None:
     triples = [(fds[3 * i], fds[3 * i + 1], fds[3 * i + 2]) for i in range(count)]
     all_fds = set(fds) | {report_fd, release_fd}
 
+    # `--fork-pool=app`: import the app's modules once, here, before forking.
+    manifest = os.environ.get("RSTEST_WARM_MANIFEST")
+    if manifest:
+        from rstest_worker._internal import warm
+
+        if not warm.prewarm(manifest, os.environ.get(warm.RESULT_ENV)):
+            # A guard fired: this process carries a side effect no child may
+            # share. Start over as a plain core zygote (same pid, same
+            # inherited pipe fds), and the next run skips the denied module.
+            os.environ.pop("RSTEST_WARM_MANIFEST")
+            sys.stderr.flush()
+            os.execv(sys.executable, [sys.executable, "-m", "rstest_worker", "--fork-pool", *argv])
+
     pids = []
     for idx, (cmd_fd, evt_fd, err_fd) in enumerate(triples):
         pid = os.fork()
@@ -95,6 +108,8 @@ def _fork_pool(argv: list[str]) -> None:
             sys.stderr.flush()
             os.dup2(err_fd, 2)
             os.close(err_fd)
+            if manifest:
+                warm.reseed_after_fork()
             os.environ["RSTEST_WORKER_ID"] = f"gw{idx}"
             # Exactly worker 0 ships the full id list (matches build_worker_command).
             os.environ["RSTEST_SEND_IDS"] = "1" if idx == 0 else "0"
@@ -146,6 +161,13 @@ def _done(conn, exitstatus: int) -> None:
     peak = _peak_rss()
     if peak is not None:
         payload["peak_rss"] = peak
+    if os.environ.get("RSTEST_WARM_RECORD"):
+        from rstest_worker._internal import warm
+
+        if warm.recorded is not None:
+            payload["imported"] = warm.recorded
+            payload["sys_path"] = list(sys.path)
+            payload["coverage"] = warm.coverage_active()
     conn.send("done", payload)
 
 

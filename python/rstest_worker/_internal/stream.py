@@ -912,6 +912,14 @@ class StreamPlugin:
         # drops its follower DB here). Caveat: a crashed worker never reaches
         # this, and rstest has no master to fire it in its place.
         self._call_node_hooks(session.config, "pytest_testnodedown", error=None)
+        if os.environ.get("RSTEST_WARM_RECORD"):
+            from rstest_worker._internal import warm
+
+            # Best-effort: a manifest is an optimization, never a failure.
+            try:
+                warm.recorded = warm.record(session)
+            except Exception:
+                warm.recorded = None
         if self._warnings:
             entries: list[m.WarningEntry] = [
                 {

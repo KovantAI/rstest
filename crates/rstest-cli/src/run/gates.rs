@@ -624,7 +624,8 @@ pub(super) fn run_post_gates(
             coverage_index.as_ref().zip(project.as_ref()),
         )
         .with_history(&outcome.run, history.get())
-        .with_fixture_groups(&outcome.run, &outcome.fixture_groups);
+        .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
+        .with_warm(outcome.warm.clone());
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
@@ -2418,6 +2419,8 @@ mod tests {
             collection_size: 0,
             startup_seconds: 0.0,
             fork_prewarmed: false,
+            warm_record: Default::default(),
+            warm: None,
             peak_rss: None,
             sources: Default::default(),
             exiting: Vec::new(),

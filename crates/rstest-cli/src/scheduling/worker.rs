@@ -105,6 +105,9 @@ pub struct WorkerEnv {
     pub timeout: Option<f64>,
     /// Enable per-test thread/fd leak measurement (--doctor or --fail-on-leak).
     pub leakcheck: bool,
+    /// `--fork-pool=app`: workers record their imports; the zygote imports
+    /// the manifest's modules before forking. None = off.
+    pub warm: Option<crate::scheduling::warm::WorkerWarm>,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -1121,6 +1124,9 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_DOCTOR",
     "RSTEST_TIMEOUT",
     "RSTEST_LEAKCHECK",
+    "RSTEST_WARM_RECORD",
+    "RSTEST_WARM_MANIFEST",
+    "RSTEST_WARM_RESULT",
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
@@ -1222,6 +1228,9 @@ fn build_worker_command(
     }
     if env.leakcheck {
         command.env("RSTEST_LEAKCHECK", "1");
+    }
+    if env.warm.is_some() {
+        command.env("RSTEST_WARM_RECORD", "1");
     }
     if let Some(port) = &env.debug_port {
         command.env("RSTEST_DEBUGPY_PORT", port);
@@ -1508,6 +1517,14 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     }
     if env.leakcheck {
         command.env("RSTEST_LEAKCHECK", "1");
+    }
+    if let Some(warm) = &env.warm {
+        command
+            .env("RSTEST_WARM_RECORD", "1")
+            .env("RSTEST_WARM_RESULT", &warm.result);
+        if let Some(manifest) = &warm.manifest {
+            command.env("RSTEST_WARM_MANIFEST", manifest);
+        }
     }
     if env.stream_output {
         command.env("RSTEST_STREAM_OUTPUT", "1");
@@ -1926,7 +1943,10 @@ mod tests {
         // it from a finally), and done ends every failed startup.
         assert!(!StartupStderr::ends_startup(&proto::Event::Done {
             exitstatus: 4,
-            peak_rss: None
+            peak_rss: None,
+            imported: vec![],
+            sys_path: vec![],
+            coverage: false,
         }));
     }
 
@@ -2100,6 +2120,7 @@ mod tests {
             doctor: false,
             timeout: None,
             leakcheck: false,
+            warm: None,
             send_ids: false,
             debug_port: None,
             stream_output: false,
@@ -2445,6 +2466,7 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2491,6 +2513,7 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2545,6 +2568,7 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2999,6 +3023,32 @@ mod tests {
         assert!(format!("{short:#}").contains("reported 1 worker pids, expected 2"));
         let bad = super::parse_pid_report("11\nxx\n", 2).unwrap_err();
         assert!(format!("{bad:#}").contains("parsing zygote pid report"));
+    }
+
+    /// `--fork-pool=app`: every worker records its imports; only the zygote
+    /// gets the manifest to import and the result path.
+    #[test]
+    fn warm_env_records_everywhere_and_prewarms_only_the_zygote() {
+        let mut env = base_env();
+        env.warm = Some(crate::scheduling::warm::WorkerWarm {
+            manifest: Some("/c/warm/manifest.json".into()),
+            result: "/t/warm-result.json".into(),
+        });
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &env, 3, 4);
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_WARM_RECORD"], "1");
+        assert!(!envs.contains_key("RSTEST_WARM_MANIFEST"));
+        #[cfg(unix)]
+        {
+            let mut cmd = Command::new("python");
+            super::apply_shared_worker_env(&mut cmd, 3, &env);
+            let envs = envs_of(&cmd);
+            assert_eq!(envs["RSTEST_WARM_RECORD"], "1");
+            assert_eq!(envs["RSTEST_WARM_MANIFEST"], "/c/warm/manifest.json");
+            assert_eq!(envs["RSTEST_WARM_RESULT"], "/t/warm-result.json");
+        }
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        assert!(!envs_of(&cmd).contains_key("RSTEST_WARM_RECORD"));
     }
 
     /// The zygote carries every run-wide opt-in flag its children inherit.
