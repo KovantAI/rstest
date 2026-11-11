@@ -18,6 +18,7 @@ from _pytest.terminal import _folded_skips
 from rstest_worker._internal import junit
 from rstest_worker._internal import messages as m
 from rstest_worker._internal.leakcheck import LeakTracker
+from rstest_worker._internal.marks import closest_marker
 from rstest_worker._internal.netguard import NetGuard
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
@@ -720,7 +721,7 @@ class StreamPlugin:
         """`@pytest.mark.timeout(N)` wins over the global `--timeout`. Accepts
         the positional `timeout(N)` and keyword `timeout(timeout=N)` forms
         (pytest-timeout-compatible)."""
-        marker = item.get_closest_marker("timeout")
+        marker = closest_marker(item, "timeout")
         if marker is not None:
             if marker.args:
                 return _parse_timeout(marker.args[0])
@@ -777,7 +778,7 @@ class StreamPlugin:
             report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
         # The doctor's TIMEOUTS section skips a test whose marker already
         # covers its suggested limit.
-        if report.when == "call" and item.get_closest_marker("timeout") is not None:
+        if report.when == "call" and closest_marker(item, "timeout") is not None:
             report._rstest_marker_timeout = self._effective_timeout(item)
         return report
 

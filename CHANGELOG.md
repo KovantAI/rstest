@@ -7,6 +7,9 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Less per-test overhead in the worker.** The `isolated`, `flaky` and
+  `timeout` marker checks now skip pytest's walk up the node chain when the
+  test has no such marker, about 1µs per test.
 - **`-n auto` no longer runs a big suite of very fast tests on one worker.**
   Worker sizing allowed one worker per 2s of cached test time, and tests that
   finish in well under a millisecond are cached as 0s, so 10,000 of them got 1

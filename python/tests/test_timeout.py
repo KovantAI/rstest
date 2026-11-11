@@ -28,7 +28,11 @@ class FakeConn:
 
 def _item(nodeid, marker=None):
     """Duck-typed item. `marker` is what get_closest_marker('timeout') returns."""
-    return SimpleNamespace(nodeid=nodeid, get_closest_marker=lambda name: marker)
+    return SimpleNamespace(
+        nodeid=nodeid,
+        get_closest_marker=lambda name: marker,
+        keywords=() if marker is None else {"timeout"},
+    )
 
 
 def _plugin(monkeypatch, *, timeout=None, doctor=False):

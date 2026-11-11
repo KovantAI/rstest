@@ -61,6 +61,10 @@ class FakeItem:
     def get_closest_marker(self, name):
         return self._closest.get(name)
 
+    @property
+    def keywords(self):
+        return {*self._marks, *self._closest}
+
 
 def _digest(ids):
     return hashlib.sha256("\n".join(ids).encode()).hexdigest()

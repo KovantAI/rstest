@@ -31,6 +31,8 @@ from typing import Any
 
 import pytest
 
+from rstest_worker._internal.marks import closest_marker
+
 MARKER = "isolated"
 MARKER_HELP = (
     "isolated: rstest - run this test in a forked child of its worker, so "
@@ -168,7 +170,7 @@ class IsolatedTests:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_protocol(self, item, nextitem):
-        if item.get_closest_marker(MARKER) is None:
+        if closest_marker(item, MARKER) is None:
             return None
         if not hasattr(os, "fork"):
             if not self._warned:
