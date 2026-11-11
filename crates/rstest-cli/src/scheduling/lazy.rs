@@ -163,6 +163,7 @@ pub fn run_lazy_pool(
         // Lazy never reorders by flake history; quarantine only shapes the
         // -x / --maxfail count.
         quarantine,
+        before_start,
     } = cfg;
     // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
     let mut maxfail = maxfail;
@@ -178,6 +179,7 @@ pub fn run_lazy_pool(
     let fork_prewarmed = workers
         .first()
         .is_some_and(crate::scheduling::worker::Worker::is_forked);
+    before_start();
     let mut states = Vec::new();
     for (idx, worker) in workers.into_iter().enumerate() {
         let worker = start_into(worker, idx, args, &tx)?;

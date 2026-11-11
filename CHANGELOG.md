@@ -7,6 +7,10 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Every run starts its workers ~40ms sooner.** The run's git calls (`HEAD`
+  and the `-dirty` probe) finished before any worker was spawned. They now
+  overlap worker startup and still finish before any test runs: pluggy 0.22s
+  down to 0.18s, marshmallow 0.50s down to 0.46s on an M4 Max.
 - **`-n auto` no longer runs a big suite of very fast tests on one worker.**
   Worker sizing allowed one worker per 2s of cached test time, and tests that
   finish in well under a millisecond are cached as 0s, so 10,000 of them got 1

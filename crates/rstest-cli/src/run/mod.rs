@@ -10,6 +10,7 @@ mod monorepo;
 use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -268,6 +269,37 @@ struct RunStamp {
     head: Option<String>,
     history_commit: Option<String>,
     env_fp: String,
+}
+
+/// [`run_stamp`] running on a thread, joined on the first [`PendingStamp::wait`].
+/// Shared by reference with dispatch, which waits after spawning the workers
+/// and before sending any its session command.
+struct PendingStamp {
+    thread: Mutex<Option<std::thread::JoinHandle<RunStamp>>>,
+    stamp: OnceLock<RunStamp>,
+}
+
+impl PendingStamp {
+    fn spawn(f: impl FnOnce() -> RunStamp + Send + 'static) -> Self {
+        Self {
+            thread: Mutex::new(Some(std::thread::spawn(f))),
+            stamp: OnceLock::new(),
+        }
+    }
+
+    fn wait(&self) -> &RunStamp {
+        self.stamp.get_or_init(|| {
+            let t = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+            t.expect("run stamp thread joined once")
+                .join()
+                .unwrap_or_else(|e| std::panic::resume_unwind(e))
+        })
+    }
+
+    fn into_stamp(self) -> RunStamp {
+        self.wait();
+        self.stamp.into_inner().expect("run stamp joined")
+    }
 }
 
 fn run_stamp(scope: &Path, python: &Path, outputs: &[PathBuf], replay: bool) -> RunStamp {
@@ -667,21 +699,17 @@ pub(crate) fn execute_inner(
     // captured up front (it can't change mid-run) so a green run can record it.
     let since_green = cli.since_green && cli.changed.is_none();
     // The run's stamp (four git calls plus the env fingerprint's site-packages
-    // walk) on a thread, overlapping selection and setup. Joined before
-    // dispatch so the `-dirty` probe sees the tree before any test writes to
-    // it, or early under --since-green, whose selection reads head/env_fp.
-    let mut stamp_thread = Some({
+    // walk) on a thread, overlapping setup and worker startup. Dispatch joins it
+    // after spawning the workers but before sending any its session command,
+    // so the `-dirty` probe sees the tree before any test writes to it. Joined
+    // early under --since-green, whose selection reads head/env_fp.
+    let stamp = {
         let (scope, python) = (scope.clone(), python.clone());
         let outputs: Vec<PathBuf> = cli.run_outputs().into_iter().map(PathBuf::from).collect();
         let replay = pinned.is_some();
-        std::thread::spawn(move || run_stamp(&scope, &python, &outputs, replay))
-    });
-    let mut join_stamp = || {
-        stamp_thread
-            .take()
-            .map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+        PendingStamp::spawn(move || run_stamp(&scope, &python, &outputs, replay))
     };
-    let early_stamp = if since_green { join_stamp() } else { None };
+    let early_stamp = since_green.then(|| stamp.wait());
     // Narrow args to the affected test targets. Nothing affected => Break with
     // the sentinel exit code, returned up so main owns the single process::exit.
     // Resolved once: selection and the post-run diff-coverage gate share it, so
@@ -695,8 +723,8 @@ pub(crate) fn execute_inner(
         changed_base.clone(),
         since_green,
         // Read only under --since-green, which joined the stamp above.
-        early_stamp.as_ref().map_or(&None, |s| &s.head),
-        early_stamp.as_ref().map_or("", |s| &s.env_fp),
+        early_stamp.map_or(&None, |s| &s.head),
+        early_stamp.map_or("", |s| &s.env_fp),
         &mut sink,
     )? {
         ControlFlow::Continue(args) => args,
@@ -774,13 +802,6 @@ pub(crate) fn execute_inner(
                     .join("\n"),
                 max_pct: q.max_pct,
             });
-    let RunStamp {
-        head,
-        history_commit,
-        env_fp,
-    } = early_stamp
-        .or_else(join_stamp)
-        .expect("run stamp joined once");
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -793,10 +814,18 @@ pub(crate) fn execute_inner(
             lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
             durations: &duration_cache,
+            before_start: &|| {
+                stamp.wait();
+            },
         },
         pinned,
         &mut sink,
     )?;
+    let RunStamp {
+        head,
+        history_commit,
+        env_fp,
+    } = stamp.into_stamp();
 
     apply_quarantine(
         cli,
@@ -1545,6 +1574,9 @@ struct DispatchSelection<'a> {
     lazy: bool,
     quarantine: Option<&'a gates::Quarantine>,
     durations: &'a DurationCache,
+    /// Called once the workers are spawned, before any is sent its session
+    /// command: no test runs until it returns.
+    before_start: &'a dyn Fn(),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1564,6 +1596,7 @@ fn dispatch_run(
         lazy,
         quarantine,
         durations: duration_cache,
+        before_start,
     } = selection;
     let RunConfig {
         n,
@@ -1616,6 +1649,7 @@ fn dispatch_run(
         worker_env,
         fork_prewarm: cli.fork_pool,
         quarantine,
+        before_start,
     };
     let path = if passthrough {
         RunPath::Passthrough
@@ -1646,6 +1680,7 @@ fn dispatch_run(
             // console and a debugger uses Ctrl-C itself.
             let interrupts =
                 (path == RunPath::SingleWorker).then(|| SingleWorkerInterrupts::install(w.pid()));
+            before_start();
             w.send(&proto::Command::RunTests {
                 args: args.to_vec(),
             })?;

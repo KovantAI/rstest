@@ -75,11 +75,12 @@ pub(crate) fn git_stdout(args: &[&str]) -> Result<String> {
 
 /// [`git_stdout`], run with `dir` as git's working directory.
 pub(crate) fn git_stdout_in(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))?;
+    let out = crate::spawn::output_locked(
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir),
+    )
+    .with_context(|| format!("running git {}", args.join(" ")))?;
     if !out.status.success() {
         bail!(
             "git {} failed: {}",

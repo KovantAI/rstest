@@ -152,6 +152,10 @@ pub struct PoolConfig<'a> {
     /// would trip `-x`/`--maxfail` and then be forgiven post-run. The `-x` /
     /// `--maxfail` count skips its failures (see [`orchestrator::MaxfailCount`]).
     pub quarantine: Option<&'a orchestrator::Quarantine>,
+    /// Called once the initial pool is spawned, before any worker is sent its
+    /// session command: the run holds its git calls (the `-dirty` probe) until
+    /// here so they overlap worker startup yet finish before any test runs.
+    pub before_start: &'a dyn Fn(),
 }
 
 /// Everything the orchestrator loop produces from one pool run, handed back to
@@ -324,6 +328,7 @@ pub fn run_pool(
         worker_env,
         fork_prewarm,
         quarantine,
+        before_start,
     } = cfg;
     // Widened by the designate's CollectionDone when `-x`/`--maxfail` comes
     // from ini `addopts` / PYTEST_ADDOPTS, which the argv parse can't see.
@@ -342,6 +347,7 @@ pub fn run_pool(
     let fork_prewarmed = workers
         .first()
         .is_some_and(crate::scheduling::worker::Worker::is_forked);
+    before_start();
     let mut states = Vec::new();
     for (idx, worker) in workers.into_iter().enumerate() {
         let worker = start_into(worker, idx, args, &tx)?;

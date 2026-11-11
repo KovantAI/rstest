@@ -759,9 +759,13 @@ impl Worker {
 
         let mut command =
             build_worker_command(python, worker, io, env, cmd.read.raw(), evt.write.raw());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning worker: {}", python.display()))?;
+        // Under the spawn lock: see `crate::spawn` (the run stamp's git calls
+        // run concurrently, and their pipes must not leak into the worker).
+        let mut child = {
+            let _held = crate::spawn::lock();
+            command.spawn()
+        }
+        .with_context(|| format!("spawning worker: {}", python.display()))?;
         let startup = seen.map(|seen| Arc::new(StartupStderr::new(Arc::clone(seen))));
         let stderr = child.stderr.take().map(|e| StderrTail::capture(e, startup));
 
@@ -1321,9 +1325,11 @@ impl Worker {
             .stdout(std::process::Stdio::null())
             .stdin(std::process::Stdio::null());
 
-        let mut zygote = command
-            .spawn()
-            .with_context(|| format!("spawning worker zygote: {}", python.display()))?;
+        let mut zygote = {
+            let _held = crate::spawn::lock();
+            command.spawn()
+        }
+        .with_context(|| format!("spawning worker zygote: {}", python.display()))?;
 
         // Close the child ends in the parent so EOF detection works and no
         // endpoint leaks; the parent ends become owned Files below.

@@ -32,6 +32,7 @@ mod select;
 mod shardverify;
 mod since_green;
 mod skills;
+mod spawn;
 #[cfg(test)]
 mod test_env;
 mod text;

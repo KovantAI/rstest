@@ -408,10 +408,9 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 /// unborn branch). `--since-green` needs a namable commit to record; without
 /// one it degrades to a full run and records nothing.
 pub fn head_sha() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
+    let out =
+        crate::spawn::output_locked(std::process::Command::new("git").args(["rev-parse", "HEAD"]))
+            .ok()?;
     if !out.status.success() {
         return None;
     }

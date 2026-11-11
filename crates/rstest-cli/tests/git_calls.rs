@@ -1,11 +1,13 @@
 //! End-to-end guard: a run's git calls (HEAD, the `-dirty` probe) finish
-//! before the first test starts. They run on a background thread while setup
-//! continues; joined before dispatch, none can still be in flight while a test
-//! runs (where it would race the test's own writes to the tree).
+//! before the first test starts, yet overlap worker startup. They run on a
+//! background thread joined after the workers spawn but before any is sent its
+//! session command, so none can still be in flight while a test runs (where it
+//! would race the test's own writes to the tree).
 //!
 //! A `git` shim on PATH logs each call's start and end into a shared log, and
 //! sleeps so a call that escapes the join is still running when the test body
-//! logs its own start/end lines there.
+//! logs its own start/end lines there. A `sitecustomize` logs each worker
+//! interpreter's start there too.
 //!
 //! Needs a python with pytest and the rstest worker; skips cleanly otherwise.
 //! Local: `RSTEST_TEST_VENV=/path/to/venv cargo test -p rstest-cli --test git_calls`
@@ -34,12 +36,12 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
-#[test]
-fn no_git_call_in_flight_while_a_test_runs() {
-    let Some(venv) = common::pytest_env("pytest, rstest_worker") else {
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("rstest-git-calls-it-{}", std::process::id()));
+/// Run `rstest <args>` on a one-test repo with the logging `git` shim and
+/// worker `sitecustomize`, and return the shared log's lines. None = skipped.
+fn run_logged(tag: &str, args: &[&str]) -> Option<Vec<String>> {
+    let venv = common::pytest_env("pytest, rstest_worker")?;
+    let dir =
+        std::env::temp_dir().join(format!("rstest-git-calls-it-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("calls.log");
@@ -77,6 +79,18 @@ fn no_git_call_in_flight_while_a_test_runs() {
         .unwrap()
         .success();
     assert!(ok, "write git shim");
+    // Workers run `-m rstest_worker`; the interpreter probe runs `-c`, so it
+    // logs nothing (and is disk-cached anyway).
+    let site = dir.join("site");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(
+        site.join("sitecustomize.py"),
+        "import os, sys\n\
+         if 'rstest_worker' in getattr(sys, 'orig_argv', []):\n    \
+         with open(os.environ['CALLS_LOG'], 'a') as f:\n        \
+         f.write('py-start\\n')\n",
+    )
+    .unwrap();
 
     let mut path = vec![bin];
     if let Some(v) = &venv {
@@ -86,11 +100,15 @@ fn no_git_call_in_flight_while_a_test_runs() {
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rstest"));
-    cmd.args(["-n", "2", "-q"])
+    cmd.args(args)
+        .arg("-q")
         .current_dir(&dir)
         .env("PATH", std::env::join_paths(path).unwrap())
         .env("CALLS_LOG", &log)
-        .env("PYTHONPATH", common::pythonpath_with_worker(None));
+        .env(
+            "PYTHONPATH",
+            common::pythonpath_with_worker(Some(site.into())),
+        );
     if let Some(v) = &venv {
         cmd.env("VIRTUAL_ENV", v);
     }
@@ -107,6 +125,14 @@ fn no_git_call_in_flight_while_a_test_runs() {
         .lines()
         .map(str::to_owned)
         .collect();
+    std::fs::remove_dir_all(&dir).ok();
+    Some(lines)
+}
+
+fn assert_git_done_before_test_but_overlapping_startup(tag: &str, args: &[&str]) {
+    let Some(lines) = run_logged(tag, args) else {
+        return;
+    };
     let at = |m: &str| {
         lines
             .iter()
@@ -129,5 +155,25 @@ fn no_git_call_in_flight_while_a_test_runs() {
         lines[start..end].iter().all(|l| !l.starts_with("git")),
         "git called while the test ran: {lines:?}"
     );
-    std::fs::remove_dir_all(&dir).ok();
+    // Workers boot (import pytest, ~0.1s) while git runs, not after it.
+    let last_git_end = before.iter().rposition(|l| l == "git-end").unwrap();
+    assert!(
+        at("py-start") < last_git_end,
+        "workers spawned only after every git call: {lines:?}"
+    );
+}
+
+#[test]
+fn single_worker_git_overlaps_startup_and_ends_before_tests() {
+    assert_git_done_before_test_but_overlapping_startup("single", &["-n", "1"]);
+}
+
+#[test]
+fn pool_git_overlaps_startup_and_ends_before_tests() {
+    assert_git_done_before_test_but_overlapping_startup("pool", &["-n", "2", "--collect", "full"]);
+}
+
+#[test]
+fn lazy_pool_git_overlaps_startup_and_ends_before_tests() {
+    assert_git_done_before_test_but_overlapping_startup("lazy", &["-n", "2", "--collect", "lazy"]);
 }
