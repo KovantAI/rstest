@@ -7,6 +7,9 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--fork-pool` runs end sooner.** Waiting for forked workers to exit
+  checked every 10ms; it now starts at 0.5ms and backs off, so a worker that
+  exits at once is noticed within ~1ms instead of 10ms.
 - **`-n auto` no longer runs a big suite of very fast tests on one worker.**
   Worker sizing allowed one worker per 2s of cached test time, and tests that
   finish in well under a millisecond are cached as 0s, so 10,000 of them got 1
