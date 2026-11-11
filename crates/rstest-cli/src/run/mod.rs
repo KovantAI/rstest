@@ -449,6 +449,7 @@ fn resolve_run_config(
         doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
+        dead_master_scan: cli.warn_on_dead_master_path,
         send_ids: false,
         debug_port: cli.debug.clone(),
         // Ship captured stdout/stderr on every report (not just failures) when a

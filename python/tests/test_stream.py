@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from rstest_worker._internal import stream
+from rstest_worker._internal.plugincompat import PROVISIONED_KEYS
 from rstest_worker._internal.stream import StreamPlugin
 
 
@@ -520,42 +521,22 @@ class _WiConfig:
         return None
 
 
-# Every `workerinput[<key>]` a master-gated third-party plugin reads *by direct
-# subscript* on its worker branch — the dead-master-path crash class. With
-# pytest-xdist uninstalled (the adopted state) no master ever stages these, so a
-# pool worker KeyErrors at collection unless _build_workerinput seeds it. Audited
-# against the installed gate-venv plugins (2026-09-17); grouped by who provisions
-# the key. If a plugin adds a new key, extend the audit AND the seed together —
-# this guard fails first so the gap can't ship silently.
-_BUILD_SEEDED_KEYS = frozenset(
-    {
-        "randomly_seed",  # pytest-randomly
-        "random_order_seed",  # pytest-random-order
-        "workerid",  # pytest-cov + generic "am I a worker?" sniffers
-        "workercount",  # pytest-cov, xdist-compat sniffers
-        "mainargv",  # xdist-compat prog-name reconstruction
-        "testrun_uid",  # shared run id (xdist testrun_uid contract)
-        "testrunuid",  # same id, the spelling xdist's own `testrun_uid` fixture reads
-        "cov_master_host",  # pytest-cov worker mode
-        "cov_master_topdir",  # pytest-cov worker mode
-    }
+# Keys in PROVISIONED_KEYS that another mechanism owns, not _build_workerinput.
+_OTHER_MECHANISM_KEYS = frozenset(
+    {"server_port", "mypy_config_stash_serialized", "follower_ident", "sock_port", "statusdb_token"}
 )
-# Crash-class keys NOT seeded here because another mechanism owns them — listed
-# so the audit is exhaustive, not to assert on:
-#   server_port      -> _seed_pytest_retry (stands up pytest-retry's server)
-#   follower_ident   -> _XdistNodeShim configure_node emulation (sqlalchemy)
-#   sock_port,       -> pytest-rerunfailures, unregistered wholesale
-#   statusdb_token       (_neutralize_rerunfailures)
 
 
-def test_build_workerinput_seeds_every_direct_seed_crash_key(monkeypatch):
+def test_build_workerinput_seeds_exactly_the_provisioned_keys(monkeypatch):
+    # Two-way guard on the dead-master-path key list: every key the detector
+    # treats as provisioned really is seeded (no-xdist KeyError otherwise), and
+    # every seeded key is known to the detector (else it flags a safe read).
     monkeypatch.setenv("RSTEST_WORKER_COUNT", "4")
     monkeypatch.setenv("RSTEST_RUN_UID", "abc123")
     config = _WiConfig()
     StreamPlugin._build_workerinput(config, "gw0")
     assert config.workerinput is not None
-    missing = _BUILD_SEEDED_KEYS - set(config.workerinput)
-    assert not missing, f"unseeded dead-master-path keys (no-xdist KeyError risk): {missing}"
+    assert set(config.workerinput) == PROVISIONED_KEYS - _OTHER_MECHANISM_KEYS
     # workeroutput must exist too — plugins (pytest-cov) write into it.
     assert config.workeroutput == {}
 

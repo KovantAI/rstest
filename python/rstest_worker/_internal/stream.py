@@ -467,6 +467,10 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
+        if os.environ.get("RSTEST_DEAD_MASTER_SCAN"):
+            from rstest_worker._internal.deadmaster import warn_dead_master
+
+            warn_dead_master(config)
         # junit (xml.etree) and netguard (socket, ipaddress) cost ~6ms to
         # import; load them only when the orchestrator turned them on.
         if os.environ.get("RSTEST_JUNITXML"):

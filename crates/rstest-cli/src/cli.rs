@@ -253,6 +253,13 @@ pub struct Cli {
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
 
+    /// Opt-in: scan installed plugins and loaded conftests for code that only
+    /// works on an xdist controller (rstest has none) and warn about the ones
+    /// that will crash or silently do nothing at `-n >= 2`. `rstest try` turns
+    /// it on for its rstest run.
+    #[arg(long = "warn-on-dead-master-path")]
+    pub(crate) warn_on_dead_master_path: bool,
+
     /// Internal: turn on the workers' cpu/fixture instrumentation without the
     /// doctor report. Passed only by a parent rstest (migrate-check's
     /// classifier runs); a flag rather than an env var so a user's shell or CI
@@ -840,6 +847,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--fork-pool",
     "--watch",
     "--fail-on-leak",
+    "--warn-on-dead-master-path",
     "--instrument-workers",
     "--reruns-only-known-flaky",
     "--since-green",
@@ -1958,6 +1966,16 @@ mod tests {
                 max_age: Some(ref d),
             }) if d == "30d"
         ));
+    }
+
+    #[test]
+    fn warn_on_dead_master_path_is_an_owned_flag() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (own, session) = split_args(v(&["--warn-on-dead-master-path", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--warn-on-dead-master-path"]));
+        assert_eq!(session, v(&["tests/"]));
+        assert!(Cli::parse_from(&own).warn_on_dead_master_path);
+        assert!(!Cli::parse_from(["rstest"]).warn_on_dead_master_path);
     }
 
     #[test]
