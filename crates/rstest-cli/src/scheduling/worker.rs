@@ -361,7 +361,12 @@ fn probe_by_signal(pid: u32) -> Probe {
 #[cfg(unix)]
 const ZYGOTE_REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Poll interval while waiting for a reparented worker to disappear.
+/// Poll interval while waiting for a reparented worker to disappear: starts at
+/// the first value and doubles up to the second, so a worker that exits within
+/// a few ms of Shutdown (the common case) is noticed within ~1ms, while a slow
+/// teardown still costs only a status check every 10ms.
+#[cfg(unix)]
+const REPARENTED_POLL_FIRST: std::time::Duration = std::time::Duration::from_micros(500);
 #[cfg(unix)]
 const REPARENTED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 /// Upper bound on waiting for a reparented worker to exit after `Shutdown`. A
@@ -1079,6 +1084,7 @@ fn wait_reparented(slot: &mut Option<Tracked>, timeout: std::time::Duration) -> 
         return true;
     };
     let deadline = std::time::Instant::now() + timeout;
+    let mut pause = REPARENTED_POLL_FIRST;
     loop {
         // Only `waitpid` a zombie proven to be this worker: blindly reaping the
         // pid could collect an unrelated child of ours that inherited it after
@@ -1097,7 +1103,8 @@ fn wait_reparented(slot: &mut Option<Tracked>, timeout: std::time::Duration) -> 
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(REPARENTED_POLL);
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(REPARENTED_POLL);
     }
 }
 
@@ -2560,8 +2567,9 @@ mod tests {
                 .expect("send shutdown");
             worker.reap();
 
+            // A zombie init has yet to reap counts as exited (see above).
             assert!(
-                !alive(pid),
+                !matches!(super::probe(pid), super::Probe::Alive { .. }),
                 "forked worker pid {pid} still alive after reap"
             );
             assert!(
@@ -2598,8 +2606,10 @@ mod tests {
                 "reap waited for a live worker instead of killing it at once"
             );
 
+            // Not running: gone, or a zombie launchd/init has yet to reap
+            // (`reap` returns as soon as the kill lands, before the reaper).
             assert!(
-                !alive(pid),
+                !matches!(super::probe(pid), super::Probe::Alive { .. }),
                 "forked worker pid {pid} survived the SIGKILL fallback"
             );
             assert!(matches!(worker.proc, super::Proc::Reparented(None)));
@@ -2628,7 +2638,10 @@ mod tests {
             // exit on its own within the (zero) timeout.
             worker.proc.wait_or_kill(std::time::Duration::ZERO);
 
-            assert!(!alive(pid), "stuck forked worker {pid} left running");
+            assert!(
+                !matches!(super::probe(pid), super::Probe::Alive { .. }),
+                "stuck forked worker {pid} left running"
+            );
             assert!(matches!(worker.proc, super::Proc::Reparented(None)));
         });
     }
@@ -2816,6 +2829,51 @@ mod tests {
         let pid = zombie_child();
         assert_eq!(super::Tracked::capture(pid), None);
         assert!(super::try_reap(pid), "clean up the test zombie");
+    }
+
+    /// A reparented worker that exits within a few ms of Shutdown is noticed
+    /// within a few ms, not after a fixed 10ms sleep: on a fork pool, wind-down
+    /// pays that sleep at the end of every run. The clock starts once `cat` is
+    /// provably running and is told to exit, so process startup (several ms on
+    /// a loaded CI runner) stays out of the measurement.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn wait_reparented_notices_a_quick_exit_quickly() {
+        let mut waits: Vec<std::time::Duration> = (0..20)
+            .map(|_| {
+                let mut child = Command::new("cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn cat");
+                let mut stdin = child.stdin.take().expect("cat stdin");
+                std::io::Write::write_all(&mut stdin, b"x").expect("write to cat");
+                let mut echo = [0u8; 1];
+                child
+                    .stdout
+                    .as_mut()
+                    .expect("cat stdout")
+                    .read_exact(&mut echo)
+                    .expect("cat echoes");
+                let mut slot = super::Tracked::capture(child.id());
+                assert!(slot.is_some(), "cat is running");
+                let t = std::time::Instant::now();
+                drop(stdin); // EOF: cat exits at once
+                assert!(super::wait_reparented(
+                    &mut slot,
+                    std::time::Duration::from_secs(5)
+                ));
+                let waited = t.elapsed();
+                drop(child); // already reaped by wait_reparented (it was ours)
+                waited
+            })
+            .collect();
+        waits.sort();
+        let median = waits[waits.len() / 2];
+        assert!(
+            median < std::time::Duration::from_millis(5),
+            "median wait {median:?} for a process exiting at once: {waits:?}"
+        );
     }
 
     /// A worker already reaped when first tracked leaves nothing to track.

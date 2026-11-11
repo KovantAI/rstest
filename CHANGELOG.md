@@ -7,6 +7,9 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--fork-pool` runs end sooner.** Waiting for forked workers to exit
+  checked every 10ms; it now starts at 0.5ms and backs off, so a worker that
+  exits at once is noticed within ~1ms instead of 10ms.
 - **Less per-test overhead in the worker.** The `isolated`, `flaky` and
   `timeout` marker checks now skip pytest's walk up the node chain when the
   test has no such marker, about 1µs per test.
