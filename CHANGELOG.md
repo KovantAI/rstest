@@ -7,6 +7,9 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Less per-test overhead in the worker.** The `isolated`, `flaky` and
+  `timeout` marker checks now skip pytest's walk up the node chain when the
+  test has no such marker, about 1µs per test.
 - **Each worker starts ~8ms faster.** It no longer imports the junit writer,
   the `--doctor` network recorder or the message schema unless the run uses
   them, and the plugin pin check skips importing `packaging` when no plugin
