@@ -87,6 +87,7 @@ from gates.monorepo import (
 from gates.personas import gate_personas
 from gates.plugins import (
     gate_crash_handling,
+    gate_dead_master_path_warning,
     gate_doctest_modules,
     gate_interpreter_probe_cache_heals_after_deps,
     gate_looponfail_with_xdist,
@@ -247,6 +248,7 @@ def main():
         gate_pytest_mypy,
         gate_report_aggregators_silent,
         gate_silent_master_warning,
+        gate_dead_master_path_warning,
         gate_pytest_random_order,
         gate_pytest_httpserver,
         gate_pytest_bdd,

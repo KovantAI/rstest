@@ -45,6 +45,38 @@ fn time_run(mut cmd: std::process::Command, record_path: &Path) -> TimedRun {
     }
 }
 
+/// The rstest leg of `rstest try`: `-n auto`, first attempts only, with the
+/// dead-master-path scan on. stdout is discarded; the caller routes stderr.
+fn rstest_leg(exe: &Path, python: &Path, args: &[String], rs_json: &Path) -> std::process::Command {
+    let mut rs = std::process::Command::new(exe);
+    // Same interpreter as the pytest baseline: without it the child re-runs
+    // discovery and, outside an activated venv, may find none.
+    rs.arg("--python")
+        .arg(python)
+        .arg("-n")
+        .arg("auto")
+        // A passing rerun would hide a failure pytest reports (see
+        // `run_session`): parity compares first attempts.
+        .args(["--reruns", "0"])
+        .arg("--warn-on-dead-master-path")
+        .args(args)
+        .arg(MAXFAIL_LIFT)
+        .arg("--report-json")
+        .arg(rs_json)
+        .args(["-q", "--output", "dots"])
+        .stdout(std::process::Stdio::null());
+    rs
+}
+
+/// The dead-master-path warnings in the rstest leg's stderr (every one of
+/// them names the xdist controller).
+fn dead_master_warnings(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("rstest: warning: ") && l.contains("xdist controller"))
+        .collect()
+}
+
 /// The `collect_errors` list of a recorder / report-json document.
 fn collect_errors(doc: &serde_json::Value) -> Vec<String> {
     doc.get("collect_errors")
@@ -224,26 +256,18 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
     }
 
     sink.warn("rstest try: running it under rstest (-n auto)…");
-    let exe = std::env::current_exe()?;
-    let mut rs = std::process::Command::new(exe);
-    // Same interpreter as the pytest baseline: without it the child re-runs
-    // discovery and, outside an activated venv, may find none.
-    rs.arg("--python")
-        .arg(python)
-        .arg("-n")
-        .arg("auto")
-        // A passing rerun would hide a failure pytest reports (see
-        // `run_session`): parity compares first attempts.
-        .args(["--reruns", "0"])
-        .args(args)
-        .arg(MAXFAIL_LIFT)
-        .arg("--report-json")
-        .arg(&rs_json)
-        .args(["-q", "--output", "dots"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let rs_err = tmpdir.join("try-rstest.stderr");
+    let mut rs = rstest_leg(&std::env::current_exe()?, python, args, &rs_json);
+    // Kept (not shown live) to pick out the dead-master-path warnings below.
+    rs.stderr(
+        std::fs::File::create(&rs_err)
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null()),
+    );
     let rs_run = time_run(rs, &rs_json);
     let _ = std::fs::remove_file(&rs_json);
+    let rs_stderr = std::fs::read_to_string(&rs_err).unwrap_or_default();
+    let _ = std::fs::remove_file(&rs_err);
     let rs_wall = rs_run.wall;
 
     let Some(rs_out) = rs_run.outcomes.as_ref() else {
@@ -305,6 +329,13 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
             None => sink.out_line(&format!("  💸 saves   {} per run", fmt_secs(saved))),
         }
     }
+    let dead = dead_master_warnings(&rs_stderr);
+    if !dead.is_empty() {
+        sink.out_line("  ⚠ plugins that expect an xdist controller:");
+        for line in dead {
+            sink.out_line(&format!("    {line}"));
+        }
+    }
     sink.out_line("================================================");
 
     if py_code != 0 {
@@ -330,8 +361,8 @@ pub fn run_try(python: &Path, args: &[String], sink: &mut Sink) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_errors, commits_per_day, compute_parity, fmt_secs, not_comparable, red_note,
-        workers_clause,
+        collect_errors, commits_per_day, compute_parity, dead_master_warnings, fmt_secs,
+        not_comparable, red_note, rstest_leg, workers_clause,
     };
     use crate::migrate::{Outcomes, Phase, Rec};
 
@@ -394,6 +425,31 @@ mod tests {
         let doc = serde_json::json!({"collect_errors": ["a.py", "b.py"], "tests": {}});
         assert_eq!(collect_errors(&doc), vec!["a.py", "b.py"]);
         assert!(collect_errors(&serde_json::json!({"tests": {}})).is_empty());
+    }
+
+    #[test]
+    fn rstest_leg_turns_on_the_dead_master_scan() {
+        let cmd = rstest_leg(
+            std::path::Path::new("rstest"),
+            std::path::Path::new("python3"),
+            &["tests/".to_string()],
+            std::path::Path::new("r.json"),
+        );
+        assert!(cmd.get_args().any(|a| a == "--warn-on-dead-master-path"));
+    }
+
+    #[test]
+    fn dead_master_warnings_keep_only_the_scan_lines() {
+        let err = "rstest: warning: pytest-foo 1.0 reads workerinput[\"k\"], which only an \
+                   xdist controller sets; ...\n\
+                   rstest: warning: pytest-bar 2 requires pytest<8, ...\n\
+                   Traceback mentioning an xdist controller\n\
+                   rstest: warning: conftest.py:3 runs only when there is no workerinput \
+                   (the xdist controller); ...\n";
+        let got = dead_master_warnings(err);
+        assert_eq!(got.len(), 2);
+        assert!(got[0].contains("pytest-foo"));
+        assert!(got[1].starts_with("rstest: warning: conftest.py:3"));
     }
 
     #[test]

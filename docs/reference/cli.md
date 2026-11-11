@@ -78,6 +78,7 @@ means none.
 | [`--doctor-md PATH`](#-doctor-md-path) | write the diagnosis as markdown | none | | |
 | [`--doctor-fail-on COND`](#-doctor-fail-on-cond) | fail on a doctor metric threshold | none | | |
 | [`--fail-on-leak`](#-fail-on-leak) | fail on a leaked thread or fd | off | | |
+| [`--warn-on-dead-master-path`](#-warn-on-dead-master-path) | warn about plugins that expect an xdist controller (opt-in) | off | | |
 | [`--cov-diff-fail-under PCT`](#-cov-diff-fail-under-pct) | fail on low diff coverage | none | | |
 | [`--cov-diff-json PATH`](#-cov-diff-json-path) | write diff coverage as JSON | none | | |
 | [`--output STYLE`](#output) | terminal output style | `bar` on a TTY, else `dots`; pytest's own in single-worker mode | `output` | |
@@ -789,6 +790,34 @@ only the test outcome, so a green session that fails the gate still shows
 
 `--fail-on-leak` and `--doctor-fail-on` are command-line only (neither is a
 `[tool.rstest]` key): put them in the CI step that invokes rstest.
+
+### `--warn-on-dead-master-path`
+
+**Opt-in.** Scan the installed plugins and the loaded conftests for code that
+only works on an xdist controller, which rstest does not run, and print one
+warning per plugin or conftest before the run starts. Two shapes are reported:
+
+- **crash**: a direct `workerinput["k"]` read of a key rstest does not
+  provision. It will `KeyError` at `-n >= 2`.
+- **silent**: a branch gated on "there is no `workerinput`" (the controller)
+  that registers a plugin, writes a file or schedules session-end work, or an
+  xdist controller hook rstest never calls. That work never happens at
+  `-n >= 2`.
+
+```console
+$ rstest -n auto --warn-on-dead-master-path
+rstest: warning: tests/conftest.py:12 reads workerinput["db_port"], which only an
+xdist controller sets; it will KeyError at -n >= 2. Use config.workerinput.get("k")
+with a fallback, or set the value in a pytest_configure_node hook (rstest calls it
+per worker). See docs/guides/plugins.md#plugins-that-expect-an-xdist-controller
+```
+
+Plugins in the [top-100 matrix](top-100-plugins.md) are not scanned: their
+behavior is already handled or documented there. Defensive reads
+(`workerinput.get("k")`, `getattr(config, "workerinput", None)`), keys the
+same plugin or conftest sets itself, and branches that only paint the terminal
+are not reported. [`rstest try`](cli-commands.md#try) turns the scan on for its rstest
+run and lists the findings in its summary. Command-line only.
 
 ## Coverage
 

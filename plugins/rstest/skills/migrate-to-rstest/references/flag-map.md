@@ -50,6 +50,24 @@ installed.
   doesn't hold. If the order matters, use `-n 0`,
   `--dist loadfile`, or fix the dependency.
 
+## Unlisted plugins
+
+For a plugin or conftest outside the lists above, run
+`rstest -n auto --warn-on-dead-master-path` (opt-in; `rstest try` turns it on).
+It reads their code and warns once per plugin or conftest that expects an xdist
+controller, which rstest doesn't run:
+
+- **reads `workerinput["k"]` ... will KeyError**: a conftest should use
+  `config.workerinput.get("k")` with a fallback, or set the key in its own
+  `pytest_configure_node` (rstest calls it per worker). A third-party plugin:
+  run it at `-n 0` or disable it in parallel runs with `-p no:<name>`.
+- **does its work only on the xdist controller / runs only when there is no
+  workerinput**: the branch never runs at `-n >= 2`, so its report or file is
+  missing. Use rstest's native `--junitxml` / `--report-json` / `--html` /
+  `--cov`, move the work to a per-worker hook, or keep a separate `-n 0` pass.
+
+No warning doesn't prove a plugin is parallel-safe: confirm with `rstest try`.
+
 ## `[tool.rstest]` config (pyproject.toml)
 
 Set defaults so contributors get the right behavior without remembering flags:
