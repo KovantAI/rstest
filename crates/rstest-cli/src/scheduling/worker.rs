@@ -2833,15 +2833,32 @@ mod tests {
 
     /// A reparented worker that exits within a few ms of Shutdown is noticed
     /// within a few ms, not after a fixed 10ms sleep: on a fork pool, wind-down
-    /// pays that sleep at the end of every run.
+    /// pays that sleep at the end of every run. The clock starts once `cat` is
+    /// provably running and is told to exit, so process startup (several ms on
+    /// a loaded CI runner) stays out of the measurement.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn wait_reparented_notices_a_quick_exit_quickly() {
         let mut waits: Vec<std::time::Duration> = (0..20)
             .map(|_| {
-                let child = Command::new("true").spawn().expect("spawn true");
+                let mut child = Command::new("cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("spawn cat");
+                let mut stdin = child.stdin.take().expect("cat stdin");
+                std::io::Write::write_all(&mut stdin, b"x").expect("write to cat");
+                let mut echo = [0u8; 1];
+                child
+                    .stdout
+                    .as_mut()
+                    .expect("cat stdout")
+                    .read_exact(&mut echo)
+                    .expect("cat echoes");
                 let mut slot = super::Tracked::capture(child.id());
+                assert!(slot.is_some(), "cat is running");
                 let t = std::time::Instant::now();
+                drop(stdin); // EOF: cat exits at once
                 assert!(super::wait_reparented(
                     &mut slot,
                     std::time::Duration::from_secs(5)
