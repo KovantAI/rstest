@@ -62,6 +62,47 @@ def test_readable_falls_back_to_select_without_poll(monkeypatch):
         os.close(r)
 
 
+def test_readable_uses_select_not_poll_for_low_fds(monkeypatch):
+    # poll() costs ~20x select() on macOS, and this runs before every test.
+    import select
+
+    def no_poll():
+        raise AssertionError("poll() used for a low fd")
+
+    monkeypatch.setattr(select, "poll", no_poll, raising=False)
+    r, w = os.pipe()
+    try:
+        assert protocol._readable(r) is False
+        os.write(w, b"x")
+        assert protocol._readable(r) is True
+    finally:
+        os.close(w)
+        os.close(r)
+
+
+@pytest.mark.skipif(not hasattr(__import__("select"), "poll"), reason="needs select.poll")
+def test_readable_uses_poll_above_the_select_limit():
+    # select() raises ValueError for an fd >= FD_SETSIZE, which would read as
+    # "never readable"; poll() must take over there.
+    resource = pytest.importorskip("resource")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    high = protocol._SELECT_FD_LIMIT + 10
+    if soft <= high:
+        if hard != resource.RLIM_INFINITY and hard <= high:
+            pytest.skip("open-file limit too low for a high fd")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (high + 1, hard))
+    r, w = os.pipe()
+    try:
+        os.dup2(r, high)
+        assert protocol._readable(high) is False
+        os.write(w, b"x")
+        assert protocol._readable(high) is True
+    finally:
+        for fd in (high, w, r):
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
 def test_readable_on_windows_peeks_the_pipe(monkeypatch):
     from types import SimpleNamespace
 

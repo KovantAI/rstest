@@ -74,6 +74,21 @@ pub(crate) fn sweep() {
     sweep_in(&std::env::temp_dir(), std::process::id(), UNLOCKED_GRACE);
 }
 
+/// [`sweep`] on a thread, joined when the returned guard drops.
+pub(crate) fn sweep_in_background() -> SweepGuard {
+    SweepGuard(Some(std::thread::spawn(sweep)))
+}
+
+pub(crate) struct SweepGuard(Option<std::thread::JoinHandle<()>>);
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 fn sweep_in(root: &Path, own_pid: u32, grace: Duration) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;

@@ -10,6 +10,22 @@ between 0.x releases and are listed here.
 - **`--fork-pool` runs end sooner.** Waiting for forked workers to exit
   checked every 10ms; it now starts at 0.5ms and backs off, so a worker that
   exits at once is noticed within ~1ms instead of 10ms.
+- **Each worker starts ~8ms faster.** It no longer imports the junit writer,
+  the `--doctor` network recorder or the message schema unless the run uses
+  them, and the plugin pin check skips importing `packaging` when no plugin
+  requires pytest.
+- **Parallel runs start their first tests sooner.** The first worker no longer
+  computes every test's source location and marker names after collection
+  (only `--collect-only --report-json` uses them): ~12ms per 1,000 tests that
+  every worker was waiting on.
+- **Less per-test overhead in pool workers on macOS.** The check for a
+  pending command before each test now uses `select()` instead of `poll()`,
+  which costs ~6µs per call on macOS (0.3µs now).
+- **Less wait at both ends of a run.** Clearing temp folders left by killed
+  runs now happens in the background instead of before the run starts (it
+  lists the whole temp dir), and the duration, flake and history saves now
+  overlap worker shutdown instead of waiting for it. rstest still waits for
+  both before it exits.
 - **`-n auto` no longer runs a big suite of very fast tests on one worker.**
   Worker sizing allowed one worker per 2s of cached test time, and tests that
   finish in well under a millisecond are cached as 0s, so 10,000 of them got 1

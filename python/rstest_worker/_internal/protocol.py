@@ -12,10 +12,13 @@ so the worker is PYTHONPATH-injectable into any interpreter with zero installs.
 from __future__ import annotations
 
 import os
+import select
 from collections.abc import Iterator
-from typing import Literal, cast, overload
+from typing import TYPE_CHECKING, Literal, cast, overload
 
-from rstest_worker._internal import messages as m
+if TYPE_CHECKING:
+    # Annotations only: the TypedDict schema costs ~2ms to import.
+    from rstest_worker._internal import messages as m
 from rstest_worker._internal import mpack
 
 # Upper bound on a single buffered frame. Without it a desynced stream (a stray
@@ -26,6 +29,10 @@ from rstest_worker._internal import mpack
 # on large monorepos.
 _MAX_FRAME_BYTES = 512 * 1024 * 1024
 
+# select() takes only fds below FD_SETSIZE (1024 on Linux and macOS) and raises
+# ValueError above it; poll() has no such limit.
+_SELECT_FD_LIMIT = 1024
+
 
 def _readable(fd: int) -> bool:
     """Whether a read on `fd` would return at once (data or EOF). False when
@@ -33,13 +40,13 @@ def _readable(fd: int) -> bool:
     try:
         if os.name == "nt":
             return _peek_pipe(fd)
-        import select
-
-        if hasattr(select, "poll"):
-            poller = select.poll()
-            poller.register(fd, select.POLLIN)
-            return bool(poller.poll(0))
-        return bool(select.select([fd], [], [], 0)[0])
+        # Checked before every test: select() is ~20x cheaper than poll() on
+        # macOS (0.3us vs 6.7us), so poll() is only for fds select() can't take.
+        if fd < _SELECT_FD_LIMIT or not hasattr(select, "poll"):
+            return bool(select.select([fd], [], [], 0)[0])
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        return bool(poller.poll(0))
     except (OSError, ValueError, AttributeError):
         return False
 

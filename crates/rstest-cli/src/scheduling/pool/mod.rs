@@ -195,6 +195,20 @@ pub struct PoolOutcome {
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
+    /// Workers already sent `Shutdown` but not yet reaped, so their teardown
+    /// (atexit handlers, coverage data files) overlaps the post-run saves.
+    /// Reap with [`PoolOutcome::reap_workers`] before reading anything they
+    /// write on exit, and before the run returns.
+    pub exiting: Vec<crate::scheduling::worker::Worker>,
+}
+
+impl PoolOutcome {
+    /// Wait for every [`PoolOutcome::exiting`] worker to exit.
+    pub fn reap_workers(&mut self) {
+        for w in self.exiting.drain(..) {
+            let _ = w.wait();
+        }
+    }
 }
 
 /// The `--dist` name for a mode, for the replay journal (inverse of the
@@ -1465,15 +1479,12 @@ pub fn run_pool(
         }
     }
 
-    // Parallel wind-down: send every shutdown first, THEN wait. Waiting
-    // one-by-one serializes N interpreter teardowns: the visible pause
-    // between the last test and the summary on small suites.
-    let mut workers: Vec<_> = states.into_iter().map(|s| s.worker).collect();
-    for w in &mut workers {
+    // Parallel wind-down: send every shutdown now; the caller reaps them
+    // after the post-run saves, so N interpreter teardowns overlap each other
+    // and that work instead of pausing between the last test and the summary.
+    let mut exiting: Vec<_> = states.into_iter().map(|s| s.worker).collect();
+    for w in &mut exiting {
         let _ = w.send(&proto::Command::Shutdown);
-    }
-    for w in workers {
-        let _ = w.wait();
     }
     // Every worker able to run the rest died for good: report what never ran
     // (reclaimed, never dispatched, or serial) instead of dropping it from the
@@ -1551,6 +1562,7 @@ pub fn run_pool(
         fork_prewarmed,
         sources,
         peak_rss,
+        exiting,
     })
 }
 
