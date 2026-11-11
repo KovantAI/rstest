@@ -52,9 +52,10 @@ means none.
 | [`-n, --numprocesses`](#-n-numprocesses-nauto) | worker count | `auto` | `numprocesses` | |
 | [`--fork-pool`](#-fork-pool) | fork workers off a prewarmed zygote (Unix) | off | | |
 | [`--dist`](#-dist-loadloadfileloadscopeloadgroupeach) | distribution mode | `load` | `dist` | |
-| [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch`) | `order` | |
+| [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch` or `--budget`) | `order` | |
 | [`--shuffle[=SEED]`](#-shuffleseed) | seeded random dispatch order | off | | |
 | [`--shard K/N`](#-shard-kn) | run one of N CI shards | off | | |
+| [`--budget DURATION`](#-budget-duration) | run what fits in a time budget | off | | |
 | [`--collect`](#-collect-fulllazy) | collection strategy (`full` / `lazy`) | auto | `collect` | |
 | [`--changed[=REV]`](#-changedrev) | run only tests affected by changes | off | | |
 | [`--changed-strict`](#-changed-strict) | `--changed` hardened for gating CI | off | | |
@@ -202,7 +203,8 @@ affinity order).
   [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest picks
-`fail-fast` under [`--watch`](#-watch) and `throughput` otherwise. Where an
+`fail-fast` under [`--watch`](#-watch) and [`--budget`](#-budget-duration),
+and `throughput` otherwise. Where an
 explicit `fail-fast` has no effect (and warns), and why it can't combine with
 `--shuffle`:
 [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
@@ -241,9 +243,47 @@ verify with [`shard-verify`](cli-commands.md#shard-verify).
 Orthogonal to `-n`: each shard still fans out across local workers. Requires
 `-n 2` or more; rejected with `--shuffle` (a per-run shuffle breaks the
 identical-partition guarantee) and `--dist each`. Under `--collect lazy` it
-shards by file. Composes with `--changed` (select, then partition). Restore
+shards by file. Composes with `--changed` (select, then partition) and
+[`--budget`](#-budget-duration) (partition, then fit each bucket). Restore
 the **same** duration cache on every job: see the
 [Sharding guide](../guides/sharding.md).
+
+### `--budget <DURATION>`
+
+Run the tests most worth running in `DURATION` of wall time (`90s`, `5m`, or
+bare seconds), and leave the rest out. The duration is an estimate that picks
+tests, not a timeout: nothing is stopped when it runs out. Picked, in order:
+
+1. Tests in a test file changed since the last green run or edited in the
+   working tree. These always run, even past the budget.
+2. Tests that recently failed, then tests that reach a changed source file,
+   then flaky tests (the [`fail-fast`](#-order-throughputfail-fast) signals),
+   cheapest first within each group.
+3. The rest, shortest first, while they fit.
+
+A test costs its recorded call time plus its median setup time from the run
+history (a test with no record costs the median). Module and class fixtures
+are counted once, by the first picked test that needs them; package and
+session fixtures once per worker. Time already spent starting workers and
+collecting comes off the budget. One line on stderr says what was picked and
+why, and the summary counts the rest as deselected:
+
+```text
+rstest: --budget 2s -> 30 of 36 test(s), est. 2s on 2 worker(s) (1 changed-file, 1 failed, 0 near-change, 0 flaky, 28 fill)
+```
+
+A budget run is never a green run: it doesn't advance the
+[`--since-green`](#-since-green) baseline or record the last green
+environment, since a pass says nothing about the tests it left out.
+
+Under [`--shard`](#-shard-kn) each shard gets the whole budget for its own
+bucket, and [`shard-verify`](cli-commands.md#shard-verify) counts what the
+budget left out as covered.
+
+With no recorded durations yet it runs everything (and records them). Needs
+`-n 2` or more and full collection; rejected with `--dist each` and
+`--watch`. Implies [`--order fail-fast`](#-order-throughputfail-fast) unless
+`--order` is set.
 
 ## Test selection and collection
 

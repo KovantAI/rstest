@@ -7,10 +7,12 @@
 //!
 //! This subcommand reconciles the per-shard `--report-json` files after the
 //! matrix finishes. Each report written under `--shard` carries a `meta.shard`
-//! block `{k, n, collection_hash, collection_size}`; the `tests` map is keyed by
-//! the nodeids that shard actually ran. Coverage is complete iff every shard
-//! agrees on one collection and the union of what they ran equals that
-//! collection with no test on two shards.
+//! block `{k, n, collection_hash, collection_size}`, plus `budget_skipped` when
+//! `--budget` left part of the bucket out; the `tests` map is keyed by the
+//! nodeids that shard actually ran. A shard's bucket is what it ran plus what
+//! its budget skipped. Coverage is complete iff every shard agrees on one
+//! collection and the union of the buckets equals that collection with no test
+//! in two buckets.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -40,10 +42,12 @@ struct ShardMeta {
     n: usize,
     collection_hash: String,
     collection_size: u64,
+    #[serde(default)]
+    budget_skipped: Vec<String>,
 }
 
-/// One loaded shard report: label (for messages), its shard meta, and the set
-/// of nodeids it ran.
+/// One loaded shard report: label (for messages), its shard meta, and its
+/// bucket: the nodeids it ran plus those its `--budget` left out.
 #[derive(Debug)]
 struct Shard {
     label: String,
@@ -64,11 +68,9 @@ fn parse_report(label: String, bytes: &[u8]) -> Result<Shard> {
              (lazy-collection shard runs are not covered)"
         )
     })?;
-    Ok(Shard {
-        label,
-        meta,
-        ran: doc.tests.into_keys().collect(),
-    })
+    let mut ran: BTreeSet<String> = doc.tests.into_keys().collect();
+    ran.extend(meta.budget_skipped.iter().cloned());
+    Ok(Shard { label, meta, ran })
 }
 
 /// Read + parse the per-shard reports. Fails loudly if a file is missing,
@@ -172,8 +174,14 @@ pub fn run_shard_verify(sink: &mut Sink, reports: &[PathBuf]) -> Result<i32> {
     let errors = verify(&shards);
     if errors.is_empty() {
         let m = &shards[0].meta;
+        let skipped: usize = shards.iter().map(|s| s.meta.budget_skipped.len()).sum();
+        let budget = if skipped > 0 {
+            format!("; {skipped} left out by --budget")
+        } else {
+            String::new()
+        };
         sink.out_line(&format!(
-            "{} shard-verify: {} shards cover all {} collected tests (no drops, no overlap)",
+            "{} shard-verify: {} shards cover all {} collected tests (no drops, no overlap){budget}",
             pal.outcome("ok"),
             m.n,
             m.collection_size,
@@ -207,6 +215,7 @@ mod tests {
                 n,
                 collection_hash: hash.into(),
                 collection_size: size,
+                budget_skipped: Vec::new(),
             },
             ran: ran.iter().map(|s| s.to_string()).collect(),
         }
@@ -229,6 +238,51 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect()
         );
+    }
+
+    #[test]
+    fn parse_report_counts_budget_skipped_tests_in_the_bucket() {
+        let body = br#"{
+            "meta": {"shard":{"k":1,"n":2,"collection_hash":"h","collection_size":4,
+                              "budget_skipped":["b"]}},
+            "tests": {"a": {"call":"passed"}}
+        }"#;
+        let s1 = parse_report("shard.1.json".into(), body).unwrap();
+        assert_eq!(s1.ran, ["a", "b"].iter().map(|s| s.to_string()).collect());
+        // Covered, not dropped: the other shard ran the other half.
+        let s2 = shard(2, 2, "h", 4, &["c", "d"]);
+        assert!(verify(&[s1, s2]).is_empty());
+        // A skipped test is still in exactly one bucket: overlap is caught.
+        let body = br#"{"meta":{"shard":{"k":1,"n":2,"collection_hash":"h",
+            "collection_size":4,"budget_skipped":["c"]}},"tests":{"a":{},"b":{}}}"#;
+        let s1 = parse_report("shard.1.json".into(), body).unwrap();
+        let errs = verify(&[s1, shard(2, 2, "h", 4, &["c", "d"])]);
+        assert!(
+            errs.iter().any(|e| e.contains("more than one shard")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn run_reports_what_the_budget_left_out() {
+        let body = br#"{"meta":{"shard":{"k":1,"n":2,"collection_hash":"h",
+            "collection_size":2,"budget_skipped":["b"]}},"tests":{}}"#;
+        let dir = std::env::temp_dir().join(format!("rstest-sv-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p1, p2) = (dir.join("1.json"), dir.join("2.json"));
+        std::fs::write(&p1, body).unwrap();
+        std::fs::write(
+            &p2,
+            br#"{"meta":{"shard":{"k":2,"n":2,"collection_hash":"h","collection_size":2}},
+                "tests":{"a":{}}}"#,
+        )
+        .unwrap();
+        let (mut sink, out) = Sink::captured();
+        assert_eq!(run_shard_verify(&mut sink, &[p1, p2]).unwrap(), 0);
+        assert!(out.out().contains(
+            "cover all 2 collected tests (no drops, no overlap); 1 left out by --budget"
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

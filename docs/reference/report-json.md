@@ -101,6 +101,8 @@ present only on a [`--shard K/N`](cli.md#-shard-kn) run (full collection, not
 `--collect lazy`). It carries `{ "k", "n", "collection_hash", "collection_size" }`
 where `collection_hash` is the sha256 of the full ordered nodeid list and
 `collection_size` its length, identical across every shard of one run.
+Under [`--budget`](cli.md#-budget-duration) it also lists `budget_skipped`, the
+tests in this shard's bucket the budget left out (absent when none).
 [`rstest shard-verify`](cli-commands.md#shard-verify) consumes it to prove a shard matrix
 covered the whole suite.
 

@@ -482,6 +482,15 @@ pub struct Cli {
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
 
+    /// Run the tests most worth running in this much wall time (`90s`, `5m`),
+    /// from recorded durations: test files changed since the last green run
+    /// always, then recently failed, near-change and flaky tests, then the
+    /// shortest of the rest. An estimate that picks tests, not a timeout. A
+    /// budget run is never a green baseline. Under `--shard` each shard gets
+    /// the whole budget. Needs `-n 2` or more; implies `--order fail-fast`.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) budget: Option<String>,
+
     /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
     /// mount, or a dir a CI step materializes), an `s3://` / `gs://` bucket
     /// URL driven through the `aws` / `gcloud` CLI already on the runner, or an
@@ -974,6 +983,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--html",
     "--dist",
     "--shard",
+    "--budget",
     "--collect",
     "--order",
     "--keep-last",

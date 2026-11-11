@@ -32,6 +32,7 @@ Sharding identity block (only under `--shard`).
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `budget_skipped` | array of string | no | Tests in this shard's bucket that `--budget` left out, so `shard-verify` counts them as covered rather than dropped. |
 | `collection_hash` | string | yes | sha256 of the full ordered nodeid list (identical across shards). |
 | `collection_size` | integer | yes | Number of collected nodeids. |
 | `k` | integer | yes | This shard's index (1-based). |

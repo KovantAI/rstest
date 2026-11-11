@@ -208,13 +208,13 @@ pub struct FixtureStat {
     pub fingerprint: Option<String>,
 }
 
-/// Setup seconds of one module's or class's module/class-scoped fixtures
-/// over one worker session.
+/// Setup seconds of one scope node's session/package/module/class-scoped
+/// fixtures over one worker session. The session's key is "".
 #[derive(Debug, Clone, serde::Deserialize)]
 #[cfg_attr(test, derive(PartialEq, Serialize))]
 pub struct ScopeCost {
-    /// The module's or class's nodeid (`tests/test_db.py`,
-    /// `tests/test_db.py::TestUsers`).
+    /// The scope node's nodeid: "" for the session, else a package, module or
+    /// class (`tests`, `tests/test_db.py`, `tests/test_db.py::TestUsers`).
     pub key: String,
     pub total: f64,
     /// Times the scope was set up in the session.

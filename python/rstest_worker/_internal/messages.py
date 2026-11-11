@@ -186,8 +186,8 @@ class DoctorFixturesPayload(TypedDict):
 
 
 class ScopeCost(TypedDict):
-    key: str  # nodeid of the module or class the fixtures were set up for
-    total: float  # setup seconds of its module/class-scoped fixtures
+    key: str  # nodeid of the scope the fixtures were set up for ("" = session)
+    total: float  # setup seconds of its session/package/module/class-scoped fixtures
     count: int  # times that scope was set up in this session
 
 
