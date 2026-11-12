@@ -19,11 +19,12 @@ repeat is reported).
 a run prints no `--fork-pool=app:` note (the template converged), up to
 `--converge` runs.
 
-`--memory` samples system-wide used memory (psutil) during each run and reports
-the peak above the pre-run level. Forked workers are reparented to launchd, so
-the per-tree sampler in procmem.py can't see them; this is coarser (other
-processes count too), so keep the machine quiet. Its sampler costs a little CPU:
-take timing numbers from a run without it.
+`--memory` (macOS, needs psutil) samples the workers' physical footprint
+during each run and reports the peak sum plus the zygote's peak once (forked
+workers aren't charged for pages they share with it). Forked workers are
+reparented to launchd, so the per-tree sampler in procmem.py can't see them;
+workers are found by command line instead. The sampler costs a little CPU: take
+timing numbers from a run without it.
 
     caffeinate -ims python3 corpus/fork_ab.py --only click,anyio --workers auto,4
     caffeinate -ims .venv/bin/python corpus/fork_ab.py --arms core,app --only langchain \\
@@ -55,27 +56,64 @@ ARMS = {"plain": [], "core": ["--fork-pool"], "core2": ["--fork-pool"], "app": [
 NOTE = "--fork-pool=app:"
 
 
+def _footprint(lib, pid):
+    """`ri_phys_footprint` from proc_pid_rusage (macOS): the process's own
+    resident memory. Readable for same-user processes, unlike USS."""
+    import ctypes
+
+    buf = ctypes.create_string_buffer(256)
+    if lib.proc_pid_rusage(pid, 2, buf) != 0:  # RUSAGE_INFO_V2
+        return 0
+    return int.from_bytes(buf.raw[72:80], sys.byteorder)
+
+
 class _MemPeak:
-    """Peak system-wide used memory above the level at start, sampled."""
+    """Peak memory of the rstest workers (macOS), sampled: the largest sum of
+    the workers' footprints, plus the fork-pool zygote's own peak footprint
+    once. A forked worker is not charged for the pages it shares
+    copy-on-write with the zygote, so those count once, through the zygote.
+    Workers are found by command line (forked ones are reparented to launchd)."""
 
     def __init__(self, interval=0.1):
+        import ctypes
+
         import psutil
 
-        self._vm = psutil.virtual_memory
-        self.base = self._vm().used
-        self.peak = 0
+        self._psutil = psutil
+        self._lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        self.workers = 0
+        self.zygote = 0
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._loop, args=(interval,), daemon=True)
         self._t.start()
 
+    def _sample(self):
+        ps = self._psutil
+        total = 0
+        for p in ps.process_iter(["cmdline", "ppid"]):
+            argv = p.info["cmdline"] or ()
+            if "rstest_worker" not in argv:
+                continue
+            fp = _footprint(self._lib, p.pid)
+            zygote = "--fork-pool" in argv
+            try:
+                zygote = zygote and ps.Process(p.info["ppid"]).name() == "rstest"
+            except ps.Error:
+                zygote = False
+            if zygote:
+                self.zygote = max(self.zygote, fp)
+            else:
+                total += fp
+        self.workers = max(self.workers, total)
+
     def _loop(self, interval):
         while not self._stop.wait(interval):
-            self.peak = max(self.peak, self._vm().used - self.base)
+            self._sample()
 
     def stop(self):
         self._stop.set()
         self._t.join()
-        return self.peak
+        return self.workers + self.zygote
 
 
 def _arm(suite, workers, arm, memory=False):
@@ -183,6 +221,7 @@ def _point(suite, workers, arms, args, noisy, noisy_failures):
         row["app_converged"] = converged
     if args.memory:
         row["mem_peak_mib"] = {a: round(_band(mems[a])[0] / 2**20, 1) for a in arms if mems[a]}
+        row["mems_mib"] = {a: [round(m / 2**20, 1) for m in mems[a]] for a in arms}
     return row
 
 

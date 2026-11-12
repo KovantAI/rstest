@@ -377,6 +377,14 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
         os.environ = saved_env  # noqa: B003
         sys.path[:] = saved_path
     _write(result_path, result, t0)
+    if clean and result["imported"]:
+        # Move the template's objects out of the cyclic GC's reach. Otherwise a
+        # child's first collection touches every one of them and copies their
+        # pages: scikit-learn's workers then used as much memory as with plain
+        # `--fork-pool` (with the freeze, 17% less).
+        import gc
+
+        gc.freeze()
     return clean
 
 

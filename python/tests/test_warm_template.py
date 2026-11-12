@@ -112,9 +112,16 @@ def app(tmp_path, monkeypatch):
 
 
 def test_imports_the_manifest_and_restores_sys_path_and_environ(app):
+    import gc
+
     app.write("wt_plain", "VALUE = 1\n")
     path, env = list(sys.path), os.environ
+    gc.unfreeze()
     clean, result = app.run(["wt_plain"])
+    # The template's objects are frozen so forked children share their pages.
+    frozen = gc.get_freeze_count()
+    gc.unfreeze()
+    assert frozen > 0
     assert clean
     assert result["imported"] == 1 and result["denied"] == {} and result["hazard"] is None
     assert sys.modules["wt_plain"].VALUE == 1
