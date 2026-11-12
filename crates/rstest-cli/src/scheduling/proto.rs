@@ -441,6 +441,10 @@ pub enum Event {
         /// rewriting; the template must not import them, even transitively.
         #[serde(default)]
         rewrite: Vec<String>,
+        /// `--fork-pool=app` recording: environment keys the worker's session
+        /// changed; the template must not read them at import.
+        #[serde(default)]
+        env: Vec<String>,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -836,6 +840,7 @@ mod property {
                     sys_path: vec![],
                     coverage: false,
                     rewrite: vec![],
+                    env: vec![],
                 }
             ),
             (small_str(), small_strs())

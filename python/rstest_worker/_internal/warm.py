@@ -55,6 +55,11 @@ recorded: list[str] | None = None
 # pytest's assertion-rewrite marks (pytest11 plugin dists, register_assert_rewrite)
 # at session end: the template must not import these, even transitively.
 rewrite_marked: list[str] = []
+# The worker's environment when it started serving, and the keys its session
+# changed (pytest-django's DJANGO_SETTINGS_MODULE, a test settings module's
+# own setdefault): a template must not read those, it would see them unset.
+env_at_start: dict[str, str] | None = None
+env_changed: list[str] = []
 
 
 # ── record ──────────────────────────────────────────────────────────────────
@@ -69,7 +74,10 @@ def record(session: Any) -> list[str]:
         for p in config.pluginmanager.get_plugins()
         if os.path.basename(getattr(p, "__file__", None) or "") == "conftest.py"
     }
-    global rewrite_marked
+    global rewrite_marked, env_changed
+    if env_at_start is not None:
+        keys = set(os.environ) | set(env_at_start)
+        env_changed = sorted(k for k in keys if os.environ.get(k) != env_at_start.get(k))
     rewrite: set[str] = set()
     try:
         from _pytest.assertion import assertstate_key
@@ -120,11 +128,27 @@ def filter_modules(
 
 class Hazard(BaseException):
     """A module's import did something a forked child must not inherit.
-    BaseException so a module's own `except Exception` can't swallow it."""
+    BaseException so a module's own `except Exception` can't swallow it.
 
-    def __init__(self, name: str, reason: str):
+    `restart`: the side effect already happened (a thread, a socket), so this
+    process can't be forked from. An environment access is stopped before it
+    happens: the import just fails, and the template carries on."""
+
+    def __init__(self, name: str, reason: str, restart: bool = True):
         super().__init__(name, reason)
-        self.name, self.reason = name, reason
+        self.name, self.reason, self.restart = name, reason, restart
+
+
+# Environment hazards raised during the current manifest entry. One that is
+# still here after the entry imported fine was swallowed (a bare `except`), and
+# the module carried on with what it computed instead.
+_env_hazards: list[Hazard] = []
+
+
+def _env_hazard(reason: str) -> Hazard:
+    h = Hazard(_loading[-1] if _loading else "?", reason, restart=False)
+    _env_hazards.append(h)
+    return h
 
 
 _loading: list[str] = []
@@ -132,6 +156,7 @@ _loading: list[str] = []
 _failed_child: list[str | None] = []
 _armed = False
 _stdio: frozenset[int] = frozenset()
+_watched: frozenset[str] = WORKER_KEYS
 
 
 class _RecordingEnviron(os._Environ):
@@ -140,14 +165,27 @@ class _RecordingEnviron(os._Environ):
     is inert once disarmed (a module may keep a reference to it)."""
 
     def __getitem__(self, key):
-        if _armed and key in WORKER_KEYS:
-            raise Hazard(_loading[-1] if _loading else "?", f"reads {key} at import")
+        if _armed and key in _watched:
+            raise _env_hazard(f"reads {key} at import")
         return super().__getitem__(key)
 
     def __contains__(self, key):
-        if _armed and key in WORKER_KEYS:
-            raise Hazard(_loading[-1] if _loading else "?", f"reads {key} at import")
+        if _armed and key in _watched:
+            raise _env_hazard(f"reads {key} at import")
         return super().__contains__(key)
+
+    # A write would reach every forked worker before its pytest session reads
+    # the environment (pretix's celery_app sets DJANGO_SETTINGS_MODULE, which
+    # then beat pytest-django's ini setting); per worker it lands after.
+    def __setitem__(self, key, value):
+        if _armed:
+            raise _env_hazard(f"sets {key} at import")
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        if _armed:
+            raise _env_hazard(f"unsets {key} at import")
+        super().__delitem__(key)
 
 
 class _Blocker:
@@ -316,7 +354,7 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
     """Import the manifest's modules. Returns False when this process is no
     longer fit to fork from (a guard fired, or an error after imports began):
     the caller then starts over as a plain core zygote."""
-    global _armed, _dyld, _stdio
+    global _armed, _dyld, _stdio, _watched
     result: dict[str, Any] = {"imported": 0, "denied": {}, "hazard": None, "error": None}
     t0 = time.perf_counter()
     clean = True
@@ -350,22 +388,36 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
     sys.meta_path.insert(0, blocker)
     _bootstrap._find_and_load = _guarded_find_and_load(orig_fal)  # ty: ignore[unresolved-attribute]
     _stdio = _stdio_ids()
+    _watched = WORKER_KEYS | frozenset(manifest.get("env") or ())
     _armed = True
     try:
         for name in modules:
             if name in sys.modules:
                 continue
+            _env_hazards.clear()
             try:
                 importlib.import_module(name)
-                result["imported"] += 1
             except Hazard as h:
                 result["denied"][h.name] = h.reason
+                if not h.restart:
+                    if h.name != name:
+                        why = f"imports {h.name}, which {h.reason}"
+                        result["denied"][name] = f"import error ({why})"
+                    continue
                 result["hazard"] = f"{h.name}: {h.reason}"
                 clean = False
                 break
             except (Exception, SystemExit) as e:
                 reason = f"{type(e).__name__}: {e}".splitlines()[0][:200]
                 result["denied"][name] = f"import error ({reason})"
+                continue
+            if _env_hazards:
+                h = _env_hazards[0]
+                result["denied"][h.name] = f"{h.reason} (and catches the guard's exception)"
+                result["hazard"] = f"{h.name}: {h.reason}"
+                clean = False
+                break
+            result["imported"] += 1
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
         clean = result["imported"] == 0

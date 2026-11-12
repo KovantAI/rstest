@@ -48,6 +48,10 @@ pub struct Manifest {
     /// module imports them.
     #[serde(default)]
     pub rewrite: std::collections::BTreeSet<String>,
+    /// Environment keys a worker's session changed (`DJANGO_SETTINGS_MODULE`
+    /// set by pytest-django): the template refuses modules that read them.
+    #[serde(default)]
+    pub env: std::collections::BTreeSet<String>,
     /// Module -> why it is imported per worker instead of in the template.
     #[serde(default)]
     pub deny: BTreeMap<String, String>,
@@ -65,6 +69,7 @@ pub struct Record {
     pub sys_path: Vec<String>,
     pub coverage: bool,
     pub rewrite: std::collections::BTreeSet<String>,
+    pub env: std::collections::BTreeSet<String>,
 }
 
 impl Record {
@@ -204,6 +209,11 @@ pub fn finish(run: WarmRun, record: Record, sink: &mut Sink) -> Option<Stats> {
             prior.rewrite
         } else {
             record.rewrite
+        },
+        env: if record.imported.is_empty() {
+            prior.env
+        } else {
+            record.env
         },
         key: run.key,
         sys_path: if record.sys_path.is_empty() {
@@ -384,6 +394,7 @@ mod tests {
         let mut record = Record::default();
         record.merge(vec!["new".into()], vec!["/p".into()], false);
         record.rewrite.insert("_hypothesis_globals".into());
+        record.env.insert("DJANGO_SETTINGS_MODULE".into());
         let stats = finish(run, record, &mut sink).unwrap();
         assert_eq!(
             stats,
@@ -401,6 +412,7 @@ mod tests {
         let m = load(&dir.path().join("manifest.json")).unwrap();
         assert_eq!(m.modules, vec!["new".to_string()]);
         assert!(m.rewrite.contains("_hypothesis_globals"));
+        assert!(m.env.contains("DJANGO_SETTINGS_MODULE"));
         assert_eq!(m.deny.len(), 3);
         assert!(!dir.path().join("result.json").exists());
     }

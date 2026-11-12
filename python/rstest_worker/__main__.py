@@ -167,12 +167,17 @@ def _done(conn, exitstatus: int) -> None:
         if warm.recorded is not None:
             payload["imported"] = warm.recorded
             payload["rewrite"] = warm.rewrite_marked
+            payload["env"] = warm.env_changed
             payload["sys_path"] = list(sys.path)
             payload["coverage"] = warm.coverage_active()
     conn.send("done", payload)
 
 
 def _serve(conn) -> None:
+    if os.environ.get("RSTEST_WARM_RECORD"):
+        from rstest_worker._internal import warm
+
+        warm.env_at_start = dict(os.environ)
     for cmd in conn.commands():
         kind = cmd["kind"]
         if kind == "shutdown":

@@ -88,7 +88,7 @@ def app(tmp_path, monkeypatch):
         (pkg / f"{name}.py").write_text(textwrap.dedent(src))
         created.append(name)
 
-    def run(modules, deny=None, rewrite=()):
+    def run(modules, deny=None, rewrite=(), env=()):
         manifest = tmp_path / "manifest.json"
         manifest.write_text(
             json.dumps(
@@ -96,6 +96,7 @@ def app(tmp_path, monkeypatch):
                     "modules": modules,
                     "deny": deny or {},
                     "rewrite": list(rewrite),
+                    "env": list(env),
                     "sys_path": [str(pkg)],
                 }
             )
@@ -136,10 +137,75 @@ def test_a_per_worker_env_read_is_a_hazard(app, read):
     app.write("wt_envread", f"import os\nWID = {read}\n")
     app.write("wt_after", "X = 1\n")
     clean, result = app.run(["wt_envread", "wt_after"])
-    assert not clean
-    assert "wt_envread" in result["hazard"]
+    # Stopped before the read returned: the import fails, nothing leaked, so
+    # the template carries on (no cold restart per env hazard).
+    assert clean and result["hazard"] is None
     assert result["denied"]["wt_envread"].startswith("reads PYTEST_")
-    assert "wt_after" not in sys.modules  # the template stops at the first hazard
+    assert "wt_envread" not in sys.modules
+    assert "wt_after" in sys.modules
+
+
+def test_an_env_write_at_import_is_a_hazard(app, monkeypatch):
+    # Corpus regression (pretix): celery_app.py does
+    # os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pretix.settings"). Set in
+    # the template, every worker inherited it before pytest-django read its ini.
+    monkeypatch.delenv("WT_SETTINGS", raising=False)
+    app.write("wt_envwrite", "import os\nos.environ.setdefault('WT_SETTINGS', 'prod')\n")
+    clean, result = app.run(["wt_envwrite"])
+    assert clean
+    assert result["denied"]["wt_envwrite"] == "sets WT_SETTINGS at import"
+    assert "WT_SETTINGS" not in os.environ
+
+
+def test_a_read_of_a_key_the_session_changes_is_a_hazard(app, monkeypatch):
+    # pretix.settings reads PRETIX_CONFIG_FILE, which the test settings set
+    # first: read in the template, it would see it unset.
+    monkeypatch.delenv("WT_CONFIG_FILE", raising=False)
+    app.write("wt_cfgread", "import os\nCFG = os.environ.get('WT_CONFIG_FILE')\n")
+    clean, result = app.run(["wt_cfgread"], env=["WT_CONFIG_FILE"])
+    assert clean
+    assert result["denied"]["wt_cfgread"] == "reads WT_CONFIG_FILE at import"
+
+
+def test_an_env_hazard_in_a_dependency_denies_the_entry_too(app):
+    # pretix: one run per module reading DJANGO_SETTINGS_MODULE; denying the
+    # entry with its dependency lets the template converge in one run.
+    app.write("wt_reader", "import os\nS = os.environ.get('RSTEST_WORKER_ID')\n")
+    app.write("wt_entry", "import wt_reader\n")
+    clean, result = app.run(["wt_entry"])
+    assert clean
+    assert result["denied"]["wt_reader"] == "reads RSTEST_WORKER_ID at import"
+    assert "imports wt_reader" in result["denied"]["wt_entry"]
+
+
+def test_a_swallowed_env_hazard_restarts_the_template(app):
+    # A bare `except:` catches the guard's exception and carries on with a
+    # fallback value the workers must not inherit.
+    app.write(
+        "wt_bare",
+        "import os\ntry:\n    W = os.environ['RSTEST_WORKER_ID']\nexcept:\n    W = 'gw?'\n",
+    )
+    clean, result = app.run(["wt_bare"])
+    assert not clean
+    assert result["denied"]["wt_bare"].endswith("(and catches the guard's exception)")
+
+
+def test_record_lists_the_env_keys_the_session_changed(monkeypatch):
+    monkeypatch.setenv("WT_KEEP", "1")
+    monkeypatch.setenv("WT_CHANGED", "before")
+    monkeypatch.delenv("WT_ADDED", raising=False)
+    monkeypatch.setattr(warm, "env_at_start", dict(os.environ))
+    monkeypatch.setenv("WT_CHANGED", "after")
+    monkeypatch.setenv("WT_ADDED", "x")
+    config = SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugins=lambda: []),
+        stash={},
+        getini=lambda name: [],
+        rootpath="/proj",
+    )
+    monkeypatch.setattr(sys, "modules", {})
+    warm.record(SimpleNamespace(config=config, items=[]))
+    assert warm.env_changed == ["WT_ADDED", "WT_CHANGED"]
 
 
 def test_an_ordinary_env_read_is_fine_and_the_recorder_goes_inert(app):
@@ -154,7 +220,8 @@ def test_the_reader_is_named_not_the_module_that_imported_it(app):
     app.write("wt_cfg", "import os\nW = os.environ.get('RSTEST_WORKER_ID')\n")
     app.write("wt_outer", "import wt_cfg\n")
     _, result = app.run(["wt_outer"])
-    assert list(result["denied"]) == ["wt_cfg"]
+    assert result["denied"]["wt_cfg"] == "reads RSTEST_WORKER_ID at import"
+    assert result["denied"]["wt_outer"].startswith("import error (imports wt_cfg")
 
 
 def test_a_thread_started_at_import_is_a_hazard(app):

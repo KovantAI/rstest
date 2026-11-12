@@ -968,11 +968,13 @@ pub fn run_pool(
                 sys_path,
                 coverage,
                 rewrite,
+                env,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
                 warm_record.merge(imported, sys_path, coverage);
                 warm_record.rewrite.extend(rewrite);
+                warm_record.env.extend(env);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own (see Stopped) never ran what

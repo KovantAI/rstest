@@ -351,3 +351,14 @@ mode = "pyargs"
 package = "sklearn.linear_model"
 install = ["scikit-learn", "pytest", "pytest-xdist"]
 env = { OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1", MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1" }
+
+[pretix]
+repo = "https://github.com/pretix/pretix"
+# The large Django app the warm-template plan needs (dev-notes: "Django: Django
+# itself vs the app"): django-allauth's whole import is ~0.5s per worker, too
+# small to decide whether the template should load settings or run
+# django.setup(). SQLite with no services: pretix's settings fall back to the
+# sqlite3 backend, and its test settings turn Redis and Celery off. Tests and
+# the pytest config live under src/, and run.py runs from the checkout root.
+install = ["-e .[dev]"]
+args = ["-c", "src/setup.cfg", "src/tests"]

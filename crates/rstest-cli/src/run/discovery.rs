@@ -365,6 +365,7 @@ mod tests {
                     sys_path: vec![],
                     coverage: false,
                     rewrite: vec![],
+                    env: vec![],
                 },
                 &mut acc
             ),

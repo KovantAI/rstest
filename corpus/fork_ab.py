@@ -147,14 +147,16 @@ def _band(xs):
 
 def _converge(suite, workers, limit):
     """Run `app` until a run prints no template note; returns how many it took
-    and the last run's notes (empty when converged)."""
+    and the last run's notes (empty when converged). Never stops before the
+    second run: a run without a manifest only records it, so it prints nothing
+    even though the template has not been tried yet."""
     notes = []
     for i in range(1, limit + 1):
         _, _, err, _ = _arm(suite, workers, "app")
         notes = [line for line in err.splitlines() if NOTE in line]
         for line in notes:
             log(f"  converge {i}: {line}")
-        if not notes:
+        if not notes and i >= 2:
             return i, []
     return limit, notes
 

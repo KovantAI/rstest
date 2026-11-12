@@ -140,6 +140,7 @@ class DonePayload(_DoneRequired, total=False):
     sys_path: list[str]  # --fork-pool=app: sys.path the modules were imported with
     coverage: bool  # --fork-pool=app: coverage was tracing (template unsafe)
     rewrite: list[str]  # --fork-pool=app: names pytest marks for assertion rewriting
+    env: list[str]  # --fork-pool=app: environment keys the worker's session changed
 
 
 class ItemStartPayload(TypedDict):
