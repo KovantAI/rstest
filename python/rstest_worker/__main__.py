@@ -35,6 +35,11 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--fork-pool":
         _fork_pool(sys.argv[2:])
         return
+    # `--watch --fork-pool=app`: a template that outlives one run and forks a
+    # pool per watch cycle. See _template_server.
+    if len(sys.argv) > 1 and sys.argv[1] == "--template-server":
+        _template_server(sys.argv[2:])
+        return
     cmd_arg, evt_arg = int(sys.argv[1]), int(sys.argv[2])
     if os.name == "nt":
         # The orchestrator passes HANDLE values on Windows; convert to
@@ -142,6 +147,39 @@ def _fork_pool(argv: list[str]) -> None:
         while os.read(release_fd, 1):
             pass
     os._exit(0)
+
+
+def _template_server(argv: list[str]) -> None:
+    """Template server entry: `--template-server <socket_path>`.
+
+    Imports the warm manifest once (`RSTEST_WARM_MANIFEST`), then serves fork
+    requests from the orchestrator for the whole watch session, so a cycle
+    pays no app import. Each forked worker connects back to the orchestrator's
+    socket (see template.serve). A guard that fires during the imports restarts
+    this process cold, as the per-run zygote does."""
+    manifest = os.environ.get("RSTEST_WARM_MANIFEST")
+    if manifest:
+        from rstest_worker._internal import warm
+
+        if not warm.prewarm(manifest, os.environ.get(warm.RESULT_ENV)):
+            os.environ.pop("RSTEST_WARM_MANIFEST")
+            sys.stderr.flush()
+            os.execv(
+                sys.executable, [sys.executable, "-m", "rstest_worker", "--template-server", *argv]
+            )
+    from rstest_worker._internal import template
+
+    template.serve(argv[0], _template_worker, warm_used=bool(manifest))
+
+
+def _template_worker(conn) -> None:
+    """A worker forked by the template server: serve, then exit the way a
+    spawned worker does."""
+    try:
+        _serve(conn)
+    except BrokenPipeError:
+        os._exit(0)
+    sys.exit(0)
 
 
 def _peak_rss() -> int | None:

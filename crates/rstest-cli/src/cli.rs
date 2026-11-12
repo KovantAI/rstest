@@ -207,10 +207,13 @@ pub struct Cli {
     #[arg(short = 'n', long = "numprocesses", value_parser = numprocesses_arg)]
     pub(crate) numprocesses: Option<String>,
 
-    /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
-    /// once in a zygote, then fork the workers off it instead of paying that
-    /// import in every freshly spawned worker. Cuts pool startup at high `-n`;
-    /// no effect on Windows or single-worker runs. [default: off]
+    /// Fork-prewarm the worker pool (Unix only): import once in a template
+    /// process, then fork the workers off it instead of paying that import in
+    /// every freshly spawned worker. `core` (bare `--fork-pool`) imports the
+    /// vendored pytest core; `app` (macOS) also imports your app's modules,
+    /// and under `--watch` keeps the template for the session. No effect on
+    /// Windows or single-worker runs. [default: off; `app` under `--watch` on
+    /// macOS]
     #[arg(
         long = "fork-pool",
         num_args = 0..=1,

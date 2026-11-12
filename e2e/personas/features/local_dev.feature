@@ -754,6 +754,61 @@ Feature: Daily local developer
       Then the run succeeds
       And stderr contains "--fork-pool=app does not support coverage yet"
 
+    @macos_only
+    Scenario: DV-19 under --watch the template outlives a cycle and rebuilds on a source edit
+      When I start "rstest --watch -n 4 --fork-pool=app" and wait up to 60 seconds for its idle prompt
+      Then the watcher printed its idle prompt
+      # The first rerun builds the template from what the first run recorded.
+      When I save "test_m0.py" while watching:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        """
+      Then the watcher printed its idle prompt
+      # A test-only edit: the template is reused, nothing imports the app.
+      When I note the lines in "imports.log"
+      And I save "test_m0.py" while watching:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        # edited
+        """
+      Then the watcher printed its idle prompt
+      And the output contains "2 passed"
+      And "imports.log" gained 0 lines
+      # A source edit: the template is rebuilt (one import) and the workers
+      # see the new code.
+      When I note the lines in "imports.log"
+      And I save "slowapp.py" while watching:
+        """
+        import os
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imports.log"), "a") as f:
+            f.write(f"{os.getpid()}\n")
+        VALUE = 1
+        EXTRA = "fresh"
+        """
+      Then the watcher printed its idle prompt
+      And "imports.log" gained 1 line
+      When I save "test_extra.py" while watching:
+        """
+        import slowapp
+
+        def test_extra():
+            assert slowapp.EXTRA == "fresh"
+        """
+      Then the watcher printed its idle prompt
+      And the output contains "1 passed"
+
     @linux_only
     Scenario: DV-19 --fork-pool=app is macOS-only for now
       When I note the lines in "imports.log"

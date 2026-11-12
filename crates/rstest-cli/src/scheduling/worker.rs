@@ -11,6 +11,12 @@ use anyhow::{Context, Result};
 
 use crate::scheduling::proto;
 
+#[cfg(unix)]
+#[path = "template.rs"]
+mod template;
+#[cfg(unix)]
+pub use template::{drop_if_stale as drop_stale_template, enable as enable_template};
+
 /// Hard ceiling on the bytes a single [`proto::Event`] may consume off the
 /// pipe. The wire is bare, self-describing msgpack (no length framing), so a
 /// worker that emits a value whose length prefix claims a giant array/str/map
@@ -812,6 +818,10 @@ impl Worker {
         let seen = SeenStartupStderr::default();
         #[cfg(unix)]
         if Self::prewarms(fork_prewarm, n) {
+            // `--watch --fork-pool=app`: fork off the session's template server.
+            if let Some(result) = template::fork_pool(python, n, env, &seen) {
+                return result;
+            }
             ensure_fd_headroom(n);
             match Self::spawn_forked_pool(python, n, env, &seen) {
                 // The zygote holds both ends of all 3n pipes at once (~6n fds,
@@ -2116,7 +2126,7 @@ mod tests {
         );
     }
 
-    fn base_env() -> WorkerEnv {
+    pub(super) fn base_env() -> WorkerEnv {
         WorkerEnv {
             run_uid: "uid-1".into(),
             doctor: false,
@@ -2427,7 +2437,7 @@ mod tests {
     /// [`worker_python`] and the spawn resolve python via PATH, and the spawn
     /// reads RSTEST_WORKER_PATH. Skips (returns) when no such python exists.
     #[cfg(unix)]
-    fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
+    pub(super) fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
         let held = crate::test_env::lock();
         let found = live_python(&held);
         if let Some((python, _worker_path)) = found {
@@ -2438,7 +2448,7 @@ mod tests {
     /// A worker's pid: the child's for an owned worker, the tracked one for a
     /// forked worker (None once it has been forgotten).
     #[cfg(unix)]
-    fn pid_of(w: &Worker) -> Option<u32> {
+    pub(super) fn pid_of(w: &Worker) -> Option<u32> {
         match &w.proc {
             super::Proc::Owned(child) => Some(child.id()),
             super::Proc::Reparented(t) => t.map(|t| t.pid),
@@ -2448,7 +2458,7 @@ mod tests {
     /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
     /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
     #[cfg(unix)]
-    fn alive(pid: u32) -> bool {
+    pub(super) fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 performs no action; it only probes whether `pid`
         // is a live, signalable process. Touches no memory.
         unsafe { libc::kill(pid as i32, 0) == 0 }

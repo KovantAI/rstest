@@ -23,8 +23,7 @@ pub const FILE: &str = "warm/manifest.json";
 pub enum ForkPool {
     /// Prewarm the vendored pytest core only.
     Core,
-    /// Also import the app's modules in the template (internal for now).
-    #[value(hide = true)]
+    /// Also import the app's modules in the template (macOS for now).
     App,
 }
 
@@ -149,7 +148,7 @@ pub fn coverage_requested(args: &[String]) -> bool {
         || std::env::var_os("COV_CORE_SOURCE").is_some()
 }
 
-fn load(path: &Path) -> Option<Manifest> {
+pub(crate) fn load(path: &Path) -> Option<Manifest> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
@@ -196,6 +195,7 @@ pub fn finish(run: WarmRun, record: Record, sink: &mut Sink) -> Option<Stats> {
         );
         return None;
     }
+    let had_prior = run.prior.is_some();
     let prior = run.prior.unwrap_or_default();
     let mut deny = prior.deny.clone();
     if let Some(o) = &outcome {
@@ -204,35 +204,37 @@ pub fn finish(run: WarmRun, record: Record, sink: &mut Sink) -> Option<Stats> {
         }
         deny.extend(o.denied.clone());
     }
+    // Merged into the prior manifest, never replaced: a narrowed run (a
+    // `--watch` rerun of one file, `-k`) imports a fraction of the suite and
+    // must not shrink what the next template imports.
+    let mut modules = prior.modules.clone();
+    let mut seen: HashSet<&String> = prior.modules.iter().collect();
+    for m in &record.imported {
+        if seen.insert(m) {
+            modules.push(m.clone());
+        }
+    }
     let manifest = Manifest {
-        rewrite: if record.imported.is_empty() {
-            prior.rewrite
-        } else {
-            record.rewrite
-        },
-        env: if record.imported.is_empty() {
-            prior.env
-        } else {
-            record.env
-        },
+        rewrite: prior.rewrite.union(&record.rewrite).cloned().collect(),
+        env: prior.env.union(&record.env).cloned().collect(),
         key: run.key,
         sys_path: if record.sys_path.is_empty() {
-            prior.sys_path
+            prior.sys_path.clone()
         } else {
-            record.sys_path
+            record.sys_path.clone()
         },
-        modules: if record.imported.is_empty() {
-            prior.modules
-        } else {
-            record.imported
-        },
+        modules,
         deny,
         refused: record
             .coverage
             .then(|| "coverage is active in the workers".to_string()),
     };
-    if let Ok(bytes) = serde_json::to_vec(&manifest) {
-        let _ = cache::write_atomic(&run.path, &bytes);
+    // Written only when it changed: under `--watch` a rewrite would mark the
+    // template server stale every cycle.
+    if !had_prior || manifest != prior {
+        if let Ok(bytes) = serde_json::to_vec(&manifest) {
+            let _ = cache::write_atomic(&run.path, &bytes);
+        }
     }
     outcome.map(|o| Stats {
         modules: o.imported,
@@ -410,7 +412,8 @@ mod tests {
         assert!(err.contains("1 module(s) failed to import"));
         assert!(err.contains("ran cold"));
         let m = load(&dir.path().join("manifest.json")).unwrap();
-        assert_eq!(m.modules, vec!["new".to_string()]);
+        // Merged, prior order first: a narrowed run never shrinks the manifest.
+        assert_eq!(m.modules, vec!["old".to_string(), "new".to_string()]);
         assert!(m.rewrite.contains("_hypothesis_globals"));
         assert!(m.env.contains("DJANGO_SETTINGS_MODULE"));
         assert_eq!(m.deny.len(), 3);
@@ -438,6 +441,35 @@ mod tests {
         assert_eq!(finish(run, Record::default(), &mut sink), None);
         assert!(!dir.path().join("manifest.json").exists());
         assert!(cap.err().contains("reset"));
+    }
+
+    #[test]
+    fn an_unchanged_manifest_is_not_rewritten() {
+        // `--watch` re-stats the manifest to tell when its template server is
+        // stale: rewriting identical content every run would rebuild it every
+        // cycle.
+        let dir = TmpDir::new();
+        let prior = Manifest {
+            key: key("k"),
+            modules: vec!["a".into(), "b".into()],
+            ..Manifest::default()
+        };
+        let path = dir.path().join("manifest.json");
+        std::fs::write(&path, serde_json::to_vec(&prior).unwrap()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut record = Record::default();
+        record.merge(vec!["b".into()], vec![], false); // a narrowed rerun
+        let (mut sink, _cap) = Sink::captured();
+        finish(run_in(dir.path(), Some(prior), key("k")), record, &mut sink);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        assert_eq!(
+            load(&path).unwrap().modules,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ def test_filter_keeps_app_and_third_party_modules_in_import_order():
         "helpers_test": _mod("helpers_test", "/proj/helpers_test.py"),  # python_files match
         "myhelpers.asserts": _mod("myhelpers.asserts", "/proj/myhelpers/asserts.py"),
         "numpy": _mod("numpy", "/venv/numpy/__init__.py"),
+        "ctypes._endian": _mod("ctypes._endian", "/lib/ctypes/_endian.py"),  # the guards'
     }
     out = warm.filter_modules(
         modules,

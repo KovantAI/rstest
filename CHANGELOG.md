@@ -3,6 +3,23 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Features
+
+- **`--watch` on macOS no longer re-imports your app on every save.** A watch
+  session keeps a template process that has imported your app's modules and
+  forks each cycle's workers from it (`--fork-pool=app`, now the `--watch`
+  default on macOS). On a test file importing scikit-learn, a save went from
+  ~900ms to ~520ms at `-n 2`. The template is rebuilt when a module it
+  imported, an installed package or the pytest config changes, and modules
+  whose import isn't safe to share across workers are imported per worker.
+  Opt out with `--fork-pool` or `--fork-pool=core`. See
+  [Watch mode](docs/guides/watch-mode.md#warm-template-macos).
+- **`--fork-pool=app`** (macOS): the per-run fork pool can also import your
+  app's modules, as recorded by earlier runs in `.rstest_cache/warm/`. Bare
+  `--fork-pool` is unchanged (`=core`).
+
 ## 0.11.1 (2026-11-11)
 
 ### Fixes

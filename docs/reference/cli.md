@@ -50,7 +50,7 @@ means none.
 | Flag | Purpose | Default | `[tool.rstest]` key | Env var |
 |---|---|---|---|---|
 | [`-n, --numprocesses`](#-n-numprocesses-nauto) | worker count | `auto` | `numprocesses` | |
-| [`--fork-pool`](#-fork-pool) | fork workers off a prewarmed zygote (Unix) | off | | |
+| [`--fork-pool[=core\|app]`](#-fork-pool) | fork workers off a prewarmed template (Unix) | off; `app` under `--watch` on macOS | | |
 | [`--dist`](#-dist-loadloadfileloadscopeloadgroupeach) | distribution mode | `load` | `dist` | |
 | [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch`) | `order` | |
 | [`--shuffle[=SEED]`](#-shuffleseed) | seeded random dispatch order | off | | |
@@ -139,24 +139,51 @@ see [Passthrough-IO flags](#passthrough-io-flags).
 
 ### `--fork-pool`
 
-Fork-prewarm the worker pool. **Unix only**, off by default.
+Fork-prewarm the worker pool: `--fork-pool[=core|app]`. **Unix only**. Off by
+default, except under [`--watch`](#-watch) on macOS, which uses `app`.
 
-Normally each worker is a fresh `python` process that re-imports rstest's
-vendored pytest core, so at high `-n` that import is paid once per worker.
-With `--fork-pool` a single zygote imports the core **once** and `fork()`s the
-workers off it; only the app/conftest imports (per-worker anyway, at
-collection) are paid N times.
+Normally each worker is a fresh `python` process that imports rstest's
+vendored pytest core and then your app, so that import is paid once per
+worker. With `--fork-pool` one template process imports it once and `fork()`s
+the workers off it.
 
-- Only the vendored core is shared. Each child still sets its own `gwN`
-  identity, collects independently, and owns its coverage file and temp dir.
-- Only the **initial** pool is forked; a crash-respawned worker uses the
-  normal spawn path.
-- Accepted everywhere, but a no-op on Windows, in single-worker runs
-  (`-n 0`/`-n 1`), and under `-s`/`--pdb`/`--co` passthrough.
+- `core` (the default value, also bare `--fork-pool`): the template imports
+  only the vendored pytest core. App and conftest imports are still paid per
+  worker.
+- `app` (**macOS only** for now; elsewhere it falls back to `core` with a
+  note): the template also imports the app's modules, as recorded by earlier
+  runs in `.rstest_cache/warm/`. The first run only records them. Under
+  `--watch` the template stays alive for the whole session, so a save no
+  longer re-imports the app at all
+  ([Watch mode](../guides/watch-mode.md#warm-template-macos)).
 
-The saving grows with `-n` and core contention: largest on short or cold
-suites, negligible on compute-heavy ones. The `--doctor` `startup:` line shows
-whether it's worth it.
+Every child still sets its own `gwN` identity, collects independently, and
+owns its coverage file and temp dir. Only the **initial** pool is forked; a
+crash-respawned worker uses the normal spawn path. `--fork-pool` is accepted
+everywhere, but a no-op on Windows, in single-worker runs (`-n 0`/`-n 1`), and
+under `-s`/`--pdb`/`--co` passthrough.
+
+**What `app` won't import in the template.** A module is imported per worker
+instead (and named once in an `rstest: note:` line) when its import:
+
+- reads a per-worker or per-session environment variable
+  (`PYTEST_XDIST_WORKER`, `DJANGO_SETTINGS_MODULE` as pytest-django sets it,
+  and any other variable your test session changes), or writes any variable;
+- starts a thread, opens a socket or leaves a non-read-only file open, or
+  loads a macOS system framework;
+- keeps a reference to `sys.stdout`/`sys.stderr`/`sys.stdin`;
+- fails, or quietly works around a failed import of another module;
+- is one pytest rewrites for assertions (test files, conftests, pytest
+  plugins, `register_assert_rewrite`).
+
+A module that imports one of these is imported per worker too. Known limits:
+a module that copied `os.environ` before the template started is not
+checked, and coverage is not supported yet (`--cov` turns `app` off; under
+`--watch` the default is then the plain spawn path).
+
+Per run, `app` saves little wall time, because workers already import in
+parallel; its value is under `--watch`. The `--doctor` `startup:` line shows
+the spawn cost, and with `app` how much the template imported.
 
 ### `--dist <load|loadfile|loadscope|loadgroup|each>`
 
@@ -1000,6 +1027,9 @@ are affected, and a config change reruns the full selection. Type `q` then
 Enter (or press `Ctrl+C`) to stop; quitting with `q` exits `0` whatever the
 last cycle's outcome, and an rstest-level error during a cycle exits `1`.
 Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast).
+On macOS they also default to [`--fork-pool=app`](#-fork-pool): a template
+that already imported your app forks each cycle's workers, so a save doesn't
+re-import it. Pass `--fork-pool` (or `--fork-pool=core`) to opt out.
 Ignored directories, stdin handling, the rerun policy and per-cycle cost:
 [Watch mode](../guides/watch-mode.md).
 

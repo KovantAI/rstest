@@ -283,7 +283,10 @@ which is the lowest alive worker (promoted to the next one if it crashes).
 
 **Fork pool**{ #fork-pool }: with [`--fork-pool`](../reference/cli.md#-fork-pool)
 (Unix), workers are forked from one process that has already imported the
-vendored core, instead of each importing it from scratch.
+vendored core, instead of each importing it from scratch. With
+`--fork-pool=app` (macOS, the `--watch` default there) that process has also
+imported your app's modules; under `--watch` it lives for the whole session
+(the **warm template**).
 
 **Item dispatch**{ #item-dispatch }: distributing individual tests (not
 files) to workers. Under full collection (`--collect full`, where every worker

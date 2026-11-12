@@ -362,6 +362,14 @@ re-importing per worker. The hint is dropped once the run already uses
 single-worker runs. It's a fixed per-run tax,
 so it matters most on short / cold suites and is negligible on long ones.
 
+With [`--fork-pool=app`](../reference/cli.md#-fork-pool) the line also says
+what the template imported, how many modules it imports per worker instead,
+and how long its import took:
+
+```text
+startup: 0.31s spawning 8 workers (12% of wall); warm template: 312 modules (4 denied, 1.8s import)
+```
+
 ## JSON output for CI
 
 `rstest --doctor-json doctor.json` writes the same analysis as a versioned

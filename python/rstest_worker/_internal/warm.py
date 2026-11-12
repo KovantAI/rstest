@@ -29,10 +29,13 @@ RECORD_ENV = "RSTEST_WARM_RECORD"
 MANIFEST_ENV = "RSTEST_WARM_MANIFEST"
 RESULT_ENV = "RSTEST_WARM_RESULT"
 
-# Top-level packages the zygote already has (or that are rstest's own).
+# Top-level packages the zygote already has (or that are rstest's own), plus
+# what the template's own guards import (`ctypes` for the macOS probes): a
+# warm-forked worker has those whether the app uses them or not, and recording
+# them would change the manifest, and so rebuild a `--watch` template, once.
 _CORE = frozenset(
     {"pytest", "_pytest", "pluggy", "py", "iniconfig", "packaging", "rstest_worker"}
-    | {"__main__", "__mp_main__"}
+    | {"__main__", "__mp_main__", "ctypes"}
 )
 
 # Environment keys whose value differs per worker, or that only a worker's

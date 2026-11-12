@@ -27,6 +27,8 @@ enum Event {
 }
 
 pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
+    let session_cli = with_watch_default(cli, base_args, cfg!(target_os = "macos"));
+    let cli = &session_cli;
     let cwd = std::env::current_dir()?;
     let mut sink = Sink::stdio(Palette::detect(base_args));
     let project = config::discover(&cwd, sink.err());
@@ -55,6 +57,12 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
     })?;
     watcher.watch(&cwd, RecursiveMode::Recursive)?;
 
+    // `--fork-pool=app` under --watch: keep one template server for the session
+    // (macOS only for now, like `=app` itself).
+    #[cfg(unix)]
+    if cli.fork_pool == Some(crate::scheduling::warm::ForkPool::App) && cfg!(target_os = "macos") {
+        crate::scheduling::worker::enable_template();
+    }
     let mut status = execute(cli, base_args)?;
     loop {
         let waiting = || sink.warn(&waiting_message(quit_by_q, status));
@@ -92,8 +100,23 @@ pub fn watch_loop(cli: &Cli, base_args: &[String]) -> Result<()> {
                 .join(", "),
             mode
         ));
+        #[cfg(unix)]
+        crate::scheduling::worker::drop_stale_template();
         status = execute(cli, &args)?;
     }
+}
+
+/// `--watch` keeps a warm template for the session by default on macOS
+/// (`--fork-pool=app`): each cycle then forks workers that already imported the
+/// app instead of importing it again. An explicit `--fork-pool[=core]` wins.
+/// Not under coverage, which the template doesn't support: there the default
+/// stays the plain spawn path rather than a note every cycle.
+fn with_watch_default(cli: &Cli, args: &[String], macos: bool) -> Cli {
+    let mut cli = cli.clone();
+    if cli.fork_pool.is_none() && macos && !crate::scheduling::warm::coverage_requested(args) {
+        cli.fork_pool = Some(crate::scheduling::warm::ForkPool::App);
+    }
+    cli
 }
 
 /// The between-runs prompt. Offers `q` only when the stdin listener runs:
@@ -343,6 +366,29 @@ mod tests {
     use super::*;
 
     const NO_DEBOUNCE: Duration = Duration::from_millis(0);
+
+    #[test]
+    fn watch_defaults_to_the_warm_template_on_macos() {
+        use crate::scheduling::warm::ForkPool;
+        use clap::Parser;
+        let none: &[String] = &[];
+        let plain = Cli::parse_from(["rstest", "--watch"]);
+        assert_eq!(
+            with_watch_default(&plain, none, true).fork_pool,
+            Some(ForkPool::App)
+        );
+        // Not elsewhere: `=app` is macOS-only for now.
+        assert_eq!(with_watch_default(&plain, none, false).fork_pool, None);
+        // An explicit choice wins.
+        let core = Cli::parse_from(["rstest", "--watch", "--fork-pool"]);
+        assert_eq!(
+            with_watch_default(&core, none, true).fork_pool,
+            Some(ForkPool::Core)
+        );
+        // Coverage: the plain spawn path, not a refusal note every cycle.
+        let cov = ["--cov=pkg".to_string()];
+        assert_eq!(with_watch_default(&plain, &cov, true).fork_pool, None);
+    }
 
     #[test]
     fn collect_changes_filters_sorts_and_dedups() {
