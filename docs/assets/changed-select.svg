@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How --changed decides, per changed file. A config or non-Python file means a full run. A changed test file runs itself. A conftest.py selects its whole subtree. Otherwise, if the coverage index measured the file at the same content hash and every changed line has recorded coverage, exactly the tests whose coverage hit those lines are selected. Anything else, including new code, unmeasured, drifted or untracked files and a cold cache, falls back to the import graph: every test file that can reach the changed file. Selections from every changed file are unioned: over-selection is safe, under-selection is not." viewBox="0 0 820 870">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<rect class="rs-loop" x="60" y="20" width="380" height="52" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="52">For each changed file</text>
+<line class="rs-edge" x1="250" y1="72" x2="250" y2="112"/>
+<rect class="rs-box" x="60" y="112" width="380" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="150">Config or non-Python file?</text>
+<line class="rs-edge" x1="440" y1="144" x2="510" y2="144"/>
+<text class="rs-label" x="475" y="136">yes</text>
+<rect class="rs-box" x="510" y="112" width="270" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="645" y="140">Full run</text>
+<text class="rs-sub rs-sm" x="645" y="162">the whole suite</text>
+<line class="rs-edge" x1="250" y1="176" x2="250" y2="216"/>
+<text class="rs-label rs-start" x="258" y="201">no</text>
+<rect class="rs-box" x="60" y="216" width="380" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="254">A test file?</text>
+<line class="rs-edge" x1="440" y1="248" x2="510" y2="248"/>
+<rect class="rs-box" x="510" y="216" width="270" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="645" y="244">It runs itself</text>
+<text class="rs-sub rs-sm" x="645" y="266">every test in that file</text>
+<line class="rs-edge" x1="250" y1="280" x2="250" y2="320"/>
+<rect class="rs-box" x="60" y="320" width="380" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="358">A conftest.py?</text>
+<line class="rs-edge" x1="440" y1="352" x2="510" y2="352"/>
+<rect class="rs-box" x="510" y="320" width="270" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="645" y="348">Its whole subtree</text>
+<text class="rs-sub rs-sm" x="645" y="370">every test below it</text>
+<line class="rs-edge" x1="250" y1="384" x2="250" y2="424"/>
+<rect class="rs-box" x="60" y="424" width="380" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="452">In the coverage index?</text>
+<text class="rs-sub rs-sm" x="250" y="474">measured, same content hash</text>
+<line class="rs-edge" x1="250" y1="488" x2="250" y2="528"/>
+<text class="rs-label rs-start" x="258" y="513">yes</text>
+<path class="rs-edge" d="M60 456 H36 V676 H60"/>
+<text class="rs-label rs-end" x="30" y="570">no</text>
+<rect class="rs-box" x="60" y="528" width="380" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="556">Every changed line covered?</text>
+<text class="rs-sub rs-sm" x="250" y="578">no inserted new code</text>
+<line class="rs-edge" x1="440" y1="560" x2="510" y2="560"/>
+<text class="rs-label" x="475" y="552">yes</text>
+<rect class="rs-box rs-hot" x="510" y="528" width="270" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="645" y="556">Exactly those tests</text>
+<text class="rs-sub rs-sm" x="645" y="578">whose coverage hit the lines</text>
+<line class="rs-edge" x1="250" y1="592" x2="250" y2="632"/>
+<text class="rs-label rs-start" x="258" y="617">no</text>
+<rect class="rs-box" x="60" y="632" width="380" height="88" rx="12"/>
+<text class="rs-title rs-sm" x="250" y="662">Import graph</text>
+<text class="rs-sub rs-sm" x="250" y="686">every test file that can reach it</text>
+<text class="rs-note" x="250" y="706">also for untracked files and a cold cache</text>
+<line class="rs-edge" x1="250" y1="720" x2="250" y2="764"/>
+<line class="rs-edge" x1="645" y1="592" x2="645" y2="764"/>
+<rect class="rs-loop" x="60" y="764" width="720" height="84" rx="14"/>
+<text class="rs-title rs-sm" x="420" y="796">Union across every changed file</text>
+<text class="rs-tag" x="420" y="826">OVER-SELECTION IS SAFE, UNDER-SELECTION IS NOT</text>
+</svg>

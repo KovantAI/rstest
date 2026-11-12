@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How the --since-green baseline advances. With no baseline, or after the environment changed (interpreter, lockfiles, installed packages), rstest runs everything to set a new one; otherwise it runs what the diff from the baseline reaches, as --changed does. A run that is not fully green keeps the baseline, so the breaking change stays selected. A green run on a working tree with uncommitted changes keeps it too, with a note: commit, then run once more. Only a green run on a clean tree moves the baseline to HEAD. Report files written inside the checkout make the tree dirty and pin the baseline." viewBox="0 0 820 750">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<rect class="rs-loop" x="60" y="20" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="48">rstest --since-green</text>
+<text class="rs-note" x="260" y="70">baseline in last_green.json</text>
+<line class="rs-edge" x1="260" y1="84" x2="260" y2="124"/>
+<rect class="rs-box" x="60" y="124" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="152">Baseline, same environment?</text>
+<text class="rs-sub rs-sm" x="260" y="174">interpreter, lockfiles, installed packages</text>
+<line class="rs-edge" x1="460" y1="156" x2="530" y2="156"/>
+<text class="rs-label" x="495" y="148">no</text>
+<rect class="rs-box" x="530" y="124" width="250" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="655" y="152">Run everything</text>
+<text class="rs-sub rs-sm" x="655" y="174">to set a new baseline</text>
+<path class="rs-edge" d="M655 188 V260 H460"/>
+<line class="rs-edge" x1="260" y1="188" x2="260" y2="228"/>
+<text class="rs-label rs-start" x="268" y="213">yes</text>
+<rect class="rs-box" x="60" y="228" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="256">Run the selection</text>
+<text class="rs-sub rs-sm" x="260" y="278">what the diff reaches, as --changed</text>
+<line class="rs-edge" x1="260" y1="292" x2="260" y2="332"/>
+<rect class="rs-box" x="60" y="332" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="360">Fully green?</text>
+<text class="rs-sub rs-sm" x="260" y="382">exit 0, or nothing was affected</text>
+<line class="rs-edge" x1="460" y1="364" x2="530" y2="364"/>
+<text class="rs-label" x="495" y="356">no</text>
+<rect class="rs-box" x="530" y="332" width="250" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="655" y="360">Baseline stays</text>
+<text class="rs-sub rs-sm" x="655" y="382">the break stays selected</text>
+<line class="rs-edge" x1="260" y1="396" x2="260" y2="436"/>
+<text class="rs-label rs-start" x="268" y="421">yes</text>
+<rect class="rs-box" x="60" y="436" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="464">Working tree clean?</text>
+<text class="rs-sub rs-sm" x="260" y="486">runner artifacts ignored</text>
+<line class="rs-edge" x1="460" y1="468" x2="530" y2="468"/>
+<text class="rs-label" x="495" y="460">no</text>
+<rect class="rs-box" x="530" y="436" width="250" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="655" y="464">Stays, with a note</text>
+<text class="rs-sub rs-sm" x="655" y="486">commit, then run once more</text>
+<line class="rs-edge" x1="260" y1="500" x2="260" y2="540"/>
+<text class="rs-label rs-start" x="268" y="525">yes</text>
+<rect class="rs-box rs-hot" x="60" y="540" width="400" height="64" rx="12"/>
+<text class="rs-title rs-sm" x="260" y="568">Baseline moves to HEAD</text>
+<text class="rs-sub rs-sm" x="260" y="590">the next run diffs from here</text>
+<rect class="rs-loop" x="60" y="644" width="720" height="84" rx="14"/>
+<text class="rs-title rs-sm" x="420" y="676">Report files inside the checkout pin the baseline</text>
+<text class="rs-sub rs-sm" x="420" y="702">an untracked junit.xml dirties the tree, then forces a full run</text>
+</svg>

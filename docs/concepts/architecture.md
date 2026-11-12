@@ -2,20 +2,7 @@
 
 rstest is two programs with a sharp boundary between them:
 
-```text
-┌─ rstest (Rust) ────────────────────────────────┐
-│ CLI · scheduling · progress/failure rendering  │
-│ duration cache · crash recovery · merged       │
-│ reports (summary, junitxml, lastfailed)        │
-└──────────────┬─────────────────────────────────┘
-               │ msgpack over dedicated pipes
-┌──────────────▼─ worker pool (N processes) ─────┐
-│ your project's Python interpreter              │
-│ rstest_worker + vendored pytest core           │
-│ collection · fixtures · plugins · test         │
-│ execution: everything semantic                 │
-└────────────────────────────────────────────────┘
-```
+![rstest's Rust orchestrator (CLI, scheduling, progress and failures, duration cache, crash recovery, merged reports) talks msgpack over dedicated pipes to worker processes gw0 to gwN, each running your interpreter with rstest_worker and a vendored pytest core.](../assets/architecture.svg)
 
 The Rust orchestrator owns everything *around* the tests; a vendored
 pytest core owns everything *about* the tests.
@@ -40,6 +27,8 @@ depends on the real pluggy. Plugins load through normal `pytest11` entry
 points and find exactly the classes they expect.
 
 ## How a parallel run works
+
+![A parallel run in five steps: spawn the workers, collect (full by default, lazy for a large suite on a warm cache), dispatch slow tests and costly modules first, run and stream each phase back, then wind down: held items run, workers stay up for reruns, session fixtures tear down, the serial phase runs, and results merge.](../assets/parallel-run.svg)
 
 1. **Spawn.** N workers start in your project's interpreter, each
    announced with an xdist-style identity (`gw0`, `gw1`, ...) that plugins

@@ -11,6 +11,8 @@ this from its queue, which can misattribute; the explicit signal cannot.)
 
 ## What happens
 
+![When a worker dies or its hang watchdog fires, the in-flight test is retried under --reruns or reported failed, the worker's other tests go back to the head of the queue, and the worker is replaced under the same gwN while restarts are left, otherwise the run reports an internal error and carries on with the survivors.](../assets/crash.svg)
+
 1. The in-flight test is reported **failed**, with a "crashed while
    running this test" message. It is **not retried** by default: a
    reliably-segfaulting test would otherwise kill workers in a loop.
