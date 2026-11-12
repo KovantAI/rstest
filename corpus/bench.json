@@ -1,11 +1,11 @@
 {
  "environment": {
-  "date": "2026-11-05",
+  "date": "2026-11-12",
   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
   "logical_cpus": 14,
-  "load_1m_at_start": 1.71,
-  "rstest": "rstest 0.10.0",
-  "rstest_commit": "adfb689",
+  "load_1m_at_start": 2.47,
+  "rstest": "rstest 0.11.1",
+  "rstest_commit": "e4f3cad",
   "suite_commits": {
    "aiohttp": "12ea5a580ac02f5062b927ac3fa278000d7abb04",
    "anyio": "b7ea84c275fde6420ea242844bc7fb0fee6132f7",
@@ -26,6 +26,7 @@
    "more-itertools": "5692cd838d2b0b55ff46c5f9934b79a0b069027e",
    "packaging": "1529771b80cf6a327afdf33a8a0e7a96ac3f428f",
    "pluggy": "e2c9b6f101ee1a2ce1de5162c03f75d56635b415",
+   "pretix": "137059dd4e7a7f4643199323b69a85824bffc28e",
    "pydantic": "2700a3594d61844eb771abf2b3e36660d501e0dd",
    "python-dateutil": "48bd1af97e71baf8e96fce5b663d589caac8f147",
    "requests": "6f66281a1d6326b1b9c4ac09ca30de0fc4e6ef43",
@@ -42,72 +43,57 @@
   },
   "repeat": 5,
   "warmup": 1,
-  "rstest_cache": "warm",
+  "rstest_cache": "cold",
   "xdist_dist": "load (xdist default)",
-  "bench_python": "3.13.13",
+  "bench_python": "3.14.6",
   "suite_runtimes": {
-   "pandas": {
+   "aiohttp": {
     "python": "3.13.13",
     "python_implementation": "CPython",
-    "pytest": "9.1.1",
+    "pytest": "9.2.0",
     "pytest_xdist": "3.8.0",
-    "rstest_worker": "0.10.0"
+    "rstest_worker": "0.11.1"
    }
   }
  },
  "spectrum": [
   {
-   "suite": "pandas",
-   "pytest_wall": 183.0,
-   "pytest_band": "183.0 (180.2-184.0)",
-   "rstest_wall": 44.7,
-   "rstest_band": "44.7 (44.6-44.9)",
-   "speedup": 4.09,
-   "parity": 100.0,
+   "suite": "aiohttp",
+   "pytest_wall": 193.0,
+   "pytest_band": "193.0 (193.0-193.8)",
+   "rstest_wall": 124.0,
+   "rstest_band": "124.0 (124.0-124.0)",
+   "speedup": 1.56,
+   "parity": 99.91,
    "parity_missing": 0,
-   "parity_mismatch": 0,
+   "parity_mismatch": 4,
    "parity_unexplained": 0,
    "baseline_collect_errors": 0,
-   "baseline_tests": 193843,
+   "baseline_tests": 4469,
    "candidate_collect_errors": 0
   }
  ],
  "sweeps": [
   {
-   "suite": "pandas",
-   "pytest_wall": 183.0,
-   "pytest_band": "183.0 (180.2-184.0)",
+   "suite": "aiohttp",
+   "pytest_wall": 193.0,
+   "pytest_band": "193.0 (193.0-193.8)",
    "points": [
     {
      "workers": 8,
-     "rstest_wall": 47.7,
-     "rstest_band": "47.7 (47.7-48.4)",
-     "min": 47.65,
-     "max": 48.39,
-     "speedup": 3.84,
-     "efficiency": 0.48,
+     "rstest_wall": 153.9,
+     "rstest_band": "153.9 (150.3-155.0)",
+     "min": 150.3,
+     "max": 155.02,
+     "speedup": 1.25,
+     "efficiency": 0.16,
      "parity": 100.0,
      "parity_missing": 0,
      "parity_mismatch": 0,
      "parity_unexplained": 0,
      "baseline_collect_errors": 0,
-     "baseline_tests": 193843,
-     "candidate_collect_errors": 0,
-     "xdist": {
-      "wall": 87.7,
-      "band": "87.7 (86.1-91.8)",
-      "min": 86.06,
-      "max": 91.77,
-      "speedup": 2.09,
-      "efficiency": 0.26,
-      "parity": 100.0,
-      "parity_missing": 0,
-      "parity_mismatch": 0,
-      "parity_unexplained": 0,
-      "baseline_collect_errors": 0,
-      "baseline_tests": 193843,
-      "candidate_collect_errors": 0
-     }
+     "baseline_tests": 4469,
+     "candidate_collect_errors": 0
     }
    ]
   }
