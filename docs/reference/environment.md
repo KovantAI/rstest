@@ -135,6 +135,7 @@ Standard variables from CI systems and tools that rstest reads when present:
 | `GITHUB_STEP_SUMMARY` | doctor runs append their markdown report to this file on GitHub Actions |
 | `GITHUB_WORKSPACE`, `BUILD_SOURCESDIRECTORY` | the repository root that `--output github` / `--output azure` annotation paths are made relative to, when it contains the rootdir; otherwise the nearest ancestor holding `.git` |
 | `BUILDKITE` | on Buildkite (non-empty), doctor reports and flaky tests are published with `buildkite-agent annotate` |
+| `COV_CORE_SOURCE` | set by a pytest-cov parent process: coverage is measuring this run, so [`--fork-pool=app`](cli.md#-fork-pool) falls back to `core` (and `--watch` on macOS keeps the plain spawn path) |
 | `UV_PYTHON_INSTALL_DIR`, `XDG_DATA_HOME`, `APPDATA` | locating uv-managed interpreters during interpreter discovery (`UV_PYTHON_INSTALL_DIR` first, else uv's default under `XDG_DATA_HOME` or `~/.local/share` on Unix, `%APPDATA%` on Windows) |
 | `XDG_CACHE_HOME`, `LOCALAPPDATA` | default base for the interpreter-probe cache (see `RSTEST_CACHE_DIR`) |
 | `COVERAGE_RCFILE` | coverage.py's config-file override. When `--cov-config` names no file, or names pytest-cov's default `.coveragerc`, rstest reads the `[run]` settings from this file (as coverage.py would) to decide what `--cov` measures. coverage.py follows the same rule when rstest combines and reports parallel coverage |
