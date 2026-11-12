@@ -139,6 +139,7 @@ class DonePayload(_DoneRequired, total=False):
     imported: list[str]  # --fork-pool=app: warmable modules, import order
     sys_path: list[str]  # --fork-pool=app: sys.path the modules were imported with
     coverage: bool  # --fork-pool=app: coverage was tracing (template unsafe)
+    rewrite: list[str]  # --fork-pool=app: names pytest marks for assertion rewriting
 
 
 class ItemStartPayload(TypedDict):

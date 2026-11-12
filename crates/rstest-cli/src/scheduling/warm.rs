@@ -43,6 +43,11 @@ pub struct Manifest {
     pub key: Key,
     pub sys_path: Vec<String>,
     pub modules: Vec<String>,
+    /// Names pytest marks for assertion rewriting (pytest11 plugin dists,
+    /// `register_assert_rewrite`): the template refuses them even when another
+    /// module imports them.
+    #[serde(default)]
+    pub rewrite: std::collections::BTreeSet<String>,
     /// Module -> why it is imported per worker instead of in the template.
     #[serde(default)]
     pub deny: BTreeMap<String, String>,
@@ -59,6 +64,7 @@ pub struct Record {
     seen: HashSet<String>,
     pub sys_path: Vec<String>,
     pub coverage: bool,
+    pub rewrite: std::collections::BTreeSet<String>,
 }
 
 impl Record {
@@ -174,6 +180,17 @@ pub fn finish(run: WarmRun, record: Record, sink: &mut Sink) -> Option<Stats> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
     let _ = std::fs::remove_file(&run.env.result);
+    // The template was used and no worker reached its session end: whatever
+    // broke the run may be the template itself. Start over from a recording
+    // run rather than keep forking from the same manifest.
+    if run.env.manifest.is_some() && record.imported.is_empty() {
+        let _ = std::fs::remove_file(&run.path);
+        sink.warn(
+            "rstest: note: --fork-pool=app: no worker finished its session with the warm \
+             template; it is reset and the next run records it again",
+        );
+        return None;
+    }
     let prior = run.prior.unwrap_or_default();
     let mut deny = prior.deny.clone();
     if let Some(o) = &outcome {
@@ -183,6 +200,11 @@ pub fn finish(run: WarmRun, record: Record, sink: &mut Sink) -> Option<Stats> {
         deny.extend(o.denied.clone());
     }
     let manifest = Manifest {
+        rewrite: if record.imported.is_empty() {
+            prior.rewrite
+        } else {
+            record.rewrite
+        },
         key: run.key,
         sys_path: if record.sys_path.is_empty() {
             prior.sys_path
@@ -361,6 +383,7 @@ mod tests {
         let (mut sink, cap) = Sink::captured();
         let mut record = Record::default();
         record.merge(vec!["new".into()], vec!["/p".into()], false);
+        record.rewrite.insert("_hypothesis_globals".into());
         let stats = finish(run, record, &mut sink).unwrap();
         assert_eq!(
             stats,
@@ -377,8 +400,32 @@ mod tests {
         assert!(err.contains("ran cold"));
         let m = load(&dir.path().join("manifest.json")).unwrap();
         assert_eq!(m.modules, vec!["new".to_string()]);
+        assert!(m.rewrite.contains("_hypothesis_globals"));
         assert_eq!(m.deny.len(), 3);
         assert!(!dir.path().join("result.json").exists());
+    }
+
+    #[test]
+    fn a_run_no_worker_finished_resets_the_manifest() {
+        // Corpus regression: a template that broke every session kept being
+        // reused, since no worker lived to record a corrected manifest.
+        let dir = TmpDir::new();
+        let prior = Manifest {
+            key: key("k"),
+            modules: vec!["bad".into()],
+            ..Manifest::default()
+        };
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            serde_json::to_vec(&prior).unwrap(),
+        )
+        .unwrap();
+        let mut run = run_in(dir.path(), Some(prior), key("k"));
+        run.env.manifest = Some(dir.path().join("manifest.json"));
+        let (mut sink, cap) = Sink::captured();
+        assert_eq!(finish(run, Record::default(), &mut sink), None);
+        assert!(!dir.path().join("manifest.json").exists());
+        assert!(cap.err().contains("reset"));
     }
 
     #[test]

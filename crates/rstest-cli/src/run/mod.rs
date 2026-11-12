@@ -4283,6 +4283,7 @@ mod tests {
                 imported: vec![],
                 sys_path: vec![],
                 coverage: false,
+                rewrite: vec![],
             }),
             Some(1)
         );

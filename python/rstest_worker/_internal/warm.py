@@ -52,6 +52,9 @@ WORKER_KEYS = frozenset(
 
 # Set at session end by StreamPlugin, sent with the worker's `done` event.
 recorded: list[str] | None = None
+# pytest's assertion-rewrite marks (pytest11 plugin dists, register_assert_rewrite)
+# at session end: the template must not import these, even transitively.
+rewrite_marked: list[str] = []
 
 
 # ── record ──────────────────────────────────────────────────────────────────
@@ -66,6 +69,7 @@ def record(session: Any) -> list[str]:
         for p in config.pluginmanager.get_plugins()
         if os.path.basename(getattr(p, "__file__", None) or "") == "conftest.py"
     }
+    global rewrite_marked
     rewrite: set[str] = set()
     try:
         from _pytest.assertion import assertstate_key
@@ -75,6 +79,7 @@ def record(session: Any) -> list[str]:
         rewrite = set(hook._must_rewrite)
     except Exception:
         pass
+    rewrite_marked = sorted(rewrite)
     try:
         pats = list(config.getini("python_files"))
     except Exception:
@@ -123,7 +128,10 @@ class Hazard(BaseException):
 
 
 _loading: list[str] = []
+# Per frame of `_loading`: a child import that failed and was swallowed.
+_failed_child: list[str | None] = []
 _armed = False
+_stdio: frozenset[int] = frozenset()
 
 
 class _RecordingEnviron(os._Environ):
@@ -143,16 +151,41 @@ class _RecordingEnviron(os._Environ):
 
 
 class _Blocker:
-    """Meta-path finder that fails denied modules, so a module that imports
-    a denied one is denied too instead of dragging it into the template."""
+    """Meta-path finder that fails denied modules and modules pytest will
+    rewrite, so a module that imports one is denied too instead of dragging it
+    into the template (imported early, a rewrite-marked module makes pytest
+    raise `PytestAssertRewriteWarning`, an error under `filterwarnings=error`)."""
 
-    def __init__(self, deny: dict[str, str]):
+    def __init__(self, deny: dict[str, str], rewrite: list[str]):
         self.deny = deny
+        self.rewrite = tuple(rewrite)
+        self.prefixes = tuple(r + "." for r in rewrite)
 
     def find_spec(self, name, path=None, target=None):
         if name in self.deny:
             raise ImportError(f"imports denied module {name}")
+        if name in self.rewrite or name.startswith(self.prefixes):
+            raise ImportError(f"imports {name}, which pytest rewrites")
         return None
+
+
+def plugin_rewrite_names() -> set[str]:
+    """What pytest's `_mark_plugins_for_rewrite` will mark: every module of a
+    distribution with a `pytest11` entry point. Computed here so the template
+    never depends on a manifest recorded before a plugin was installed."""
+    import importlib.metadata
+
+    from _pytest.config import _iter_rewritable_modules
+
+    out: set[str] = set()
+    for dist in importlib.metadata.distributions():
+        eps = [ep for ep in dist.entry_points if ep.group == "pytest11"]
+        if not eps:
+            continue
+        out.update(_iter_rewritable_modules(str(f) for f in dist.files or []))
+        # Editable installs list no files: fall back to the entry points' packages.
+        out.update(ep.value.partition(":")[0].strip().split(".")[0] for ep in eps)
+    return out
 
 
 def _threads() -> int | None:
@@ -228,19 +261,52 @@ def hazard(before: tuple, after: tuple) -> str | None:
     return None
 
 
+def _stdio_ids() -> frozenset[int]:
+    streams = [sys.stdin, sys.stdout, sys.stderr]
+    streams += [getattr(s, "buffer", None) for s in streams]
+    return frozenset(id(s) for s in streams if s is not None)
+
+
+def binds_stdio(mod: Any, stdio: frozenset[int]) -> bool:
+    """The module keeps a stdio stream in a global (`from sys import stdout`).
+    In the template that is the stream from before pytest's capture; a worker
+    that imports it itself binds the one pytest set up."""
+    try:
+        return any(id(v) in stdio for v in vars(mod).values())
+    except TypeError:
+        return False
+
+
 def _guarded_find_and_load(orig):
     def find_and_load(name, import_):
         if name in sys.modules or not _armed:
             return orig(name, import_)
         before = _probe()
         _loading.append(name)
+        _failed_child.append(None)
         try:
             mod = orig(name, import_)
-        finally:
+        except BaseException as e:
             _loading.pop()
+            _failed_child.pop()
+            # Tell the importer. A module that is simply not installed fails
+            # the same way in every worker; anything else (a denied module, an
+            # import that needs a worker's state) may succeed there.
+            template_only = isinstance(e, Exception) and not isinstance(e, ModuleNotFoundError)
+            if _failed_child and template_only:
+                _failed_child[-1] = name
+            raise
+        _loading.pop()
+        failed = _failed_child.pop()
+        if failed is not None:
+            # `try: import x / except ImportError: x = None` would keep the
+            # template-only failure in every forked worker.
+            raise Hazard(name, f"imports {failed}, which fails in the template, and carries on")
         reason = hazard(before, _probe())
         if reason:
             raise Hazard(name, reason)
+        if binds_stdio(sys.modules.get(name), _stdio):
+            raise Hazard(name, "keeps a reference to sys.stdout/stderr/stdin from import")
         return mod
 
     return find_and_load
@@ -250,7 +316,7 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
     """Import the manifest's modules. Returns False when this process is no
     longer fit to fork from (a guard fired, or an error after imports began):
     the caller then starts over as a plain core zygote."""
-    global _armed, _dyld
+    global _armed, _dyld, _stdio
     result: dict[str, Any] = {"imported": 0, "denied": {}, "hazard": None, "error": None}
     t0 = time.perf_counter()
     clean = True
@@ -271,7 +337,10 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
         _dyld._dyld_get_image_name.restype = ctypes.c_void_p
     saved_path, saved_env = list(sys.path), os.environ
     orig_fal = _bootstrap._find_and_load  # ty: ignore[unresolved-attribute]
-    blocker = _Blocker(deny)
+    rewrite = set(manifest.get("rewrite") or [])
+    with contextlib.suppress(Exception):
+        rewrite |= plugin_rewrite_names()
+    blocker = _Blocker(deny, sorted(rewrite))
     sys.path[:] = recorded_path + [p for p in saved_path if p not in recorded_path]
     env: Any = saved_env
     # Swapped, not cleared: the recorder shares the real mapping's data.
@@ -280,6 +349,7 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
     )
     sys.meta_path.insert(0, blocker)
     _bootstrap._find_and_load = _guarded_find_and_load(orig_fal)  # ty: ignore[unresolved-attribute]
+    _stdio = _stdio_ids()
     _armed = True
     try:
         for name in modules:

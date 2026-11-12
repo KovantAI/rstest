@@ -166,6 +166,7 @@ def _done(conn, exitstatus: int) -> None:
 
         if warm.recorded is not None:
             payload["imported"] = warm.recorded
+            payload["rewrite"] = warm.rewrite_marked
             payload["sys_path"] = list(sys.path)
             payload["coverage"] = warm.coverage_active()
     conn.send("done", payload)

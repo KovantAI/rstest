@@ -88,10 +88,17 @@ def app(tmp_path, monkeypatch):
         (pkg / f"{name}.py").write_text(textwrap.dedent(src))
         created.append(name)
 
-    def run(modules, deny=None):
+    def run(modules, deny=None, rewrite=()):
         manifest = tmp_path / "manifest.json"
         manifest.write_text(
-            json.dumps({"modules": modules, "deny": deny or {}, "sys_path": [str(pkg)]})
+            json.dumps(
+                {
+                    "modules": modules,
+                    "deny": deny or {},
+                    "rewrite": list(rewrite),
+                    "sys_path": [str(pkg)],
+                }
+            )
         )
         result = tmp_path / "result.json"
         clean = warm.prewarm(str(manifest), str(result))
@@ -168,6 +175,16 @@ def test_a_socket_opened_at_import_is_a_hazard(app):
     assert result["denied"]["wt_sock"] == "opens a socket at import"
 
 
+def test_a_module_keeping_a_stdio_stream_is_a_hazard(app):
+    # Corpus regression (structlog): `from sys import stdout` in the template
+    # binds the stream from before pytest's capture; 18 tests then failed under
+    # =app and passed under =core.
+    app.write("wt_stdio", "from sys import stdout\n")
+    clean, result = app.run(["wt_stdio"])
+    assert not clean
+    assert result["denied"]["wt_stdio"].startswith("keeps a reference to sys.stdout")
+
+
 def test_a_read_only_file_left_open_is_fine(app, tmp_path):
     data = tmp_path / "data.txt"
     data.write_text("x")
@@ -207,6 +224,60 @@ def test_a_module_importing_a_denied_one_is_denied_too(app):
     assert "wt_bad" not in sys.modules
 
 
+def test_a_module_importing_a_rewrite_marked_one_is_denied(app):
+    # Corpus regression (packaging, urllib3, sqlalchemy, trio): an app module
+    # pulled in hypothesis's `_hypothesis_globals`, which pytest marks for
+    # rewrite; imported by the template first, pytest raised
+    # PytestAssertRewriteWarning, a session error under filterwarnings=error.
+    app.write("wt_plugpkg", "X = 1\n")
+    app.write("wt_plugpkg_sub", "Y = 1\n")
+    app.write("wt_lib", "import wt_plugpkg\n")
+    clean, result = app.run(["wt_lib"], rewrite=["wt_plugpkg"])
+    assert clean
+    assert "wt_plugpkg, which pytest rewrites" in result["denied"]["wt_lib"]
+    assert "wt_plugpkg" not in sys.modules and "wt_lib" not in sys.modules
+    # A sibling whose name merely starts the same way is not caught.
+    clean, result = app.run(["wt_plugpkg_sub"], rewrite=["wt_plugpkg"])
+    assert result["imported"] == 1
+
+
+def test_record_keeps_the_rewrite_marks(monkeypatch):
+    from _pytest.assertion import assertstate_key
+
+    hook = SimpleNamespace(_rewritten_names={}, _must_rewrite={"plug", "_plug_globals"})
+    config = SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugins=lambda: []),
+        stash={assertstate_key: SimpleNamespace(hook=hook)},
+        getini=lambda name: [],
+        rootpath="/proj",
+    )
+    monkeypatch.setattr(sys, "modules", {})
+    warm.record(SimpleNamespace(config=config, items=[]))
+    assert warm.rewrite_marked == ["_plug_globals", "plug"]
+
+
+def test_a_module_that_swallows_a_template_import_failure_is_a_hazard(app):
+    # Corpus regression (langchain): httpcore does `try: import anyio /
+    # except ImportError: anyio = None`. The template denied anyio, httpcore
+    # carried on without it, and every forked worker inherited anyio = None.
+    app.write("wt_dep", "X = 1\n")
+    app.write("wt_optional", "try:\n    import wt_dep\nexcept ImportError:\n    wt_dep = None\n")
+    clean, result = app.run(["wt_optional"], deny={"wt_dep": "opens a socket at import"})
+    assert not clean
+    assert result["denied"]["wt_optional"] == (
+        "imports wt_dep, which fails in the template, and carries on"
+    )
+
+
+def test_a_missing_optional_dependency_is_fine(app):
+    app.write(
+        "wt_soft",
+        "try:\n    import wt_not_installed_anywhere\nexcept ImportError:\n    X = None\n",
+    )
+    clean, result = app.run(["wt_soft"])
+    assert clean and result["denied"] == {} and result["imported"] == 1
+
+
 def test_an_unreadable_manifest_is_skipped(tmp_path):
     (tmp_path / "m.json").write_text("{not json")
     assert warm.prewarm(str(tmp_path / "m.json"), str(tmp_path / "r.json"))
@@ -235,3 +306,19 @@ def test_coverage_active_reads_the_running_coverage(monkeypatch):
         sys.modules, "coverage", SimpleNamespace(Coverage=SimpleNamespace(current=lambda: None))
     )
     assert not warm.coverage_active()
+
+
+def test_plugin_rewrite_names_covers_every_module_of_a_pytest11_dist(monkeypatch):
+    import importlib.metadata
+
+    ep = SimpleNamespace(group="pytest11", value="_hyp_plugin")
+    plugin = SimpleNamespace(
+        entry_points=[ep],
+        files=["hyp/__init__.py", "_hyp_globals.py", "_hyp_plugin.py", "hyp-1.0.dist-info/RECORD"],
+    )
+    editable = SimpleNamespace(
+        entry_points=[SimpleNamespace(group="pytest11", value="edit_pkg.plugin:Plugin")], files=[]
+    )
+    other = SimpleNamespace(entry_points=[], files=["numpy/__init__.py"])
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: [plugin, editable, other])
+    assert warm.plugin_rewrite_names() == {"hyp", "_hyp_globals", "_hyp_plugin", "edit_pkg"}

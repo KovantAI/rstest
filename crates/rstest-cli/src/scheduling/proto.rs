@@ -437,6 +437,10 @@ pub enum Event {
         /// `--fork-pool=app` recording: coverage was tracing in the worker.
         #[serde(default)]
         coverage: bool,
+        /// `--fork-pool=app` recording: names pytest marks for assertion
+        /// rewriting; the template must not import them, even transitively.
+        #[serde(default)]
+        rewrite: Vec<String>,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -831,6 +835,7 @@ mod property {
                     imported: vec![],
                     sys_path: vec![],
                     coverage: false,
+                    rewrite: vec![],
                 }
             ),
             (small_str(), small_strs())
