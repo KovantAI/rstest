@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="What happens when a worker dies or hangs. A worker dies (segfault, os._exit, OOM kill) or its hang watchdog fires (--worker-timeout, or 3 times the test's timeout plus 10 seconds). The orchestrator knows the in-flight test because workers send item_start before each test. Three things follow. The in-flight test: with --reruns budget left it is requeued and retried on the next free worker; otherwise it is reported FAILED with a crash or timeout message. The worker's other tests go back to the head of the queue. The worker: with restarts left (max of workers and 4 per run) a replacement starts under the same gwN, re-collects, checks its hash and rejoins; otherwise it is not replaced and the run reports an internal error, exit 3. The run carries on: a crashed test makes the run exit 1, and with no worker left each test that never ran is reported as not run. Crashes during collection are not restarted." viewBox="0 0 820 700">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="rs-head" d="M0 0L7 3.5L0 7"/></marker>
+<marker id="rs-arrow-accent" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="rs-head-accent" d="M0 0L7 3.5L0 7"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<rect class="rs-box" x="60" y="20" width="300" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="210" y="52">Worker dies</text>
+<text class="rs-sub rs-sm" x="210" y="76">segfault, os._exit, OOM kill</text>
+<rect class="rs-box" x="460" y="20" width="300" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="610" y="52">Hang watchdog fires</text>
+<text class="rs-sub rs-sm" x="610" y="76">--worker-timeout, or 3 × timeout + 10s</text>
+<path class="rs-line" d="M210 96 V112 H610 V96"/>
+<line class="rs-edge" x1="410" y1="112" x2="410" y2="124"/>
+<rect class="rs-box rs-hot" x="160" y="132" width="500" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="164">The in-flight test is known</text>
+<text class="rs-sub rs-sm" x="410" y="188">workers send item_start before each test</text>
+<path class="rs-line" d="M410 208 V224 M165 224 H655"/>
+<line class="rs-edge" x1="165" y1="224" x2="165" y2="240"/>
+<line class="rs-edge" x1="410" y1="224" x2="410" y2="240"/>
+<line class="rs-edge" x1="655" y1="224" x2="655" y2="240"/>
+<rect class="rs-box" x="50" y="248" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="165" y="280">Rerun budget left?</text>
+<text class="rs-sub rs-sm" x="165" y="304">only with --reruns</text>
+<rect class="rs-box" x="295" y="248" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="280">Its other tests</text>
+<text class="rs-sub rs-sm" x="410" y="304">back to the head of the queue</text>
+<rect class="rs-box" x="540" y="248" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="655" y="280">Restarts left?</text>
+<text class="rs-sub rs-sm" x="655" y="304">max(workers, 4) per run</text>
+<line class="rs-edge" x1="165" y1="324" x2="165" y2="352"/>
+<text class="rs-label rs-start" x="178" y="344">yes</text>
+<line class="rs-edge" x1="655" y1="324" x2="655" y2="352"/>
+<text class="rs-label rs-start" x="668" y="344">yes</text>
+<rect class="rs-box" x="50" y="360" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="165" y="392">Requeued</text>
+<text class="rs-sub rs-sm" x="165" y="416">retried on the next free worker</text>
+<rect class="rs-box" x="540" y="360" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="655" y="392">Replacement as gwN</text>
+<text class="rs-sub rs-sm" x="655" y="416">re-collects, checks hash, rejoins</text>
+<path class="rs-edge" d="M50 286 H30 V486 H42"/>
+<text class="rs-label rs-end" x="26" y="392">no</text>
+<path class="rs-edge" d="M770 286 H790 V486 H778"/>
+<text class="rs-label rs-start" x="794" y="392">no</text>
+<rect class="rs-box rs-hot" x="50" y="448" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="165" y="480">Reported FAILED</text>
+<text class="rs-sub rs-sm" x="165" y="504">crash or timeout message</text>
+<rect class="rs-box rs-hot" x="540" y="448" width="230" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="655" y="480">Not replaced</text>
+<text class="rs-sub rs-sm" x="655" y="504">internal error, exit 3</text>
+<line class="rs-edge" x1="165" y1="524" x2="165" y2="552"/>
+<line class="rs-edge" x1="410" y1="324" x2="410" y2="552"/>
+<line class="rs-edge" x1="655" y1="524" x2="655" y2="552"/>
+<rect class="rs-loop" x="40" y="560" width="740" height="120" rx="14"/>
+<text class="rs-title" x="410" y="594">The run carries on</text>
+<text class="rs-sub" x="410" y="620">a crashed test makes the run exit 1</text>
+<text class="rs-sub" x="410" y="644">no worker left: each test that never ran is reported "not run"</text>
+<text class="rs-tag" x="410" y="668">CRASHES DURING COLLECTION ARE NOT RESTARTED</text>
+</svg>

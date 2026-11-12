@@ -26,6 +26,8 @@ workers may have started by then.
 
 ## Dispatch order
 
+![The queue holds slow tests and costly module or class units first, biggest first, then contiguous chunks. On an illustrative 4-worker run, a 54s test started at t=90 ends the run at 144s; started at t=0 the same work ends at 104s.](../assets/dispatch.svg)
+
 1. **Slow tests first.** Tests with a cached duration ≥ 1s dispatch first,
    longest first, one at a time, so they spread across workers instead of
    stacking. This is what beats duration-blind schedulers (xdist's default
@@ -109,6 +111,8 @@ test already running and reports its queued items, the held one included,
 as never run. Every dispatch path must keep at least one successor in flight or
 explicitly release the queue; this invariant shaped most of the
 scheduler's edge cases (three deadlocks' worth).
+
+![A worker runs each item once it knows the next one and holds its last item until more items or no_more_items arrive; it then stays connected for reruns until the end-of-session signal. Under -x or --maxfail, stop_run ends it after the running test.](../assets/nextitem.svg)
 
 ## The serial phase
 
