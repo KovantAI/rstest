@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The lifecycle of a flaky test. A stable test starts flipping when it fails after a pass on the same commit, or passes only on a rerun. With 3 or more flips in its run history it is auto-quarantined: its failures are demoted to quarantined and still printed, and the set is recomputed every run. If its last 3 results all failed it is failing, a real break that reddens the run. When it needs an owner it goes into quarantine.txt, which keeps it quarantined even if it fails every run; once fixed, remove the entry. A fixed auto-quarantined test returns to stable once its flips age out of the history window. If more auto-quarantined tests fail in one run than 5% of its tests, none are quarantined that run, because the environment looks broken." viewBox="0 0 820 540">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<path class="rs-edge rs-accent" d="M685 70 V40 H135 V70"/>
+<text class="rs-note" x="410" y="32">fixed: its flips age out of the history window</text>
+<rect class="rs-box" x="30" y="70" width="210" height="96" rx="14"/>
+<text class="rs-title rs-sm" x="135" y="100">Stable</text>
+<text class="rs-sub rs-sm" x="135" y="124">no flips in its history</text>
+<text class="rs-note" x="135" y="146">--reruns may still retry it</text>
+<line class="rs-edge" x1="240" y1="118" x2="305" y2="118"/>
+<text class="rs-label" x="272" y="110">flip</text>
+<rect class="rs-box" x="305" y="70" width="210" height="96" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="100">Flipping</text>
+<text class="rs-sub rs-sm" x="410" y="124">fail after pass, same commit</text>
+<text class="rs-sub rs-sm" x="410" y="146">or passed only on rerun</text>
+<line class="rs-edge" x1="515" y1="118" x2="580" y2="118"/>
+<text class="rs-label" x="547" y="110">3+ flips</text>
+<rect class="rs-box rs-hot" x="580" y="70" width="210" height="96" rx="14"/>
+<text class="rs-title rs-sm" x="685" y="100">Auto-quarantined</text>
+<text class="rs-sub rs-sm" x="685" y="124">failures demoted, printed</text>
+<text class="rs-sub rs-sm" x="685" y="146">recomputed every run</text>
+<line class="rs-edge" x1="685" y1="166" x2="685" y2="300"/>
+<text class="rs-label rs-start" x="693" y="236">last 3 failed</text>
+<path class="rs-edge" d="M600 166 V250 H410 V300"/>
+<text class="rs-label" x="505" y="242">needs an owner</text>
+<rect class="rs-loop" x="305" y="300" width="210" height="96" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="330">In quarantine.txt</text>
+<text class="rs-sub rs-sm" x="410" y="354">committed, with an owner</text>
+<text class="rs-sub rs-sm" x="410" y="376">kept even if it always fails</text>
+<path class="rs-edge rs-accent" d="M305 348 H135 V166"/>
+<text class="rs-note rs-start" x="145" y="340">fixed: remove the entry</text>
+<rect class="rs-box rs-hot" x="580" y="300" width="210" height="96" rx="14"/>
+<text class="rs-title rs-sm" x="685" y="330">Failing</text>
+<text class="rs-sub rs-sm" x="685" y="354">a real break: run is red</text>
+<text class="rs-sub rs-sm" x="685" y="376">hidden 3 runs at most</text>
+<rect class="rs-loop" x="30" y="440" width="760" height="80" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="472">Many flaky failures at once: none quarantined</text>
+<text class="rs-sub rs-sm" x="410" y="498">over 5% of the run's tests means the environment looks broken, so the run stays red</text>
+</svg>
