@@ -104,6 +104,18 @@ where `collection_hash` is the sha256 of the full ordered nodeid list and
 [`rstest shard-verify`](cli-commands.md#shard-verify) consumes it to prove a shard matrix
 covered the whole suite.
 
+`meta.warm_template` is another conditional, no-bump addition: present only
+when a [`--fork-pool=app`](cli.md#-fork-pool) template imported the app for
+this run's workers (the default under `--watch` on macOS). `modules` is how
+many modules it imported before forking, `denied` how many are on the warm
+manifest's deny list (imported per worker instead), and `import_seconds` how
+long its imports took. Under `--watch` the template is built once and reused,
+so the object appears on the cycle that built it:
+
+```json
+"warm_template": {"denied": 4, "import_seconds": 1.83, "modules": 312}
+```
+
 `collect_errors` lists the file paths of collectors that failed outright.
 `collect_error_reprs` maps each of those paths to its traceback, and is
 absent when there are none. It also carries errors that escaped the whole

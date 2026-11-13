@@ -33,6 +33,7 @@ pub(super) fn build_run_meta(
         started_at_epoch,
         workers,
         argv: std::env::args().collect(),
+        warm: None,
         shard: None,
     }
 }
@@ -895,6 +896,7 @@ pub(super) fn run_post_gates(
         }
     }
     let mut run_meta = build_run_meta(start, outcome.exitstatus, started_epoch, n);
+    run_meta.warm = outcome.warm.clone();
     // Stamp the sharding identity so `rstest shard-verify` can reconcile the
     // per-shard reports. Only when we have a full-collection hash (parallel
     // full-collect path); the lazy path carries none.

@@ -95,11 +95,14 @@ install = ["--group tests", "-e .[all]"]
 # it into a collect error under BOTH runners (444 collect errors, rc=2 -> parity
 # 0%). Ignore that one message on both runs (via `args`) to keep parity without
 # editing upstream. Drop once fastapi bumps its starlette pin past the alias.
-args = ["-W", "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]
+# The CallSpec2 warning from anyio's plugin: see [anyio].
+args = ["-W", "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning", "-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [starlette]
 repo = "https://github.com/Kludex/starlette"
 install = ["-e .", "httpx", "httpx2", "trio", "wsproto", "websockets", "python-multipart", "itsdangerous", "pyyaml", "jinja2", "typing_extensions"]
+# The CallSpec2 warning from anyio's plugin: see [anyio].
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [httpx]
 repo = "https://github.com/encode/httpx"
@@ -278,6 +281,12 @@ repo = "https://github.com/agronholm/anyio"
 install = ["--group test", "-e .[trio]"]
 # subprocess-cancellation tests are load-sensitive
 rstest_args = ["-n", "4"]
+# anyio's pytest plugin (loaded by anyio, starlette and fastapi) imports
+# `_pytest.python.CallSpec2`, deprecated in pytest 9.2 with a
+# PytestRemovedIn10Warning that `filterwarnings = error` turns into a session
+# error before any test collects (0 tests, under pytest and rstest alike).
+# Ignored on both runs; drop once the pinned anyio imports `CallSpec`.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [langgraph]
 # Monorepo: 8 Python libs/* each with its own pytest config — pytest cannot

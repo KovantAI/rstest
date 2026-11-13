@@ -163,6 +163,8 @@ pub struct RunMeta {
     pub argv: Vec<String>,
     /// Present only for a `--shard K/N` run; drives `shard-verify`.
     pub shard: Option<ShardMeta>,
+    /// What the `--fork-pool=app` template imported, when one ran.
+    pub warm: Option<crate::scheduling::warm::Stats>,
 }
 
 /// The `--report-json` document (schema 5). Fields are declared alphabetically
@@ -214,8 +216,24 @@ pub struct SnapshotMeta<'a> {
     pub shard: Option<ShardJson<'a>>,
     /// Unix epoch (seconds) the run started.
     pub started_at_epoch: u64,
+    /// The `--fork-pool=app` warm template this run's workers were forked
+    /// from; present only when one imported the app this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_template: Option<WarmTemplateJson>,
     /// Worker count for the run (`-n`).
     pub workers: usize,
+}
+
+/// `meta.warm_template`: what the `--fork-pool=app` template imported.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct WarmTemplateJson {
+    /// Modules on the warm manifest's deny list: imported per worker instead.
+    pub denied: usize,
+    /// Wall time of the template's imports, in seconds (two decimals).
+    pub import_seconds: f64,
+    /// Modules the template imported before forking the workers.
+    pub modules: usize,
 }
 
 /// Failures with one cause: the same exception type, message (numbers and
@@ -993,6 +1011,11 @@ impl Run {
                     n: s.n,
                 }),
                 started_at_epoch: run_meta.started_at_epoch,
+                warm_template: run_meta.warm.as_ref().map(|w| WarmTemplateJson {
+                    denied: w.denied,
+                    import_seconds: (w.seconds * 100.0).round() / 100.0,
+                    modules: w.modules,
+                }),
                 workers: run_meta.workers,
             },
             tests: &self.tests,
@@ -1286,6 +1309,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: Vec::new(),
+            warm: None,
             shard: None,
         };
         let v = run.snapshot_value(&meta);
@@ -1297,6 +1321,33 @@ mod tests {
         let mut quiet = Run::default();
         full(&mut quiet, "t/a.py::x", "failed");
         assert!(quiet.snapshot_value(&meta).get("failure_groups").is_none());
+    }
+
+    #[test]
+    fn report_json_carries_the_warm_template_only_when_one_ran() {
+        let mut run = Run::default();
+        full(&mut run, "t/a.py::x", "passed");
+        let mut meta = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 1.0,
+            started_at_epoch: 0,
+            workers: 4,
+            argv: Vec::new(),
+            warm: None,
+            shard: None,
+        };
+        assert!(run.snapshot_value(&meta)["meta"]
+            .get("warm_template")
+            .is_none());
+        meta.warm = Some(crate::scheduling::warm::Stats {
+            modules: 312,
+            denied: 4,
+            seconds: 1.8349,
+        });
+        let w = &run.snapshot_value(&meta)["meta"]["warm_template"];
+        assert_eq!(w["modules"], 312);
+        assert_eq!(w["denied"], 4);
+        assert_eq!(w["import_seconds"], 1.83);
     }
 
     #[test]
@@ -1611,6 +1662,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         let mut run = Run::default();
@@ -1729,6 +1781,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // Measured (doctor / stream run): cpu rides the call report and lands in
@@ -1757,12 +1810,14 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // Absent on a non-shard run: document shape unchanged.
         assert!(run.snapshot_value(&base)["meta"].get("shard").is_none());
         // Present and correctly shaped under --shard.
         let meta = RunMeta {
+            warm: None,
             shard: Some(ShardMeta {
                 k: 2,
                 n: 4,

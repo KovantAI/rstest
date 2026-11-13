@@ -176,6 +176,17 @@
           "format": "uint64",
           "minimum": 0
         },
+        "warm_template": {
+          "description": "The `--fork-pool=app` warm template this run's workers were forked\nfrom; present only when one imported the app this run.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WarmTemplateJson"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "workers": {
           "description": "Worker count for the run (`-n`).",
           "type": "integer",
@@ -265,6 +276,34 @@
           "type": "string"
         }
       }
+    },
+    "WarmTemplateJson": {
+      "description": "`meta.warm_template`: what the `--fork-pool=app` template imported.",
+      "type": "object",
+      "properties": {
+        "denied": {
+          "description": "Modules on the warm manifest's deny list: imported per worker instead.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "import_seconds": {
+          "description": "Wall time of the template's imports, in seconds (two decimals).",
+          "type": "number",
+          "format": "double"
+        },
+        "modules": {
+          "description": "Modules the template imported before forking the workers.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "denied",
+        "import_seconds",
+        "modules"
+      ]
     }
   }
 }

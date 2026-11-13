@@ -976,6 +976,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         let blocker =
@@ -998,6 +999,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // A real (writable) out and a temp part that exists: merge succeeds and

@@ -51,6 +51,7 @@ Run-level envelope for the report document.
 | `schema` | integer | yes | Document schema version. |
 | `shard` | ShardJson | no | Sharding identity; present only under `--shard K/N`. |
 | `started_at_epoch` | integer | yes | Unix epoch (seconds) the run started. |
+| `warm_template` | WarmTemplateJson or null | no | The `--fork-pool=app` warm template this run's workers were forked from; present only when one imported the app this run. |
 | `workers` | integer | yes | Worker count for the run (`-n`). |
 
 ### TestEntry
@@ -74,3 +75,13 @@ Per-test phase outcomes, mirroring the compat-harness recorder schema (rstest-re
 | `teardown` | string | no | Teardown-phase outcome: `"passed"`, `"failed"` or `"skipped"`. |
 | `wasxfail` | boolean | no | `true` when the test was an expected failure (xfail or xpass); absent otherwise. |
 | `worker` | string | no | Worker that produced the final outcome (pool runs only). |
+
+### WarmTemplateJson
+
+`meta.warm_template`: what the `--fork-pool=app` template imported.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `denied` | integer | yes | Modules on the warm manifest's deny list: imported per worker instead. |
+| `import_seconds` | number | yes | Wall time of the template's imports, in seconds (two decimals). |
+| `modules` | integer | yes | Modules the template imported before forking the workers. |
