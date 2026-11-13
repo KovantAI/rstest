@@ -188,7 +188,9 @@ install = ["-e .", "pytest"]
 
 [python-dateutil]
 repo = "https://github.com/dateutil/dateutil"
-install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six"]
+# attrs: tests/test_tzfile.py imports it since upstream's 4.0.0 prep (a78cbd8);
+# without it collection errors and pytest and rstest both exit 2.
+install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six", "attrs"]
 # pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
 # (see click); ignore that one warning on both runs to keep parity.
 args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]

@@ -43,8 +43,12 @@ def _arm(suite, workers, fork):
         t0 = time.monotonic()
         r = sh(argv, cwd=suite.cwd(), env=env)
         wall = time.monotonic() - t0
+        # rstest prints collection errors and its summary to stdout.
+        out = f"{(r.stdout or '')[-1200:]}\n{(r.stderr or '')[-400:]}"
         if not snap.exists():
-            raise RuntimeError(f"{suite.name}: no snapshot (rc={r.returncode})\n{r.stderr[-600:]}")
+            raise RuntimeError(f"{suite.name}: no snapshot (rc={r.returncode})\n{out}")
+        if not json.loads(snap.read_text())["tests"]:
+            raise RuntimeError(f"{suite.name}: no tests ran (rc={r.returncode})\n{out}")
         return snap, wall
 
     return _awake_run(run)

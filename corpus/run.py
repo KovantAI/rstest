@@ -193,7 +193,8 @@ class Suite:
     def __init__(self, name, cfg, wheel, rstest_bin):
         self.name = name
         self.cfg = cfg
-        self.wheel = wheel
+        # `pip` runs from the suite checkout: pin a relative path to our cwd.
+        self.wheel = str(Path(wheel).resolve()) if wheel else wheel
         self.rstest_bin = rstest_bin
         self.dir = WORK / name
         self.src = self.dir / "src"
@@ -781,7 +782,8 @@ def main():
         log(f"=== PREPARE done: {len(prepared)}/{len(suites)} ready ===")
         if args.prepare_only:
             _save(results, order, run, history=False)
-            return
+            # Nonzero so a workflow never goes on to time unprepared venvs.
+            return 0 if len(prepared) == len(suites) else 1
 
     # ---------- PHASE 2: EXECUTE (offline) ----------
     log(f"=== EXECUTE: {len(suites)} suites ===")
@@ -837,4 +839,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
