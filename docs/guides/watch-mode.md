@@ -82,9 +82,9 @@ drop (`-k api` keeps `api` even when an `api/` directory exists; see
 ## Per-cycle cost
 
 Each cycle starts fresh workers at every worker count, so a rerun never runs
-against an edited module's old code. On macOS those workers are forked from a
+against an edited module's old code. On macOS and Linux those workers are forked from a
 warm template that already imported your app
-([below](#warm-template-macos)); elsewhere each worker imports it again. Either
+([below](#warm-template)); on Windows each worker imports it again. Either
 way the price is a small fixed cost on top of your tests' own time. Measured from save to result on a one-test
 project (Apple M4 Max, rstest 0.11.0, CPython 3.13; median of 10 saves, min-max
 in parentheses):
@@ -99,9 +99,9 @@ itself costs 140-165ms here, growing with `-n`. Reproduce with
 `python3 corpus/watch_cycle.py --out <file>`; the measured run is
 [`corpus/bench-results/2026-11-10-watch-cycle.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
 
-### Warm template (macOS) { #warm-template-macos }
+### Warm template { #warm-template }
 
-On macOS a watch session keeps one **template** process that has imported
+On macOS and Linux a watch session keeps one **template** process that has imported
 your app's modules (`--fork-pool=app`, the `--watch` default there), and forks
 each cycle's workers from it. A save then pays no app import. On a test file
 that imports scikit-learn (Apple M4 Max, rstest 0.11.1; 10 saves):

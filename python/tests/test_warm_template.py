@@ -116,14 +116,16 @@ def app(tmp_path, monkeypatch):
 def test_imports_the_manifest_and_restores_sys_path_and_environ(app):
     import gc
 
-    app.write("wt_plain", "VALUE = 1\n")
+    app.write("wt_plain", "VALUE = 1\nHELD = [object()]\n")
     path, env = list(sys.path), os.environ
     gc.unfreeze()
     clean, result = app.run(["wt_plain"])
-    # The template's objects are frozen so forked children share their pages.
-    frozen = gc.get_freeze_count()
-    gc.unfreeze()
-    assert frozen > 0
+    # Corpus regression (anyio on Linux): a frozen template hides its objects
+    # from gc.get_referrers in every worker, which Hypothesis' register_random
+    # uses to tell a kept object from garbage.
+    assert gc.get_freeze_count() == 0
+    held = sys.modules["wt_plain"].HELD
+    assert any(r is held for r in gc.get_referrers(held[0]))
     assert clean
     assert result["imported"] == 1 and result["denied"] == {} and result["hazard"] is None
     assert sys.modules["wt_plain"].VALUE == 1
@@ -240,6 +242,21 @@ def test_a_thread_started_at_import_is_a_hazard(app):
     assert "thread" in result["denied"]["wt_thread"]
 
 
+def test_one_cold_run_finds_every_restart_hazard(app):
+    # Corpus regression (fastapi on Linux): stopping at the first restart
+    # hazard cost one cold run per module, and the template never settled in
+    # 8 runs. The process is discarded anyway, so the rest is scanned too.
+    app.write("wt_sock_a", "import socket\nS = socket.socket()\n")
+    app.write("wt_ok_mid", "X = 1\n")
+    app.write("wt_sock_b", "import socket\nS = socket.socket()\n")
+    for m in ("wt_sock_a", "wt_sock_b"):
+        app.cleanup.append(lambda m=m: sys.modules[m].S.close() if m in sys.modules else None)
+    clean, result = app.run(["wt_sock_a", "wt_ok_mid", "wt_sock_b"])
+    assert not clean
+    assert result["hazard"].startswith("wt_sock_a")
+    assert set(result["denied"]) == {"wt_sock_a", "wt_sock_b"}
+
+
 def test_a_socket_opened_at_import_is_a_hazard(app):
     app.write("wt_sock", "import socket\nS = socket.socket()\n")
     app.cleanup.append(
@@ -258,6 +275,32 @@ def test_a_module_keeping_a_stdio_stream_is_a_hazard(app):
     clean, result = app.run(["wt_stdio"])
     assert not clean
     assert result["denied"]["wt_stdio"].startswith("keeps a reference to sys.stdout")
+
+
+def test_configuring_the_root_logger_at_import_is_a_hazard(app):
+    import logging
+
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    app.cleanup.append(
+        lambda: (root.setLevel(level), root.handlers.__setitem__(slice(None), handlers))
+    )
+    app.write(
+        "wt_logcfg", "import logging\nlogging.getLogger().addHandler(logging.NullHandler())\n"
+    )
+    clean, result = app.run(["wt_logcfg"])
+    assert not clean
+    assert result["denied"]["wt_logcfg"] == "configures the root logger at import"
+
+
+def test_a_library_logger_with_its_own_handler_is_fine(app):
+    # The usual library idiom changes no root state.
+    app.write(
+        "wt_liblog",
+        "import logging\nlogging.getLogger('wt_liblog').addHandler(logging.NullHandler())\n",
+    )
+    clean, result = app.run(["wt_liblog"])
+    assert clean and result["denied"] == {}
 
 
 def test_a_read_only_file_left_open_is_fine(app, tmp_path):
@@ -342,6 +385,26 @@ def test_a_module_that_swallows_a_template_import_failure_is_a_hazard(app):
     assert result["denied"]["wt_optional"] == (
         "imports wt_dep, which fails in the template, and carries on"
     )
+
+
+def test_a_cache_in_an_earlier_module_is_blamed_not_its_caller(app):
+    # Corpus regression (fastapi on Linux): pydantic's plugin loader runs on
+    # the first model class, swallows a template-only ImportError and caches
+    # an empty plugin list. Blaming the model module (a different one each
+    # run) never converged; the loader's module is the one to keep out.
+    app.write("wt_plugmod", "X = 1\n")
+    app.write(
+        "wt_loader",
+        "import importlib\nCACHE = None\n"
+        "def get():\n    global CACHE\n    if CACHE is None:\n        CACHE = []\n"
+        "        try:\n            CACHE.append(importlib.import_module('wt_plugmod'))\n"
+        "        except ImportError:\n            pass\n    return CACHE\n",
+    )
+    app.write("wt_model", "import wt_loader\nPLUGINS = wt_loader.get()\n")
+    clean, result = app.run(["wt_loader", "wt_model"], rewrite=["wt_plugmod"])
+    assert not clean
+    assert "wt_loader" in result["denied"]
+    assert "wt_model" not in result["denied"]
 
 
 def test_a_missing_optional_dependency_is_fine(app):

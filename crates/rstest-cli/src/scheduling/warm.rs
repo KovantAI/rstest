@@ -1,4 +1,4 @@
-//! Warm-template workers, `--fork-pool=app` (macOS only for now).
+//! Warm-template workers, `--fork-pool=app` (Unix).
 //!
 //! Workers record which non-test modules they imported; the run stores them in
 //! `.rstest_cache/warm/manifest.json`. The next run's fork-pool zygote imports
@@ -23,7 +23,7 @@ pub const FILE: &str = "warm/manifest.json";
 pub enum ForkPool {
     /// Prewarm the vendored pytest core only.
     Core,
-    /// Also import the app's modules in the template (macOS for now).
+    /// Also import the app's modules in the template (Unix).
     App,
 }
 
@@ -124,9 +124,9 @@ pub struct Stats {
 }
 
 /// Why this run can't use `=app` (it then runs as `=core`), or None.
-pub fn refusal(macos: bool, coverage: bool, prior: Option<&Manifest>) -> Option<String> {
-    if !macos {
-        return Some("--fork-pool=app is macOS-only for now; using --fork-pool".into());
+pub fn refusal(unix: bool, coverage: bool, prior: Option<&Manifest>) -> Option<String> {
+    if !unix {
+        return Some("--fork-pool=app needs fork (Unix); spawning workers as usual".into());
     }
     if coverage {
         return Some(
@@ -157,11 +157,7 @@ pub(crate) fn load(path: &Path) -> Option<Manifest> {
 pub fn prepare(key: Key, args: &[String], sink: &mut Sink) -> Option<WarmRun> {
     let path = cache::file(FILE);
     let prior = load(&path);
-    if let Some(why) = refusal(
-        cfg!(target_os = "macos"),
-        coverage_requested(args),
-        prior.as_ref(),
-    ) {
+    if let Some(why) = refusal(cfg!(unix), coverage_requested(args), prior.as_ref()) {
         sink.warn(&format!("rstest: note: {why}"));
         return None;
     }
@@ -266,7 +262,7 @@ fn notes(known: &BTreeMap<String, String>, o: &Outcome) -> Vec<String> {
     if o.hazard.is_some() {
         out.push(
             "rstest: note: --fork-pool=app: the template ran cold this run; the next run \
-             skips the module above"
+             skips the modules above"
                 .into(),
         );
     }
@@ -292,8 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn refused_off_macos_under_coverage_and_when_the_manifest_says_so() {
-        assert!(refusal(false, false, None).unwrap().contains("macOS-only"));
+    fn refused_off_unix_under_coverage_and_when_the_manifest_says_so() {
+        assert!(refusal(false, false, None)
+            .unwrap()
+            .contains("needs fork (Unix)"));
         assert!(refusal(true, true, None).unwrap().contains("coverage"));
         let m = Manifest {
             refused: Some("coverage is active in the workers".into()),

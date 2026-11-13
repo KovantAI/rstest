@@ -210,10 +210,9 @@ pub struct Cli {
     /// Fork-prewarm the worker pool (Unix only): import once in a template
     /// process, then fork the workers off it instead of paying that import in
     /// every freshly spawned worker. `core` (bare `--fork-pool`) imports the
-    /// vendored pytest core; `app` (macOS) also imports your app's modules,
-    /// and under `--watch` keeps the template for the session. No effect on
-    /// Windows or single-worker runs. [default: off; `app` under `--watch` on
-    /// macOS]
+    /// vendored pytest core; `app` also imports your app's modules, and
+    /// under `--watch` keeps the template for the session. No effect on
+    /// Windows or single-worker runs. [default: off; `app` under `--watch`]
     #[arg(
         long = "fork-pool",
         num_args = 0..=1,

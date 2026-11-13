@@ -155,8 +155,9 @@ def _env_hazard(reason: str) -> Hazard:
 
 
 _loading: list[str] = []
-# Per frame of `_loading`: a child import that failed and was swallowed.
-_failed_child: list[str | None] = []
+# Per frame of `_loading`: a child import that failed (and the module whose
+# code asked for it), to tell when it was swallowed.
+_failed_child: list[tuple[str, str | None] | None] = []
 _armed = False
 _stdio: frozenset[int] = frozenset()
 _watched: frozenset[str] = WORKER_KEYS
@@ -277,8 +278,16 @@ def _new_framework(start: int) -> str | None:
     return None
 
 
-def _probe() -> tuple[int | None, dict[int, tuple[int, int]], int]:
-    return _threads(), _fds(), _images()
+def _root_logging() -> tuple[int, tuple[int, ...]]:
+    """The root logger's level and handlers."""
+    import logging
+
+    root = logging.getLogger()
+    return root.level, tuple(id(h) for h in root.handlers)
+
+
+def _probe() -> tuple[int | None, dict[int, tuple[int, int]], int, tuple]:
+    return _threads(), _fds(), _images(), _root_logging()
 
 
 def hazard(before: tuple, after: tuple) -> str | None:
@@ -286,8 +295,8 @@ def hazard(before: tuple, after: tuple) -> str | None:
     module unsafe to import ahead of the fork, or None."""
     import stat
 
-    t0, fds0, img0 = before
-    t1, fds1, img1 = after
+    t0, fds0, img0, log0 = before
+    t1, fds1, img1, log1 = after
     if t0 is not None and t1 is not None and t1 > t0:
         return f"starts {t1 - t0} thread(s) at import"
     for fd, (mode, flags) in fds1.items():
@@ -299,6 +308,12 @@ def hazard(before: tuple, after: tuple) -> str | None:
             return "leaves a file descriptor open at import"
     if img1 > img0 and (fw := _new_framework(img0)):
         return f"loads {fw} at import"
+    # logging.basicConfig() at import: in the template the root logger has no
+    # handlers yet, so it installs one and a level every worker inherits; in a
+    # worker pytest's logging plugin got there first and it does nothing
+    # (fastapi's caplog tests saw an extra record on Linux).
+    if log1 != log0:
+        return "configures the root logger at import"
     return None
 
 
@@ -318,6 +333,21 @@ def binds_stdio(mod: Any, stdio: frozenset[int]) -> bool:
         return False
 
 
+_IMPORTLIB_DIR = os.path.dirname(importlib.__file__)
+
+
+def _caller_module(frame: Any) -> str | None:
+    """The module whose code asked for an import: the first frame outside the
+    import machinery (importlib, `importlib.metadata` entry points, this
+    module)."""
+    while frame is not None:
+        path = frame.f_code.co_filename
+        if not (path.startswith("<frozen") or path.startswith(_IMPORTLIB_DIR) or path == __file__):
+            return frame.f_globals.get("__name__")
+        frame = frame.f_back
+    return None
+
+
 def _guarded_find_and_load(orig):
     def find_and_load(name, import_):
         if name in sys.modules or not _armed:
@@ -335,14 +365,19 @@ def _guarded_find_and_load(orig):
             # import that needs a worker's state) may succeed there.
             template_only = isinstance(e, Exception) and not isinstance(e, ModuleNotFoundError)
             if _failed_child and template_only:
-                _failed_child[-1] = name
+                _failed_child[-1] = (name, _caller_module(sys._getframe(1)))
             raise
         _loading.pop()
         failed = _failed_child.pop()
         if failed is not None:
             # `try: import x / except ImportError: x = None` would keep the
-            # template-only failure in every forked worker.
-            raise Hazard(name, f"imports {failed}, which fails in the template, and carries on")
+            # template-only failure in every forked worker. Blame the module
+            # whose code caught it: an already-loaded one caching the failure
+            # (pydantic.plugin._loader's plugin list, loaded on the first model
+            # class) otherwise blamed a different model module every run.
+            child, caller = failed
+            blamed = caller if caller and caller in sys.modules else name
+            raise Hazard(blamed, f"imports {child}, which fails in the template, and carries on")
         reason = hazard(before, _probe())
         if reason:
             raise Hazard(name, reason)
@@ -407,9 +442,12 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
                         why = f"imports {h.name}, which {h.reason}"
                         result["denied"][name] = f"import error ({why})"
                     continue
-                result["hazard"] = f"{h.name}: {h.reason}"
+                # This process will be discarded (restarted cold), so keep
+                # going and find every hazard in this one run: stopping here
+                # cost one cold run per module (fastapi: 8+ runs).
+                result["hazard"] = result["hazard"] or f"{h.name}: {h.reason}"
                 clean = False
-                break
+                continue
             except (Exception, SystemExit) as e:
                 reason = f"{type(e).__name__}: {e}".splitlines()[0][:200]
                 result["denied"][name] = f"import error ({reason})"
@@ -417,9 +455,9 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
             if _env_hazards:
                 h = _env_hazards[0]
                 result["denied"][h.name] = f"{h.reason} (and catches the guard's exception)"
-                result["hazard"] = f"{h.name}: {h.reason}"
+                result["hazard"] = result["hazard"] or f"{h.name}: {h.reason}"
                 clean = False
-                break
+                continue
             result["imported"] += 1
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
@@ -432,14 +470,12 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
         os.environ = saved_env  # noqa: B003
         sys.path[:] = saved_path
     _write(result_path, result, t0)
-    if clean and result["imported"]:
-        # Move the template's objects out of the cyclic GC's reach. Otherwise a
-        # child's first collection touches every one of them and copies their
-        # pages: scikit-learn's workers then used as much memory as with plain
-        # `--fork-pool` (with the freeze, 17% less).
-        import gc
-
-        gc.freeze()
+    # No gc.freeze() here, though it let forked workers share the template's
+    # pages (17% less memory on scikit-learn): frozen objects are invisible to
+    # gc.get_referrers / gc.get_objects in every worker. Hypothesis'
+    # register_random relies on get_referrers and warned about trio's module
+    # RNG under the template (anyio's pytester tests failed on Linux), and
+    # leak checkers rely on them too.
     return clean
 
 

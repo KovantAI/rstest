@@ -728,7 +728,7 @@ Feature: Daily local developer
             assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
         """
 
-    @macos_only
+    @posix_only
     Scenario: DV-19 the second warm run imports the app once, in the template
       Given I have run "rstest -n 4 --fork-pool=app"
       And I have run "rstest -n 4 --fork-pool=app"
@@ -737,7 +737,7 @@ Feature: Daily local developer
       Then the run succeeds
       And "imports.log" gained 1 line
 
-    @macos_only
+    @posix_only
     Scenario: DV-19 a module that reads the worker id at import is imported per worker
       When I run "rstest -n 4 --fork-pool=app"
       Then the run succeeds
@@ -748,13 +748,13 @@ Feature: Daily local developer
       Then the run succeeds
       And stderr does not contain "--fork-pool=app:"
 
-    @macos_only
+    @posix_only
     Scenario: DV-19 coverage turns the template off
       When I run "rstest -n 4 --fork-pool=app --cov=slowapp --cov-report="
       Then the run succeeds
       And stderr contains "--fork-pool=app does not support coverage yet"
 
-    @macos_only
+    @posix_only
     Scenario: DV-19 under --watch the template outlives a cycle and rebuilds on a source edit
       When I start "rstest --watch -n 4 --fork-pool=app" and wait up to 60 seconds for its idle prompt
       Then the watcher printed its idle prompt
@@ -808,11 +808,3 @@ Feature: Daily local developer
         """
       Then the watcher printed its idle prompt
       And the output contains "1 passed"
-
-    @linux_only
-    Scenario: DV-19 --fork-pool=app is macOS-only for now
-      When I note the lines in "imports.log"
-      And I run "rstest -n 4 --fork-pool=app"
-      Then the run succeeds
-      And stderr contains "--fork-pool=app is macOS-only for now"
-      And "imports.log" gained 4 lines

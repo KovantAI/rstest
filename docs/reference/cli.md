@@ -50,7 +50,7 @@ means none.
 | Flag | Purpose | Default | `[tool.rstest]` key | Env var |
 |---|---|---|---|---|
 | [`-n, --numprocesses`](#-n-numprocesses-nauto) | worker count | `auto` | `numprocesses` | |
-| [`--fork-pool[=core\|app]`](#-fork-pool) | fork workers off a prewarmed template (Unix) | off; `app` under `--watch` on macOS | | |
+| [`--fork-pool[=core\|app]`](#-fork-pool) | fork workers off a prewarmed template (Unix) | off; `app` under `--watch` | | |
 | [`--dist`](#-dist-loadloadfileloadscopeloadgroupeach) | distribution mode | `load` | `dist` | |
 | [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch`) | `order` | |
 | [`--shuffle[=SEED]`](#-shuffleseed) | seeded random dispatch order | off | | |
@@ -140,7 +140,7 @@ see [Passthrough-IO flags](#passthrough-io-flags).
 ### `--fork-pool`
 
 Fork-prewarm the worker pool: `--fork-pool[=core|app]`. **Unix only**. Off by
-default, except under [`--watch`](#-watch) on macOS, which uses `app`.
+default, except under [`--watch`](#-watch), which uses `app`.
 
 Normally each worker is a fresh `python` process that imports rstest's
 vendored pytest core and then your app, so that import is paid once per
@@ -150,12 +150,11 @@ the workers off it.
 - `core` (the default value, also bare `--fork-pool`): the template imports
   only the vendored pytest core. App and conftest imports are still paid per
   worker.
-- `app` (**macOS only** for now; elsewhere it falls back to `core` with a
-  note): the template also imports the app's modules, as recorded by earlier
+- `app`: the template also imports the app's modules, as recorded by earlier
   runs in `.rstest_cache/warm/`. The first run only records them. Under
   `--watch` the template stays alive for the whole session, so a save no
   longer re-imports the app at all
-  ([Watch mode](../guides/watch-mode.md#warm-template-macos)).
+  ([Watch mode](../guides/watch-mode.md#warm-template)).
 
 Every child still sets its own `gwN` identity, collects independently, and
 owns its coverage file and temp dir. Only the **initial** pool is forked; a
@@ -179,7 +178,8 @@ instead (and named once in an `rstest: note:` line) when its import:
 A module that imports one of these is imported per worker too. Known limits:
 a module that copied `os.environ` before the template started is not
 checked, and coverage is not supported yet (`--cov` turns `app` off; under
-`--watch` the default is then the plain spawn path).
+`--watch` the default is then the plain spawn path). On Windows, which has
+no fork, `app` falls back to plain spawns with a note.
 
 Per run, `app` saves little wall time, because workers already import in
 parallel; its value is under `--watch`. The `--doctor` `startup:` line shows
@@ -1027,7 +1027,7 @@ are affected, and a config change reruns the full selection. Type `q` then
 Enter (or press `Ctrl+C`) to stop; quitting with `q` exits `0` whatever the
 last cycle's outcome, and an rstest-level error during a cycle exits `1`.
 Watch reruns default to [`--order fail-fast`](#-order-throughputfail-fast).
-On macOS they also default to [`--fork-pool=app`](#-fork-pool): a template
+They also default to [`--fork-pool=app`](#-fork-pool) (Unix): a template
 that already imported your app forks each cycle's workers, so a save doesn't
 re-import it. Pass `--fork-pool` (or `--fork-pool=core`) to opt out.
 Ignored directories, stdin handling, the rerun policy and per-cycle cost:

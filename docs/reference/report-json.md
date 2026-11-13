@@ -106,7 +106,7 @@ covered the whole suite.
 
 `meta.warm_template` is another conditional, no-bump addition: present only
 when a [`--fork-pool=app`](cli.md#-fork-pool) template imported the app for
-this run's workers (the default under `--watch` on macOS). `modules` is how
+this run's workers (the default under `--watch`). `modules` is how
 many modules it imported before forking, `denied` how many are on the warm
 manifest's deny list (imported per worker instead), and `import_seconds` how
 long its imports took. Under `--watch` the template is built once and reused,

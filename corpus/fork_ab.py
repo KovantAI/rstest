@@ -197,6 +197,8 @@ def _point(suite, workers, arms, args, noisy, noisy_failures):
                     "differ": d["mismatch_count"],
                     "missing": d["missing_count"],
                     "extra": d["extra_count"],
+                    # Which tests, so a diff can be told from suite noise.
+                    "mismatch": d.get("mismatch", [])[:20],
                 }
             )
         for keep in snaps.values():
