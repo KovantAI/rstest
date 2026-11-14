@@ -6,6 +6,7 @@ Arms (`--arms`, first is the baseline the others are diffed against):
   core   `--fork-pool` (fork off a zygote that imported the vendored core)
   app    `--fork-pool=app` (the zygote also imported the app's modules)
   core2  `core` again: a control for the suite's own run-to-run noise
+  plain2 `plain` again: the same control for the plain arm
 
 Same release binary, same suite venvs and policy (`run.py`'s `Suite`), only the
 flag differs. Arms rotate within each repeat (which goes first moves each
@@ -52,7 +53,13 @@ from run import HERE, REPO, Suite, diff, log, sh
 
 # `core2` repeats `core`: a control arm, so `core` vs `core2` diffs measure the
 # suite's own run-to-run noise, apart from what `app` changes.
-ARMS = {"plain": [], "core": ["--fork-pool"], "core2": ["--fork-pool"], "app": ["--fork-pool=app"]}
+ARMS = {
+    "plain": [],
+    "plain2": [],
+    "core": ["--fork-pool"],
+    "core2": ["--fork-pool"],
+    "app": ["--fork-pool=app"],
+}
 NOTE = "--fork-pool=app:"
 
 

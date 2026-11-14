@@ -517,6 +517,13 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
             # ids back via run_ids (normally to this worker, where they're cached;
             # to another worker when stealing for balance).
             self._conn.send("file_collected", payload)
+        # perform_collect REPLACED session.items with this batch alone. Plugins
+        # read it mid-session as "this session's tests": pytest-django's
+        # django_db_setup picks the test databases from it, and a DB-free batch
+        # collected just before the first DB test ran left it creating none
+        # ("no such table" for every DB test on that worker). Keep it the whole
+        # set this worker has collected, as a full collection would show it.
+        session.items = list(items_by_id.values())
         return total
 
     def pytest_runtestloop(self, session):

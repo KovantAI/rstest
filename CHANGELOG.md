@@ -21,6 +21,18 @@ between 0.x releases and are listed here.
   app's modules, as recorded by earlier runs in `.rstest_cache/warm/`. Bare
   `--fork-pool` is unchanged (`=core`).
 
+### Fixes
+
+- **Django suites no longer lose a worker's test database under lazy
+  collection.** With `--collect lazy` (which rstest picks on its own for large
+  suites with a warm cache), each file batch replaced pytest's list of the
+  session's tests. pytest-django chooses which test databases to create from
+  that list, so when a worker collected a file without database tests just
+  before running its first database test, it created none, and every database
+  test on that worker failed with `no such table`. It happened now and then,
+  more often on a busy machine. The list now keeps every test the worker has
+  collected.
+
 ## 0.11.1 (2026-11-11)
 
 ### Fixes
