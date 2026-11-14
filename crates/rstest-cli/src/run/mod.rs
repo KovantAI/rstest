@@ -19,7 +19,7 @@ use crate::cli::{
 };
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
-use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
+use crate::scheduling::{durations, lazy, pool, proto, shard, warm, worker};
 use crate::{
     collect, config, cov_scope, coverage_skip, discover, doctor, incremental, migrate, mono,
     remote, select,
@@ -449,6 +449,7 @@ fn resolve_run_config(
         doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
+        warm: None,
         send_ids: false,
         debug_port: cli.debug.clone(),
         // Ship captured stdout/stderr on every report (not just failures) when a
@@ -781,6 +782,21 @@ pub(crate) fn execute_inner(
     } = early_stamp
         .or_else(join_stamp)
         .expect("run stamp joined once");
+    // `--fork-pool=app`: only a pool run has a zygote to warm.
+    let warm_run = (cli.fork_pool == Some(warm::ForkPool::App)
+        && !passthrough
+        && (n > 1 || single_worker_reruns))
+        .then(|| {
+            let key = warm::Key {
+                python: python.display().to_string(),
+                rstest: env!("CARGO_PKG_VERSION").to_string(),
+                env_fp: env_fp.clone(),
+                rootdir: scope.display().to_string(),
+            };
+            warm::prepare(key, &args, &mut sink)
+        })
+        .flatten();
+    cfg.worker_env.warm = warm_run.as_ref().map(|w| w.env.clone());
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -814,6 +830,10 @@ pub(crate) fn execute_inner(
         start,
         &mut sink,
     );
+    if let Some(w) = warm_run {
+        let record = std::mem::take(&mut outcome.warm_record);
+        outcome.warm = warm::finish(w, record, &mut sink);
+    }
     if !passthrough && cli.python.is_none() {
         if let Some(hint) = interpreter_hint(&outcome.run, &python, &scope) {
             sink.warn(&hint);
@@ -1619,7 +1639,7 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
-        fork_prewarm: cli.fork_pool,
+        fork_prewarm: cli.fork_pool.is_some(),
         quarantine,
     };
     let path = if passthrough {
@@ -1743,6 +1763,8 @@ fn dispatch_run(
                 // No worker pool spawned here (one passthrough worker).
                 startup_seconds: 0.0,
                 fork_prewarmed: false,
+                warm_record: Default::default(),
+                warm: None,
                 // Recorded only when `-n auto` chose this one session (as when
                 // memory capped it at 1): then it is the worker's peak, and a
                 // later run on more memory can size up from it. An explicit
@@ -4257,7 +4279,12 @@ mod tests {
         assert_eq!(
             fold(proto::Event::Done {
                 exitstatus: 1,
-                peak_rss: None
+                peak_rss: None,
+                imported: vec![],
+                sys_path: vec![],
+                coverage: false,
+                rewrite: vec![],
+                env: vec![],
             }),
             Some(1)
         );

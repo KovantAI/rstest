@@ -721,3 +721,22 @@ def _cached_lineno(world, path):
     assert cached, f"no cached test in {path}: {tests}"
     missing = [k for k, v in cached.items() if "lineno" not in v]
     assert not missing, f"cached tests without lineno: {missing}"
+
+
+# -- --fork-pool=app ---------------------------------------------------------
+
+
+def _lines(world, path):
+    p = world.project / path
+    return len(p.read_text().splitlines()) if p.exists() else 0
+
+
+@when(parsers.re(rf"I note the lines in {q('path')}"))
+def _note_lines(world, path):
+    world.notes[("lines", path)] = _lines(world, path)
+
+
+@then(parsers.re(rf"{q('path')} gained (?P<n>\d+) lines?"))
+def _gained_lines(world, path, n):
+    got = _lines(world, path) - world.notes[("lines", path)]
+    assert got == int(n), f"{path} gained {got} lines, expected {n}"

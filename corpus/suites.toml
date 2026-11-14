@@ -18,7 +18,9 @@ install = ["-e .", "pytest", "attrs"]
 
 [django-allauth]
 repo = "https://github.com/pennersr/django-allauth"
-install = ["-e .[mfa,socialaccount,saml,openid,steam]", "django", "psycopg2-binary", "django-ninja", "fido2", "djangorestframework", "pytest-asyncio", "pytest-django"]
+# pyyaml: tests/apps/headless/spec/test_views.py imports yaml; a fresh venv
+# (Linux) lacks it, so collection errors and both runners exit 2.
+install = ["-e .[mfa,socialaccount,saml,openid,steam]", "django", "psycopg2-binary", "django-ninja", "fido2", "djangorestframework", "pytest-asyncio", "pytest-django", "pyyaml"]
 # time-sensitive tests flake at high worker counts (rate-limit windows)
 rstest_args = ["-n", "4"]
 
@@ -95,11 +97,14 @@ install = ["--group tests", "-e .[all]"]
 # it into a collect error under BOTH runners (444 collect errors, rc=2 -> parity
 # 0%). Ignore that one message on both runs (via `args`) to keep parity without
 # editing upstream. Drop once fastapi bumps its starlette pin past the alias.
-args = ["-W", "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]
+# The CallSpec2 warning from anyio's plugin: see [anyio].
+args = ["-W", "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning", "-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [starlette]
 repo = "https://github.com/Kludex/starlette"
 install = ["-e .", "httpx", "httpx2", "trio", "wsproto", "websockets", "python-multipart", "itsdangerous", "pyyaml", "jinja2", "typing_extensions"]
+# The CallSpec2 warning from anyio's plugin: see [anyio].
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [httpx]
 repo = "https://github.com/encode/httpx"
@@ -188,7 +193,9 @@ install = ["-e .", "pytest"]
 
 [python-dateutil]
 repo = "https://github.com/dateutil/dateutil"
-install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six"]
+# attrs: tests/test_tzfile.py imports it since upstream's 4.0.0 prep (a78cbd8);
+# without it collection errors and pytest and rstest both exit 2.
+install = ["-e .", "pytest-cov", "hypothesis", "freezegun", "six", "attrs"]
 # pytest 9.1 non-Collection-parametrize deprecation vs `filterwarnings = error`
 # (see click); ignore that one warning on both runs to keep parity.
 args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
@@ -278,6 +285,12 @@ repo = "https://github.com/agronholm/anyio"
 install = ["--group test", "-e .[trio]"]
 # subprocess-cancellation tests are load-sensitive
 rstest_args = ["-n", "4"]
+# anyio's pytest plugin (loaded by anyio, starlette and fastapi) imports
+# `_pytest.python.CallSpec2`, deprecated in pytest 9.2 with a
+# PytestRemovedIn10Warning that `filterwarnings = error` turns into a session
+# error before any test collects (0 tests, under pytest and rstest alike).
+# Ignored on both runs; drop once the pinned anyio imports `CallSpec`.
+args = ["-W", "ignore::pytest.PytestRemovedIn10Warning"]
 
 [langgraph]
 # Monorepo: 8 Python libs/* each with its own pytest config — pytest cannot
@@ -351,3 +364,14 @@ mode = "pyargs"
 package = "sklearn.linear_model"
 install = ["scikit-learn", "pytest", "pytest-xdist"]
 env = { OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1", MKL_NUM_THREADS = "1", VECLIB_MAXIMUM_THREADS = "1" }
+
+[pretix]
+repo = "https://github.com/pretix/pretix"
+# The large Django app the warm-template plan needs (dev-notes: "Django: Django
+# itself vs the app"): django-allauth's whole import is ~0.5s per worker, too
+# small to decide whether the template should load settings or run
+# django.setup(). SQLite with no services: pretix's settings fall back to the
+# sqlite3 backend, and its test settings turn Redis and Celery off. Tests and
+# the pytest config live under src/, and run.py runs from the checkout root.
+install = ["-e .[dev]"]
+args = ["-c", "src/setup.cfg", "src/tests"]

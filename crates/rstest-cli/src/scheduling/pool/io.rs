@@ -185,6 +185,7 @@ mod tests {
             doctor: false,
             timeout: None,
             leakcheck: false,
+            warm: None,
             send_ids: false,
             debug_port: None,
             stream_output: false,

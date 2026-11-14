@@ -207,12 +207,20 @@ pub struct Cli {
     #[arg(short = 'n', long = "numprocesses", value_parser = numprocesses_arg)]
     pub(crate) numprocesses: Option<String>,
 
-    /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
-    /// once in a zygote, then fork the workers off it instead of paying that
-    /// import in every freshly spawned worker. Cuts pool startup at high `-n`;
-    /// no effect on Windows or single-worker runs. [default: off]
-    #[arg(long = "fork-pool")]
-    pub(crate) fork_pool: bool,
+    /// Fork-prewarm the worker pool (Unix only): import once in a template
+    /// process, then fork the workers off it instead of paying that import in
+    /// every freshly spawned worker. `core` (bare `--fork-pool`) imports the
+    /// vendored pytest core; `app` also imports your app's modules, and
+    /// under `--watch` keeps the template for the session. No effect on
+    /// Windows or single-worker runs. [default: off; `app` under `--watch`]
+    #[arg(
+        long = "fork-pool",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "core",
+        value_enum
+    )]
+    pub(crate) fork_pool: Option<crate::scheduling::warm::ForkPool>,
 
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
@@ -837,7 +845,6 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
     "--xdist-trial",
-    "--fork-pool",
     "--watch",
     "--fail-on-leak",
     "--instrument-workers",
@@ -939,7 +946,13 @@ pub(crate) const AUTO_QUARANTINE_MAX: u32 = 5;
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
-const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug", "--auto-quarantine"];
+const OPT_FLAGS: &[&str] = &[
+    "--changed",
+    "--shuffle",
+    "--debug",
+    "--auto-quarantine",
+    "--fork-pool",
+];
 
 /// Flags that take a value: either the following argv item (`--dist load`) or
 /// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
@@ -1958,6 +1971,28 @@ mod tests {
                 max_age: Some(ref d),
             }) if d == "30d"
         ));
+    }
+
+    #[test]
+    fn fork_pool_takes_an_optional_mode() {
+        use crate::scheduling::warm::ForkPool;
+        let parse = |args: &[&str]| {
+            let (own, session) = split_args(v(args));
+            (Cli::try_parse_from(own).map(|c| c.fork_pool), session)
+        };
+        assert_eq!(
+            parse(&["--fork-pool", "tests/"]).0.unwrap(),
+            Some(ForkPool::Core)
+        );
+        // The next token is a path, never the mode.
+        assert_eq!(parse(&["--fork-pool", "tests/"]).1, v(&["tests/"]));
+        assert_eq!(
+            parse(&["--fork-pool=core"]).0.unwrap(),
+            Some(ForkPool::Core)
+        );
+        assert_eq!(parse(&["--fork-pool=app"]).0.unwrap(), Some(ForkPool::App));
+        assert_eq!(parse(&[]).0.unwrap(), None);
+        assert!(parse(&["--fork-pool=bogus"]).0.is_err());
     }
 
     #[test]

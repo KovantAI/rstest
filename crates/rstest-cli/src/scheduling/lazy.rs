@@ -206,6 +206,7 @@ pub fn run_lazy_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut peak_rss: Option<u64> = None;
+    let mut warm_record = crate::scheduling::warm::Record::default();
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
@@ -480,9 +481,17 @@ pub fn run_lazy_pool(
             Ok(Event::Done {
                 exitstatus,
                 peak_rss: peak,
+                imported,
+                sys_path,
+                coverage,
+                rewrite,
+                env,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
+                warm_record.merge(imported, sys_path, coverage);
+                warm_record.rewrite.extend(rewrite);
+                warm_record.env.extend(env);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own never ran what reached it
@@ -847,6 +856,8 @@ pub fn run_lazy_pool(
         collection_size: 0,
         startup_seconds,
         fork_prewarmed,
+        warm_record,
+        warm: None,
         sources,
         peak_rss,
         exiting,

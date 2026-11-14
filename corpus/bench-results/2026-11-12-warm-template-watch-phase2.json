@@ -1,0 +1,299 @@
+{
+ "environment": {
+  "date": "2026-11-12",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "rstest": "rstest 0.11.1",
+  "rstest_commit": "99d03bc",
+  "worker_python": "3.13.13",
+  "pytest": "9.2.0",
+  "cycles": 10,
+  "settle_s": 1.0,
+  "prelude": "import sklearn.ensemble;import sklearn.linear_model;import sklearn.model_selection",
+  "extra": "--fork-pool=app",
+  "method": "corpus/watch_cycle.py variant: the edited test file starts with the prelude imports, so a plain watch cycle pays them in every worker. 10 timed saves per point after the first run. Worker python: the scikit-learn corpus venv."
+ },
+ "plain": [
+  {
+   "workers": 2,
+   "cycles": [
+    {
+     "detect_ms": 317.5,
+     "run_ms": 583.8,
+     "total_ms": 901.3
+    },
+    {
+     "detect_ms": 313.7,
+     "run_ms": 569.1,
+     "total_ms": 882.7
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 579.9,
+     "total_ms": 897.1
+    },
+    {
+     "detect_ms": 316.8,
+     "run_ms": 572.6,
+     "total_ms": 889.4
+    },
+    {
+     "detect_ms": 314.4,
+     "run_ms": 581.3,
+     "total_ms": 895.7
+    },
+    {
+     "detect_ms": 315.1,
+     "run_ms": 584.3,
+     "total_ms": 899.3
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 584.4,
+     "total_ms": 901.6
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 583.9,
+     "total_ms": 900.9
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 580.5,
+     "total_ms": 897.5
+    },
+    {
+     "detect_ms": 316.6,
+     "run_ms": 579.3,
+     "total_ms": 895.9
+    }
+   ],
+   "detect_ms": {
+    "median": 316.9,
+    "min": 313.7,
+    "max": 317.5
+   },
+   "run_ms": {
+    "median": 580.9,
+    "min": 569.1,
+    "max": 584.4
+   },
+   "total_ms": {
+    "median": 897.3,
+    "min": 882.7,
+    "max": 901.6
+   }
+  },
+  {
+   "workers": 4,
+   "cycles": [
+    {
+     "detect_ms": 315.9,
+     "run_ms": 644.8,
+     "total_ms": 960.7
+    },
+    {
+     "detect_ms": 313.7,
+     "run_ms": 655.9,
+     "total_ms": 969.6
+    },
+    {
+     "detect_ms": 316.5,
+     "run_ms": 659.6,
+     "total_ms": 976.1
+    },
+    {
+     "detect_ms": 316.9,
+     "run_ms": 663.3,
+     "total_ms": 980.2
+    },
+    {
+     "detect_ms": 317.1,
+     "run_ms": 659.2,
+     "total_ms": 976.4
+    },
+    {
+     "detect_ms": 316.0,
+     "run_ms": 655.5,
+     "total_ms": 971.5
+    },
+    {
+     "detect_ms": 316.7,
+     "run_ms": 657.5,
+     "total_ms": 974.2
+    },
+    {
+     "detect_ms": 316.7,
+     "run_ms": 663.7,
+     "total_ms": 980.4
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 652.2,
+     "total_ms": 969.4
+    },
+    {
+     "detect_ms": 312.1,
+     "run_ms": 668.0,
+     "total_ms": 980.1
+    }
+   ],
+   "detect_ms": {
+    "median": 316.6,
+    "min": 312.1,
+    "max": 317.2
+   },
+   "run_ms": {
+    "median": 658.4,
+    "min": 644.8,
+    "max": 668.0
+   },
+   "total_ms": {
+    "median": 975.2,
+    "min": 960.7,
+    "max": 980.4
+   }
+  }
+ ],
+ "fork_pool_app": [
+  {
+   "workers": 2,
+   "cycles": [
+    {
+     "detect_ms": 316.8,
+     "run_ms": 731.5,
+     "total_ms": 1048.2
+    },
+    {
+     "detect_ms": 313.7,
+     "run_ms": 716.6,
+     "total_ms": 1030.4
+    },
+    {
+     "detect_ms": 315.6,
+     "run_ms": 196.6,
+     "total_ms": 512.2
+    },
+    {
+     "detect_ms": 315.7,
+     "run_ms": 205.3,
+     "total_ms": 521.0
+    },
+    {
+     "detect_ms": 313.4,
+     "run_ms": 198.3,
+     "total_ms": 511.7
+    },
+    {
+     "detect_ms": 316.8,
+     "run_ms": 201.3,
+     "total_ms": 518.0
+    },
+    {
+     "detect_ms": 316.5,
+     "run_ms": 212.6,
+     "total_ms": 529.1
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 210.5,
+     "total_ms": 527.7
+    },
+    {
+     "detect_ms": 316.8,
+     "run_ms": 193.6,
+     "total_ms": 510.4
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 204.1,
+     "total_ms": 521.1
+    }
+   ],
+   "detect_ms": {
+    "median": 316.6,
+    "min": 313.4,
+    "max": 317.2
+   },
+   "run_ms": {
+    "median": 204.7,
+    "min": 193.6,
+    "max": 731.5
+   },
+   "total_ms": {
+    "median": 521.0,
+    "min": 510.4,
+    "max": 1048.2
+   }
+  },
+  {
+   "workers": 4,
+   "cycles": [
+    {
+     "detect_ms": 314.7,
+     "run_ms": 741.6,
+     "total_ms": 1056.3
+    },
+    {
+     "detect_ms": 317.2,
+     "run_ms": 705.5,
+     "total_ms": 1022.7
+    },
+    {
+     "detect_ms": 316.9,
+     "run_ms": 218.8,
+     "total_ms": 535.7
+    },
+    {
+     "detect_ms": 315.3,
+     "run_ms": 219.5,
+     "total_ms": 534.8
+    },
+    {
+     "detect_ms": 317.1,
+     "run_ms": 217.6,
+     "total_ms": 534.7
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 225.3,
+     "total_ms": 542.3
+    },
+    {
+     "detect_ms": 313.8,
+     "run_ms": 215.2,
+     "total_ms": 529.0
+    },
+    {
+     "detect_ms": 315.5,
+     "run_ms": 217.2,
+     "total_ms": 532.7
+    },
+    {
+     "detect_ms": 317.3,
+     "run_ms": 227.4,
+     "total_ms": 544.7
+    },
+    {
+     "detect_ms": 317.0,
+     "run_ms": 224.2,
+     "total_ms": 541.2
+    }
+   ],
+   "detect_ms": {
+    "median": 316.9,
+    "min": 313.8,
+    "max": 317.3
+   },
+   "run_ms": {
+    "median": 221.8,
+    "min": 215.2,
+    "max": 741.6
+   },
+   "total_ms": {
+    "median": 538.5,
+    "min": 529.0,
+    "max": 1056.3
+   }
+  }
+ ]
+}

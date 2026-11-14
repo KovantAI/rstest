@@ -301,6 +301,7 @@ pub(super) fn collect_session(python: &Path, args: &[String]) -> Result<Collecte
         doctor: false,
         timeout: None,
         leakcheck: false,
+        warm: None,
         send_ids: true,
         debug_port: None,
         stream_output: false,

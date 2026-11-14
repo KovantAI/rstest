@@ -1,0 +1,805 @@
+{
+  "date": "2026-11-12",
+  "logical_cpus": 14,
+  "load_1m_at_end": 74.97705078125,
+  "arms": [
+    "core",
+    "corefreeze"
+  ],
+  "repeat": 5,
+  "memory": true,
+  "rows": [
+    {
+      "suite": "flask",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.5250318750040606,
+          0.5233977920142934,
+          0.5365845410269685,
+          0.5474042919813655,
+          0.5354931250330992
+        ],
+        "corefreeze": [
+          0.5217122500180267,
+          0.5245306669967249,
+          0.5045686250086874,
+          0.5196687920251861,
+          0.5311556669767015
+        ]
+      },
+      "medians": {
+        "core": 0.535,
+        "corefreeze": 0.522
+      },
+      "saved_pct": {
+        "corefreeze": 2.6
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 491,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 103.3,
+        "corefreeze": 97.8
+      },
+      "mems_mib": {
+        "core": [
+          102.9,
+          82.9,
+          103.8,
+          103.3,
+          103.9
+        ],
+        "corefreeze": [
+          97.8,
+          79.8,
+          80.5,
+          100.9,
+          101.0
+        ]
+      }
+    },
+    {
+      "suite": "click",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.7191434999695048,
+          1.718335208017379,
+          1.74107745900983,
+          1.7322663340019062,
+          1.692779375007376
+        ],
+        "corefreeze": [
+          1.7079642919707112,
+          1.7067077080137096,
+          1.711940625042189,
+          1.7436164579703473,
+          1.7369614170165733
+        ]
+      },
+      "medians": {
+        "core": 1.719,
+        "corefreeze": 1.712
+      },
+      "saved_pct": {
+        "corefreeze": 0.4
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 1697,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 795.8,
+        "corefreeze": 669.3
+      },
+      "mems_mib": {
+        "core": [
+          795.8,
+          899.5,
+          667.3,
+          926.0,
+          647.6
+        ],
+        "corefreeze": [
+          667.4,
+          792.2,
+          669.3,
+          889.5,
+          668.3
+        ]
+      }
+    },
+    {
+      "suite": "attrs",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.153550500050187,
+          1.4776842080173083,
+          1.528264417022001,
+          1.1283971249940805,
+          1.4601459170226008
+        ],
+        "corefreeze": [
+          1.1662069169688039,
+          1.4296043330105022,
+          1.1059185409685597,
+          1.3766555840265937,
+          1.1728598750196397
+        ]
+      },
+      "medians": {
+        "core": 1.46,
+        "corefreeze": 1.173
+      },
+      "saved_pct": {
+        "corefreeze": 19.7
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 1391,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 728.0,
+        "corefreeze": 749.4
+      },
+      "mems_mib": {
+        "core": [
+          728.0,
+          729.1,
+          725.5,
+          727.7,
+          748.7
+        ],
+        "corefreeze": [
+          727.9,
+          749.4,
+          754.5,
+          726.8,
+          752.5
+        ]
+      }
+    },
+    {
+      "suite": "requests",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          21.360391666996293,
+          21.390729332983028,
+          21.36126224999316,
+          21.37402225000551,
+          21.46807441598503
+        ],
+        "corefreeze": [
+          22.33255316602299,
+          21.40480216703145,
+          21.309342958033085,
+          21.387113499979023,
+          10.954417250002734
+        ]
+      },
+      "medians": {
+        "core": 21.374,
+        "corefreeze": 21.387
+      },
+      "saved_pct": {
+        "corefreeze": -0.1
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 635,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 679.2,
+        "corefreeze": 674.2
+      },
+      "mems_mib": {
+        "core": [
+          677.6,
+          679.2,
+          680.8,
+          678.5,
+          681.4
+        ],
+        "corefreeze": [
+          669.9,
+          676.2,
+          673.9,
+          674.2,
+          694.9
+        ]
+      }
+    },
+    {
+      "suite": "rich",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          2.5375876250327565,
+          2.527612957987003,
+          2.527093624987174,
+          2.5139342910260893,
+          2.530620875011664
+        ],
+        "corefreeze": [
+          2.4717392090242356,
+          2.467517208016943,
+          2.472928250033874,
+          2.460789500037208,
+          2.4862381250131875
+        ]
+      },
+      "medians": {
+        "core": 2.528,
+        "corefreeze": 2.472
+      },
+      "saved_pct": {
+        "corefreeze": 2.2
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 981,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 738.1,
+        "corefreeze": 737.0
+      },
+      "mems_mib": {
+        "core": [
+          739.3,
+          738.8,
+          738.1,
+          736.5,
+          737.6
+        ],
+        "corefreeze": [
+          736.8,
+          738.0,
+          738.3,
+          737.0,
+          736.5
+        ]
+      }
+    },
+    {
+      "suite": "scikit-learn",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          6.307314959005453,
+          6.512036041996907,
+          6.109364292002283,
+          6.266160250001121,
+          6.2849521249881946
+        ],
+        "corefreeze": [
+          6.170831958996132,
+          6.1704833340481855,
+          6.265261250024196,
+          6.094178667000961,
+          6.113851208006963
+        ]
+      },
+      "medians": {
+        "core": 6.285,
+        "corefreeze": 6.17
+      },
+      "saved_pct": {
+        "corefreeze": 1.8
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 3941,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 2124.7,
+        "corefreeze": 2115.0
+      },
+      "mems_mib": {
+        "core": [
+          2079.5,
+          2155.2,
+          2124.7,
+          2135.3,
+          2124.2
+        ],
+        "corefreeze": [
+          2120.9,
+          2135.1,
+          2063.4,
+          2078.2,
+          2115.0
+        ]
+      }
+    },
+    {
+      "suite": "sympy",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          12.823564374994021,
+          13.414558042015415,
+          12.438114667020272,
+          13.737944459018763,
+          12.892729334009346
+        ],
+        "corefreeze": [
+          12.800552790984511,
+          12.303140166972298,
+          13.12609254202107,
+          13.672382750024553,
+          13.2739712499897
+        ]
+      },
+      "medians": {
+        "core": 12.893,
+        "corefreeze": 13.126
+      },
+      "saved_pct": {
+        "corefreeze": -1.8
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 100.0,
+          "tests": 3061,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 2240.0,
+        "corefreeze": 2236.5
+      },
+      "mems_mib": {
+        "core": [
+          2212.0,
+          2208.2,
+          2263.2,
+          2261.9,
+          2240.0
+        ],
+        "corefreeze": [
+          2198.9,
+          2236.5,
+          2268.3,
+          2202.2,
+          2245.1
+        ]
+      }
+    },
+    {
+      "suite": "django-allauth",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          5.560415332962293,
+          5.738730625016615,
+          6.011040207988117,
+          5.722380874969531,
+          5.62091929098824
+        ],
+        "corefreeze": [
+          5.602549333998468,
+          5.615588499989826,
+          5.712523957947269,
+          5.7001602909876965,
+          5.633938917017076
+        ]
+      },
+      "medians": {
+        "core": 5.722,
+        "corefreeze": 5.634
+      },
+      "saved_pct": {
+        "corefreeze": 1.5
+      },
+      "worst_parity": {
+        "corefreeze": {
+          "score": 99.61,
+          "tests": 2050,
+          "differ": 8,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "corefreeze": [
+          {
+            "score": 99.61,
+            "tests": 2050,
+            "differ": 8,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.71,
+            "tests": 2050,
+            "differ": 6,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.71,
+            "tests": 2050,
+            "differ": 6,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "corefreeze": 0
+      },
+      "mem_peak_mib": {
+        "core": 1741.8,
+        "corefreeze": 1758.3
+      },
+      "mems_mib": {
+        "core": [
+          1747.2,
+          1741.8,
+          1740.6,
+          1744.8,
+          1741.5
+        ],
+        "corefreeze": [
+          1767.9,
+          1759.4,
+          1758.3,
+          1742.5,
+          1755.6
+        ]
+      }
+    }
+  ]
+}

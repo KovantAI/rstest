@@ -33,6 +33,7 @@ pub(super) fn build_run_meta(
         started_at_epoch,
         workers,
         argv: std::env::args().collect(),
+        warm: None,
         shard: None,
     }
 }
@@ -624,7 +625,8 @@ pub(super) fn run_post_gates(
             coverage_index.as_ref().zip(project.as_ref()),
         )
         .with_history(&outcome.run, history.get())
-        .with_fixture_groups(&outcome.run, &outcome.fixture_groups);
+        .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
+        .with_warm(outcome.warm.clone());
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
@@ -894,6 +896,7 @@ pub(super) fn run_post_gates(
         }
     }
     let mut run_meta = build_run_meta(start, outcome.exitstatus, started_epoch, n);
+    run_meta.warm = outcome.warm.clone();
     // Stamp the sharding identity so `rstest shard-verify` can reconcile the
     // per-shard reports. Only when we have a full-collection hash (parallel
     // full-collect path); the lazy path carries none.
@@ -2418,6 +2421,8 @@ mod tests {
             collection_size: 0,
             startup_seconds: 0.0,
             fork_prewarmed: false,
+            warm_record: Default::default(),
+            warm: None,
             peak_rss: None,
             sources: Default::default(),
             exiting: Vec::new(),

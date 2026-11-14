@@ -136,6 +136,11 @@ class _DoneRequired(TypedDict):
 
 class DonePayload(_DoneRequired, total=False):
     peak_rss: int  # the worker's peak RSS in bytes (memory-aware -n auto)
+    imported: list[str]  # --fork-pool=app: warmable modules, import order
+    sys_path: list[str]  # --fork-pool=app: sys.path the modules were imported with
+    coverage: bool  # --fork-pool=app: coverage was tracing (template unsafe)
+    rewrite: list[str]  # --fork-pool=app: names pytest marks for assertion rewriting
+    env: list[str]  # --fork-pool=app: environment keys the worker's session changed
 
 
 class ItemStartPayload(TypedDict):
