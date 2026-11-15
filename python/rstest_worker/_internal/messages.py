@@ -104,6 +104,7 @@ class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=
     deselected: int  # items pytest deselected (-k/-m, hooks), only when > 0
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
+    # Discovery's lone worker only (no RSTEST_WORKER_ID), not the pool's gw0.
     locations: list[list[str | int | None]]  # [relpath, lineno] per item
     marks: list[list[str]]  # marker names per item
     cache_dir: str

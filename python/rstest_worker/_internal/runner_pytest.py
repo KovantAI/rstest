@@ -17,11 +17,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
 
 from rstest_worker._internal import fixturecompat
-from rstest_worker._internal import messages as m
+
+if TYPE_CHECKING:
+    # Annotations only: the TypedDict schema costs ~2ms to import.
+    from rstest_worker._internal import messages as m
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,

@@ -21,7 +21,7 @@ ETA and, per worker, which test is running and for how long (`idle` when it
 has nothing). Here is a small four-test file at `-n 2`, caught mid-run:
 
 ```text
-rstest 0.11.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.11.1 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [gw0] ✓ tests/test_math.py::test_add  0.20s [ 25%]
 [gw1] ✓ tests/test_math.py::test_add_zero  0.21s [ 50%]
 [gw1] s tests/test_math.py::test_skipped [ 75%]
@@ -63,7 +63,7 @@ suite at 9.1s at `-n 4`:
 
 ```console
 $ rstest -n 4
-rstest 0.11.0 — 4 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.11.1 — 4 workers (parallel by default; -n 0 for single-worker mode)
 ........................................................................ [  3%]
 ..............................s......................................... [  7%]
 [... 25 more lines ...]
@@ -110,7 +110,7 @@ finish:
 
 ```console
 $ rstest -n 2 -v
-rstest 0.11.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.11.1 — 2 workers (parallel by default; -n 0 for single-worker mode)
 [gw0] tests/test_math.py::test_add PASSED [ 16%]
 [gw1] tests/test_math.py::test_add_zero PASSED [ 33%]
 [gw1] tests/test_math.py::test_skipped SKIPPED [ 50%]

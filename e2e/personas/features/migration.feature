@@ -382,11 +382,16 @@ Feature: pytest / pytest-xdist migrator
         """
       And a file "test_tmp.py" containing:
         """
-        import time, pytest
+        import glob, time, pytest
 
         @pytest.mark.parametrize('i', range(40))
         def test_tmp(tmp_path, i):
             (tmp_path / 'f.txt').write_text(str(i))
+            # Under -n 4, hold until every worker has its root: a slow-booting
+            # worker would otherwise find the queue drained and never make bt/gwN.
+            end = time.time() + 30
+            while tmp_path.parent.name.startswith('gw') and len(glob.glob('bt/gw*')) < 4 and time.time() < end:
+                time.sleep(0.01)
             time.sleep(0.01)
             assert (tmp_path / 'f.txt').read_text() == str(i)
         """

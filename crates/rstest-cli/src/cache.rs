@@ -526,7 +526,9 @@ mod tests {
             std::fs::File::open(&base).unwrap().sync_all().unwrap();
         }
         let full = t.elapsed();
-        if full < std::time::Duration::from_millis(N as u64) {
+        // Real disks measure ~4.5ms/iter (two F_FULLFSYNCs); CI VMs ~2ms/iter,
+        // too close to plain fsync + rename overhead to compare reliably.
+        if full < std::time::Duration::from_millis(3 * N as u64) {
             let _ = std::fs::remove_dir_all(&base);
             return;
         }

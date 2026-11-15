@@ -224,6 +224,11 @@ def _pytest_pin_conflicts(distinfo: Any, pytest_version: str) -> list[str]:
     Requirements gated behind an extra (hypothesis's `[pytest]`) are ignored,
     as are unparseable ones. `distinfo` is pluggy's `list_plugin_distinfo()`:
     `(plugin, dist)` pairs, one per registered module, so dists repeat."""
+    # `packaging` costs ~5ms to import: skip it when no requirement names pytest.
+    if not any(
+        "pytest" in raw.lower() for _plugin, dist in distinfo for raw in dist.requires or ()
+    ):
+        return []
     from packaging.requirements import InvalidRequirement, Requirement
     from packaging.utils import canonicalize_name
 

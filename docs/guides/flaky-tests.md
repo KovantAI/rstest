@@ -344,6 +344,8 @@ fail without reddening the run.
 
 ## Lifecycle
 
+![A stable test that flips 3 or more times is auto-quarantined. From there it either goes back to stable when its flips age out, becomes failing when its last 3 results fail, or moves to quarantine.txt when it needs an owner, until the fix removes the entry.](../assets/flaky-lifecycle.svg)
+
 1. `--reruns` keeps the suite green; both histories record who needed it.
 2. A test that keeps flipping is auto-quarantined. Its failures stop
    reddening the run but still print, so it shows up in every run log.

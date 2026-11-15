@@ -72,6 +72,8 @@ config or non-Python change).
 
 ## How selection decides
 
+![Per changed file: a config or non-Python file means a full run, a test file runs itself, a conftest.py selects its subtree, lines the coverage index recorded select exactly the tests that hit them, and everything else falls back to the import graph. Selections are unioned.](../assets/changed-select.svg)
+
 Per changed file, `--changed` uses the tightest safe source and **unions** the
 results:
 

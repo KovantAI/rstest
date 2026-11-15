@@ -10,15 +10,13 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from _pytest.terminal import _folded_skips
 
-from rstest_worker._internal import junit
-from rstest_worker._internal import messages as m
 from rstest_worker._internal.leakcheck import LeakTracker
-from rstest_worker._internal.netguard import NetGuard
+from rstest_worker._internal.marks import closest_marker
 from rstest_worker._internal.plugincompat import (
     _is_dist_internal,
     _neutralize_rerunfailures,
@@ -35,6 +33,10 @@ from rstest_worker._internal.xdistnode import (
     _XdistGatewayShim,
     _XdistNodeShim,
 )
+
+if TYPE_CHECKING:
+    from rstest_worker._internal import messages as m
+    from rstest_worker._internal.netguard import NetGuard
 
 log = logging.getLogger("rstest.worker")
 
@@ -470,10 +472,18 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
-        junit.maybe_register(config, self._conn)
-        self._net = NetGuard.from_env()
-        if self._net is not None:
-            self._net.install()
+        # junit (xml.etree) and netguard (socket, ipaddress) cost ~6ms to
+        # import; load them only when the orchestrator turned them on.
+        if os.environ.get("RSTEST_JUNITXML"):
+            from rstest_worker._internal import junit
+
+            junit.maybe_register(config, self._conn)
+        if os.environ.get("RSTEST_NETWORK") == "record":
+            from rstest_worker._internal.netguard import NetGuard
+
+            self._net = NetGuard.from_env()
+            if self._net is not None:
+                self._net.install()
         if self._leaks is not None and not config.pluginmanager.is_registered(self._leaks):
             config.pluginmanager.register(self._leaks, "rstest-leakcheck")
         worker_id = os.environ.get("RSTEST_WORKER_ID")
@@ -725,7 +735,7 @@ class StreamPlugin:
         """`@pytest.mark.timeout(N)` wins over the global `--timeout`. Accepts
         the positional `timeout(N)` and keyword `timeout(timeout=N)` forms
         (pytest-timeout-compatible)."""
-        marker = item.get_closest_marker("timeout")
+        marker = closest_marker(item, "timeout")
         if marker is not None:
             if marker.args:
                 return _parse_timeout(marker.args[0])
@@ -782,7 +792,7 @@ class StreamPlugin:
             report._rstest_cause = cause_of(call.excinfo, item.config.rootpath)
         # The doctor's TIMEOUTS section skips a test whose marker already
         # covers its suggested limit.
-        if report.when == "call" and item.get_closest_marker("timeout") is not None:
+        if report.when == "call" and closest_marker(item, "timeout") is not None:
             report._rstest_marker_timeout = self._effective_timeout(item)
         return report
 
