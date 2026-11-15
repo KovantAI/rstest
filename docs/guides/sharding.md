@@ -192,7 +192,7 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-      - uses: KovantAI/rstest/.github/actions/rstest@v0.11.0
+      - uses: KovantAI/rstest/.github/actions/rstest@v0.11.1
         with:
           python-version: "3.13"
           cache-backend: artifact

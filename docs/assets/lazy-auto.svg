@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How rstest picks lazy collection when neither --collect nor [tool.rstest] collect is set. Eight checks in order, and any failing check keeps full collection: 2 or more workers; at least 2000 cached tests and tests times workers at least 16 000; --dist load or loadfile; no nodeid, path, --pyargs or --changed selection; no --shard, --shuffle, --incremental or fail-fast order; no doctests; the file walk finds every cached test's file; and no file's cached time exceeds its per-worker share by more than a second. If all pass, the run uses lazy collection and prints a banner. A cold cache counts as zero tests, and an explicit --collect full or lazy overrides the choice." viewBox="0 0 820 950">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<rect class="rs-box" x="60" y="20" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="51"><tspan font-weight="700">Workers</tspan>  2 or more</text>
+<rect class="rs-box" x="60" y="112" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="143"><tspan font-weight="700">Size</tspan>  2000+ cached tests, tests × workers ≥ 16 000</text>
+<rect class="rs-box" x="60" y="204" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="235"><tspan font-weight="700">Dist</tspan>  load (the default) or loadfile</text>
+<rect class="rs-box" x="60" y="296" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="327"><tspan font-weight="700">Selection</tspan>  no nodeid, path, --pyargs or --changed</text>
+<rect class="rs-box" x="60" y="388" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="419"><tspan font-weight="700">Features</tspan>  no --shard, --shuffle, --incremental, fail-fast</text>
+<rect class="rs-box" x="60" y="480" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="511"><tspan font-weight="700">Doctests</tspan>  none enabled</text>
+<rect class="rs-box" x="60" y="572" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="603"><tspan font-weight="700">File walk</tspan>  finds every cached test's file</text>
+<rect class="rs-box" x="60" y="664" width="460" height="52" rx="10"/><text class="rs-row-text rs-start" x="80" y="695"><tspan font-weight="700">Balance</tspan>  no file over its per-worker share + 1s</text>
+<line class="rs-edge" x1="290" y1="72" x2="290" y2="112"/>
+<text class="rs-label rs-start" x="298" y="97">yes</text>
+<line class="rs-edge" x1="290" y1="164" x2="290" y2="204"/>
+<line class="rs-edge" x1="290" y1="256" x2="290" y2="296"/>
+<line class="rs-edge" x1="290" y1="348" x2="290" y2="388"/>
+<line class="rs-edge" x1="290" y1="440" x2="290" y2="480"/>
+<line class="rs-edge" x1="290" y1="532" x2="290" y2="572"/>
+<line class="rs-edge" x1="290" y1="624" x2="290" y2="664"/>
+<line class="rs-edge" x1="290" y1="716" x2="290" y2="756"/>
+<line class="rs-edge" x1="520" y1="46" x2="590" y2="46"/>
+<text class="rs-label" x="555" y="38">no</text>
+<line class="rs-edge" x1="520" y1="138" x2="590" y2="138"/>
+<line class="rs-edge" x1="520" y1="230" x2="590" y2="230"/>
+<line class="rs-edge" x1="520" y1="322" x2="590" y2="322"/>
+<line class="rs-edge" x1="520" y1="414" x2="590" y2="414"/>
+<line class="rs-edge" x1="520" y1="506" x2="590" y2="506"/>
+<line class="rs-edge" x1="520" y1="598" x2="590" y2="598"/>
+<line class="rs-edge" x1="520" y1="690" x2="590" y2="690"/>
+<rect class="rs-box" x="590" y="20" width="190" height="696" rx="14"/>
+<text class="rs-title" x="685" y="340">Stays full</text>
+<text class="rs-sub rs-sm" x="685" y="368">every worker collects</text>
+<text class="rs-sub rs-sm" x="685" y="388">the whole suite</text>
+<text class="rs-note" x="685" y="420">auto never rejects</text>
+<text class="rs-note" x="685" y="438">a config</text>
+<rect class="rs-box rs-hot" x="60" y="756" width="460" height="76" rx="14"/>
+<text class="rs-title" x="290" y="788">Lazy collection</text>
+<text class="rs-sub rs-sm" x="290" y="812">a banner names the test and worker counts</text>
+<rect class="rs-loop" x="60" y="860" width="720" height="70" rx="14"/>
+<text class="rs-sub rs-sm" x="420" y="890">a cold cache counts as 0 tests, so a suite's first run stays full</text>
+<text class="rs-tag" x="420" y="914">--COLLECT FULL OR --COLLECT LAZY OVERRIDES THE CHOICE</text>
+</svg>

@@ -20,13 +20,14 @@ def _item(*args, **kwargs):
     mark = SimpleNamespace(args=args, kwargs=kwargs)
     return SimpleNamespace(
         get_closest_marker=lambda name: mark if name == "flaky" else None,
+        keywords={"flaky"},
         config=SimpleNamespace(),
         obj=lambda: None,
     )
 
 
 def test_flaky_reruns_without_mark_is_zero():
-    item = SimpleNamespace(get_closest_marker=lambda name: None)
+    item = SimpleNamespace(get_closest_marker=lambda name: None, keywords=())
     assert flaky_reruns(item) == 0
 
 
@@ -469,7 +470,7 @@ def test_matches_ignores_non_exception_classes_and_bad_patterns():
 def test_mark_rules_out_rerun_needs_a_failed_report_and_a_filtering_mark():
     excinfo = _raised(lambda: int("x"))
     failed = SimpleNamespace(failed=True)
-    unmarked = SimpleNamespace(get_closest_marker=lambda name: None)
+    unmarked = SimpleNamespace(get_closest_marker=lambda name: None, keywords=())
     assert retry.mark_rules_out_rerun(unmarked, failed, excinfo) is False
     # A plain flaky mark (no only_rerun / rerun_except) rules nothing out.
     assert retry.mark_rules_out_rerun(_item(2), failed, excinfo) is False
@@ -496,7 +497,9 @@ def test_rerun_delay_reads_the_mark(kwargs, expected):
 
 
 def test_rerun_delay_without_mark_is_zero():
-    assert retry.rerun_delay(SimpleNamespace(get_closest_marker=lambda name: None)) == 0.0
+    assert (
+        retry.rerun_delay(SimpleNamespace(get_closest_marker=lambda name: None, keywords=())) == 0.0
+    )
 
 
 def test_quarantine_patterns_skip_blank_and_unparsable_lines(monkeypatch):

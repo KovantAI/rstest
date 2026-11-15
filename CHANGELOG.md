@@ -3,7 +3,7 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
-## Unreleased
+## 0.11.1 (2026-11-11)
 
 ### Features
 
@@ -32,6 +32,35 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--fork-pool` runs end sooner.** Waiting for forked workers to exit
+  checked every 10ms; it now starts at 0.5ms and backs off, so a worker that
+  exits at once is noticed within ~1ms instead of 10ms.
+- **Less per-test overhead in the worker.** The `isolated`, `flaky` and
+  `timeout` marker checks now skip pytest's walk up the node chain when the
+  test has no such marker, about 1µs per test.
+- **Each worker starts ~8ms faster.** It no longer imports the junit writer,
+  the `--doctor` network recorder or the message schema unless the run uses
+  them, and the plugin pin check skips importing `packaging` when no plugin
+  requires pytest.
+- **Parallel runs start their first tests sooner.** The first worker no longer
+  computes every test's source location and marker names after collection
+  (only `--collect-only --report-json` uses them): ~12ms per 1,000 tests that
+  every worker was waiting on.
+- **Less per-test overhead in pool workers on macOS.** The check for a
+  pending command before each test now uses `select()` instead of `poll()`,
+  which costs ~6µs per call on macOS (0.3µs now).
+- **Less wait at both ends of a run.** Clearing temp folders left by killed
+  runs now happens in the background instead of before the run starts (it
+  lists the whole temp dir), and the duration, flake and history saves now
+  overlap worker shutdown instead of waiting for it. rstest still waits for
+  both before it exits.
+- **`-n auto` no longer runs a big suite of very fast tests on one worker.**
+  Worker sizing allowed one worker per 2s of cached test time, and tests that
+  finish in well under a millisecond are cached as 0s, so 10,000 of them got 1
+  worker and ran slower than plain pytest. Sizing now counts the per-test
+  framework cost too and allows one worker per 0.25s of work (an extra worker
+  costs ~7ms to start): that suite now gets 9 workers, 2.57s down to 0.78s on an
+  M4 Max. A suite under about a second still runs on one worker.
 - **`--collect lazy` no longer slows down quadratically with files per
   directory.** Each worker collected one file per `perform_collect` call, and
   each call listed the file's whole directory again: 1000 files in one

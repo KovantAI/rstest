@@ -24,6 +24,8 @@ import time
 
 import pytest
 
+from rstest_worker._internal.marks import closest_marker
+
 
 def _condition_holds(item, condition) -> bool:
     """rerunfailures' `condition=`: a bool, or a string evaluated with `os`,
@@ -48,7 +50,7 @@ def flaky_reruns(item) -> int:
     Mirrors pytest-rerunfailures: the `reruns=` keyword, else the first
     positional argument (`flaky(3)`), else 1; 0 when `condition=` is false.
     """
-    mark = item.get_closest_marker("flaky")
+    mark = closest_marker(item, "flaky")
     if mark is None:
         return 0
     kwargs = getattr(mark, "kwargs", {})
@@ -121,7 +123,7 @@ def mark_rules_out_rerun(item, report, excinfo) -> bool:
     `rerun_except`, one matching any of them."""
     if not report.failed or hasattr(report, "wasxfail"):
         return False
-    mark = item.get_closest_marker("flaky")
+    mark = closest_marker(item, "flaky")
     if mark is None:
         return False
     only = _mark_filters(mark, "only_rerun")
@@ -136,7 +138,7 @@ def mark_rules_out_rerun(item, report, excinfo) -> bool:
 def rerun_delay(item) -> float:
     """The flaky mark's `reruns_delay` in seconds, 0 without one (a negative
     or unparsable value too, as rerunfailures treats a negative one)."""
-    mark = item.get_closest_marker("flaky")
+    mark = closest_marker(item, "flaky")
     if mark is None:
         return 0.0
     try:

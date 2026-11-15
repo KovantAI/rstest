@@ -793,12 +793,10 @@ pub fn run_lazy_pool(
     // replay's size-drift check instead of flagging a suite change.
     let fully_collected =
         file_queue.is_empty() && states.iter().all(|s| s.uncollected_files.is_empty());
-    let mut workers: Vec<_> = states.into_iter().map(|s| s.worker).collect();
-    for w in &mut workers {
+    // Reaped by the caller after the post-run saves (see run_pool).
+    let mut exiting: Vec<_> = states.into_iter().map(|s| s.worker).collect();
+    for w in &mut exiting {
         let _ = w.send(&proto::Command::Shutdown);
-    }
-    for w in workers {
-        let _ = w.wait();
     }
     let retried = reruns > 0 || !run.flaky.is_empty();
     let exitstatus = orchestrator::finalize_exit(
@@ -851,6 +849,7 @@ pub fn run_lazy_pool(
         fork_prewarmed,
         sources,
         peak_rss,
+        exiting,
     })
 }
 

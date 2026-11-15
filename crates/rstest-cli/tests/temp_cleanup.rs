@@ -154,3 +154,46 @@ fn next_run_deletes_a_sigkilled_runs_folder() {
         "the killed run's folder survived the next run"
     );
 }
+
+#[test]
+fn sweep_overlaps_the_run_and_finishes_before_it_returns() {
+    let Some(venv) = common::pytest_env("pytest, rstest_worker") else {
+        return;
+    };
+    let dir = fresh_dir("overlap");
+    // Abandoned run folders (lock file, no live owner), enough that deleting
+    // them takes far longer than reaching the first test.
+    for i in 0..20_000u32 {
+        let d = dir.join(format!("tmp/rstest-{}", 4_000_000_000 + i));
+        std::fs::create_dir(&d).unwrap();
+        std::fs::write(d.join(".lock"), "").unwrap();
+    }
+    std::fs::write(
+        dir.join("suite/test_count.py"),
+        "import os\n\ndef test_count():\n    \
+         left = sum(n.startswith('rstest-4') for n in os.listdir(os.environ['SWEEP_ROOT']))\n    \
+         open('left.txt', 'w').write(str(left))\n",
+    )
+    .unwrap();
+    let out = rstest(&venv, &dir, &["-n", "1", "-q"])
+        .env("SWEEP_ROOT", dir.join("tmp"))
+        .output()
+        .unwrap();
+    let during: usize = std::fs::read_to_string(dir.join("suite/left.txt"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let after = run_folders(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(during > 0, "the sweep finished before the first test ran");
+    assert_eq!(
+        after,
+        Vec::<String>::new(),
+        "the sweep didn't finish by exit"
+    );
+}

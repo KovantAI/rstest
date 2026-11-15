@@ -69,6 +69,8 @@ project, so a project with its own `pyproject.toml` uses only its own
 
 ## Worker budget and scheduling
 
+![An illustrative -n 12 split: libs/core 7 workers, services/api 3, libs/util and tools/cli 1 each, weighted by last-known cost. Each project runs at the same time as its own isolated child session, and output is printed per project in completion order.](../assets/monorepo.svg)
+
 Projects run **concurrently** under one worker budget: your `-n` (or `auto`)
 is split across projects weighted by each project's last-known cost, minimum
 one worker each. The cost is the suite's last wall-clock time from the
