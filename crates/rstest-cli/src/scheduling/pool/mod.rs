@@ -123,7 +123,7 @@ fn failfast_note(l: crate::scheduling::durations::FailFastLead) -> String {
             .to_string();
     }
     format!(
-        "rstest: fail-fast: leading with {} recently failed, {} near changes, {} flaky",
+        "rstest: fail-fast: leading with {} recent failures, {} near changes, {} flaky",
         l.failed, l.near, l.flaky
     )
 }

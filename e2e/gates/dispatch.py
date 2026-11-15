@@ -1217,7 +1217,7 @@ def gate_order_fail_fast(g, args, binary):
     )
     check(
         "fail-fast: -v says what leads the queue",
-        "fail-fast: leading with 0 recently failed, 1 near changes, 0 flaky" in r.stderr,
+        "fail-fast: leading with 0 recent failures, 1 near changes, 0 flaky" in r.stderr,
         r.stderr[-300:],
     )
     # Co-failure: a and b failed together in two runs. With no flake record

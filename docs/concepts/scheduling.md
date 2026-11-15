@@ -111,7 +111,7 @@ order twice:
 
 The history loads on a background thread while workers start, so it adds no
 time to the run. With `-v`, rstest prints what leads the queue, for example
-`rstest: fail-fast: leading with 2 recently failed, 14 near changes, 3 flaky`.
+`rstest: fail-fast: leading with 2 recent failures, 14 near changes, 3 flaky`.
 
 With neither the flag nor `[tool.rstest] order` set, rstest picks
 `fail-fast` under `--watch` and `throughput` otherwise.
