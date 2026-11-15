@@ -25,6 +25,10 @@ pub(super) struct Dispatch {
     pub(super) lead_ends: Vec<usize>,
     /// What [`fixture_lead`] grouped, for the doctor.
     pub(super) fixture_groups: Vec<FixtureGroup>,
+    /// What fail-fast pulled to the front (`None` under any other order).
+    pub(super) failfast: Option<crate::scheduling::durations::FailFastLead>,
+    /// Fail-fast co-failure partners by queue index (empty otherwise).
+    pub(super) partners: std::collections::HashMap<u64, Vec<u64>>,
     pub(super) cursor: usize,
     /// Group end-positions in `order` (loadfile mode): a dispatch never
     /// splits a group.
@@ -62,6 +66,35 @@ impl Dispatch {
     /// ahead of it).
     pub(super) fn in_slow_zone(&self) -> bool {
         self.cursor < self.slow_count && self.requeued.is_empty()
+    }
+
+    /// `failed` just failed: move its co-failure partners that haven't gone
+    /// out yet to the head of the queue, one dispatch each, so a second red
+    /// from the same cause surfaces next. Returns how many moved.
+    pub(super) fn promote(&mut self, failed: u64) -> usize {
+        let Some(partners) = self.partners.remove(&failed) else {
+            return 0;
+        };
+        let head = self.slow_count.max(self.cursor);
+        let (mut lifted, mut rest) = (Vec::new(), Vec::new());
+        let mut from_tail = 0;
+        for (pos, &i) in self.order.iter().enumerate().skip(self.cursor) {
+            if partners.contains(&i) {
+                lifted.push(i);
+                from_tail += usize::from(pos >= head);
+            } else {
+                rest.push(i);
+            }
+        }
+        if lifted.is_empty() {
+            return 0;
+        }
+        let moved = lifted.len();
+        self.order.truncate(self.cursor);
+        self.order.extend(lifted);
+        self.order.extend(rest);
+        self.slow_count = head + from_tail;
+        moved
     }
 
     /// Parallel-phase items not yet handed out (queue remainder + requeued).
@@ -157,7 +190,7 @@ pub(super) fn build_dispatch(
     serial: Vec<u64>,
     groups: std::collections::HashMap<String, String>,
     cache: &std::collections::HashMap<String, f64>,
-    flakes: &std::collections::HashMap<String, crate::reporting::flakes::FlakeStats>,
+    signals: &crate::scheduling::durations::FailFastSignals,
     scope_costs: &std::collections::HashMap<String, f64>,
     workers: usize,
     dist: Dist,
@@ -174,6 +207,8 @@ pub(super) fn build_dispatch(
 
     let mut lead_ends = Vec::new();
     let mut fixture_groups = Vec::new();
+    let mut failfast = None;
+    let mut partners = std::collections::HashMap::new();
     let (order, slow_count, group_ends) = match dist {
         // Each mode has no dispatch queue (each worker is seeded with the
         // full suite), so there is nothing to build.
@@ -193,24 +228,18 @@ pub(super) fn build_dispatch(
                 }
             }
             super::Order::Throughput => throughput(ids, cache, &serial_set, &kept),
-            // Fail-fast: suspects (failed/flaky) first, then the throughput
-            // order. The single-dispatch prefix covers the suspects AND the
-            // long poles, so reds spread across workers at once and slow
-            // tests still don't pile onto one worker's chunk.
+            // Fail-fast: suspects (failed, near a change, flaky) first, then
+            // the throughput order. The single-dispatch prefix covers the
+            // suspects AND the long poles, so reds spread across workers at
+            // once and slow tests still don't pile onto one worker's chunk.
             super::Order::FailFast => {
-                use crate::scheduling::durations::{
-                    failfast_order, is_suspect, FAILFAST_SUSPECT_CAP, SLOW_THRESHOLD_SECS,
-                };
-                let order =
-                    failfast_order(ids, cache, flakes, |i| !serial_set.contains(&i) && kept(&i));
-                // Single-dispatch prefix: the (capped) suspect lead, then the
-                // long poles. The order is already filtered, so the cap here
-                // matches the one failfast_order applied.
-                let lead = order
-                    .iter()
-                    .take(FAILFAST_SUSPECT_CAP)
-                    .take_while(|&&i| is_suspect(&ids[i as usize], flakes))
-                    .count();
+                use crate::scheduling::durations::{failfast_order, SLOW_THRESHOLD_SECS};
+                let (order, lead) = failfast_order(ids, cache, signals, |i| {
+                    !serial_set.contains(&i) && kept(&i)
+                });
+                partners = partner_index(ids, &order, &signals.cofail);
+                failfast = Some(lead);
+                let lead = lead.len();
                 let slow_count = lead
                     + order[lead..]
                         .iter()
@@ -321,7 +350,36 @@ pub(super) fn build_dispatch(
         serial_active: false,
         lead_ends,
         fixture_groups,
+        failfast,
+        partners,
     })
+}
+
+/// [`crate::reporting::history::CoFail`] by queue index, over the tests this
+/// run dispatches (`order`), for [`Dispatch::promote`].
+fn partner_index(
+    ids: &[String],
+    order: &[u64],
+    cofail: &crate::reporting::history::CoFail,
+) -> std::collections::HashMap<u64, Vec<u64>> {
+    if cofail.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let mut at: std::collections::HashMap<&str, Vec<u64>> = std::collections::HashMap::new();
+    for &i in order {
+        at.entry(ids[i as usize].as_str()).or_default().push(i);
+    }
+    order
+        .iter()
+        .filter_map(|&i| {
+            let p: Vec<u64> = cofail
+                .get(&ids[i as usize])?
+                .iter()
+                .flat_map(|(b, _)| at.get(b.as_str()).into_iter().flatten().copied())
+                .collect();
+            (!p.is_empty()).then_some((i, p))
+        })
+        .collect()
 }
 
 /// `--dist load`'s throughput order: cached long poles first (longest first),
@@ -478,7 +536,7 @@ mod tests {
             serial,
             groups,
             cache,
-            &HashMap::new(),
+            &Default::default(),
             &HashMap::new(),
             4,
             dist,
@@ -547,7 +605,10 @@ mod tests {
             vec![],
             HashMap::new(),
             &cache,
-            &flakes,
+            &crate::scheduling::durations::FailFastSignals {
+                flakes,
+                ..Default::default()
+            },
             &HashMap::new(),
             4,
             Dist::Load,
@@ -560,6 +621,105 @@ mod tests {
         assert_eq!(d.order, vec![1, 0, 2]);
         // Red and the long pole both dispatch one at a time.
         assert_eq!(d.slow_count, 2);
+    }
+
+    /// A fail-fast queue over `names` with `cofail` partners and no other
+    /// signal: collection order, nothing single-dispatched.
+    fn cofail_queue(names: &[String], cofail: &[(&str, &[&str])]) -> Dispatch {
+        let signals = crate::scheduling::durations::FailFastSignals {
+            cofail: cofail
+                .iter()
+                .map(|(a, bs)| {
+                    (
+                        a.to_string(),
+                        bs.iter().map(|b| (b.to_string(), 1.0)).collect(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        build_dispatch(
+            names,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            &signals,
+            &HashMap::new(),
+            2,
+            Dist::Load,
+            super::super::Order::FailFast,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn promote_pulls_undispatched_partners_to_the_head_one_at_a_time() {
+        let names = ids(&["a", "b", "c", "d", "e", "f"]);
+        let mut d = cofail_queue(&names, &[("a", &["b", "e", "f"])]);
+        assert_eq!((d.order.clone(), d.slow_count), (vec![0, 1, 2, 3, 4, 5], 0));
+        // a and b went out; then a failed.
+        assert!(matches!(d.take(2, false), Take::Items(v) if v == [0, 1]));
+        assert_eq!(d.promote(0), 2, "b already dispatched: only e and f move");
+        assert_eq!(d.order, vec![0, 1, 4, 5, 2, 3]);
+        assert_eq!(d.slow_count, 4);
+        // Each partner goes out alone (the pool asks for one item while
+        // in_slow_zone, see io::dispatch_to), then chunking resumes; nothing
+        // twice.
+        let mut batches = Vec::new();
+        while let Take::Items(v) = d.take(if d.in_slow_zone() { 1 } else { 2 }, false) {
+            batches.push(v);
+        }
+        assert_eq!(batches, vec![vec![4], vec![5], vec![2, 3]]);
+        // A test promotes once.
+        assert_eq!(d.promote(0), 0);
+    }
+
+    #[test]
+    fn promote_inside_the_single_dispatch_prefix_keeps_its_length_honest() {
+        let names = ids(&["a", "b", "c", "d", "e"]);
+        let mut d = cofail_queue(&names, &[("a", &["c", "e"])]);
+        // Pretend the first three were the single-dispatch lead.
+        d.slow_count = 3;
+        assert!(matches!(d.take(1, false), Take::Items(v) if v == [0]));
+        // c moves within the prefix, e joins it from the tail.
+        assert_eq!(d.promote(0), 2);
+        assert_eq!(d.order, vec![0, 2, 4, 1, 3]);
+        assert_eq!(d.slow_count, 4);
+    }
+
+    #[test]
+    fn partners_map_to_queue_indices_of_dispatched_tests_only() {
+        let names = ids(&["a", "b", "c"]);
+        // "gone" isn't in this run; c is shard-filtered out.
+        let signals = crate::scheduling::durations::FailFastSignals {
+            cofail: HashMap::from([(
+                "a".to_string(),
+                vec![
+                    ("gone".to_string(), 1.0),
+                    ("c".to_string(), 1.0),
+                    ("b".to_string(), 0.6),
+                ],
+            )]),
+            ..Default::default()
+        };
+        let keep: HashSet<u64> = [0, 1].into();
+        let d = build_dispatch(
+            &names,
+            vec![],
+            HashMap::new(),
+            &HashMap::new(),
+            &signals,
+            &HashMap::new(),
+            2,
+            Dist::Load,
+            super::super::Order::FailFast,
+            None,
+            Some(&keep),
+        )
+        .unwrap();
+        assert_eq!(d.partners, HashMap::from([(0, vec![1])]));
     }
 
     #[test]
@@ -587,7 +747,10 @@ mod tests {
             vec![],
             HashMap::new(),
             &HashMap::new(),
-            &flakes,
+            &crate::scheduling::durations::FailFastSignals {
+                flakes,
+                ..Default::default()
+            },
             &HashMap::new(),
             4,
             Dist::Load,
@@ -822,7 +985,7 @@ mod tests {
             vec![],
             HashMap::new(),
             cache,
-            &HashMap::new(),
+            &Default::default(),
             scope_costs,
             workers,
             Dist::Load,
