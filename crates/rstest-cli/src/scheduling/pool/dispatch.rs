@@ -1030,8 +1030,13 @@ mod tests {
             None,
         )
         .unwrap();
-        // Below the threshold, and a costly scope no test belongs to.
-        for sc in [costs(&[("a.py", 0.1)]), costs(&[("gone.py", 9.0)])] {
+        // Below the threshold, a costly scope no test belongs to, and costly
+        // session ("") and package scopes, which no module or class matches.
+        for sc in [
+            costs(&[("a.py", 0.1)]),
+            costs(&[("gone.py", 9.0)]),
+            costs(&[("", 9.0), (".", 9.0)]),
+        ] {
             let d = grouped(&names, &cache, &sc, 4, None);
             assert_eq!(d.order, plain.order);
             assert_eq!(d.slow_count, plain.slow_count);

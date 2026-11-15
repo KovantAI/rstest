@@ -582,6 +582,15 @@ ok shard-verify: 4 shards cover all 4200 collected tests (no drops, no overlap)
 It exits `0` only when the shards agree on one collection (same
 `collection_hash`, `n`, and size), the shard set is exactly `1..=N` once each,
 and the union of what they ran equals the collection with no test on two shards.
+Under [`--budget`](cli.md#-budget-duration) a shard's tests are what it ran plus
+what its budget left out (`meta.shard.budget_skipped`), and the line says how
+many were left out:
+
+```console
+$ rstest shard-verify shard.*.json
+ok shard-verify: 4 shards cover all 4200 collected tests (no drops, no overlap); 3100 left out by --budget
+```
+
 It exits `1` on any drop, overlap, missing or duplicate shard, or a divergent
 collection, printing a line that names the problem. It reads only the JSON
 files, needs no interpreter, and runs no tests. Full-collection runs only: a

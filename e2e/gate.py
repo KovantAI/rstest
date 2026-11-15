@@ -27,6 +27,7 @@ from gates.coverage import (
 )
 from gates.dispatch import (
     gate_auto_worker_capping,
+    gate_budget,
     gate_crash_after_restart_budget,
     gate_crash_restart_exhaustion,
     gate_dist_each,
@@ -322,6 +323,7 @@ def main():
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,
         gate_order_fail_fast,
+        gate_budget,
         gate_duration_regression_gate,
         gate_shared_cache_backend,
         gate_tool_rstest_config,

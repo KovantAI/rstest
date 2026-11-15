@@ -1423,8 +1423,13 @@ import socket
 import pytest
 
 
+@pytest.fixture(scope="session")
+def everywhere():
+    return 1
+
+
 @pytest.fixture(scope="module")
-def shared():
+def shared(everywhere):
     return 1
 
 
@@ -1494,7 +1499,7 @@ def test_session_failure_payload_carries_crash_and_cause(tmp_path, monkeypatch):
     assert failed["cause"]["exc"] == "ValueError"
     assert failed["cause"]["message"] == "no good"
     # The raise inside the test module, not pytest's frames.
-    assert failed["cause"]["at"].endswith(".py:16")
+    assert failed["cause"]["at"].endswith(".py:21")
     xfailed = reports[("test_xfails", "call")]
     assert xfailed["outcome"] == "skipped"
     assert xfailed["xfail_reason"] == "known bug"
@@ -1502,13 +1507,15 @@ def test_session_failure_payload_carries_crash_and_cause(tmp_path, monkeypatch):
     assert "crash" not in reports[("test_uses_module_fixture", "call")]
 
 
-def test_session_ships_module_scope_setup_costs(tmp_path, monkeypatch):
+def test_session_ships_session_and_module_scope_setup_costs(tmp_path, monkeypatch):
     plugin, _, _ = _real_session(tmp_path, monkeypatch)
     (costs,) = [p["costs"] for k, p in plugin._conn.sent if k == "scope_costs"]
-    assert len(costs) == 1
-    assert costs[0]["key"].endswith(".py")
-    assert costs[0]["count"] == 1
-    assert costs[0]["total"] >= 0
+    by_key = {c["key"]: c for c in costs}
+    # The session's nodeid is "": its fixtures are charged once per worker.
+    assert by_key[""]["count"] == 1
+    (module,) = [c for k, c in by_key.items() if k.endswith(".py")]
+    assert module["count"] == 1
+    assert module["total"] >= 0
 
 
 def test_session_installs_network_recorder_and_leak_tracker_from_env(tmp_path, monkeypatch):
@@ -1590,22 +1597,39 @@ def _drive_fixture_setup(p, fd, request):
         gen.send("value")
 
 
-def test_module_and_class_fixture_setups_are_costed_per_scope_node(monkeypatch):
-    clock = iter([10.0, 10.5, 20.0, 20.25, 30.0, 31.0])
+def test_wider_scope_fixture_setups_are_costed_per_scope_node(monkeypatch):
+    clock = iter([10.0, 10.5, 20.0, 20.25, 30.0, 31.0, 40.0, 42.0, 50.0, 53.0])
     monkeypatch.setattr("time.perf_counter", lambda: next(clock))
     p = _plugin()  # doctor off: only wider scopes are timed
     mod = SimpleNamespace(node=SimpleNamespace(nodeid="t.py"))
     _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
     _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
     _drive_fixture_setup(p, SimpleNamespace(argname="cfg", scope="class"), mod)
+    sess = SimpleNamespace(node=SimpleNamespace(nodeid=""))
+    _drive_fixture_setup(p, SimpleNamespace(argname="env", scope="session"), sess)
+    pkg = SimpleNamespace(node=SimpleNamespace(nodeid="tests/pkg"))
+    _drive_fixture_setup(p, SimpleNamespace(argname="srv", scope="package"), pkg)
     # Not timed at all: function scope, and a scope with no node to charge.
     _drive_fixture_setup(p, SimpleNamespace(argname="f", scope="function"), mod)
     p._add_scope_cost(SimpleNamespace(argname="x", scope="module"), SimpleNamespace(), 1.0)
-    assert p._scope_costs == {"t.py": {"db": [2, 0.75], "cfg": [1, 1.0]}}
+    assert p._scope_costs == {
+        "t.py": {"db": [2, 0.75], "cfg": [1, 1.0]},
+        "": {"env": [1, 2.0]},
+        "tests/pkg": {"srv": [1, 3.0]},
+    }
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     # Two fixtures on one scope: setups counted by the most-set-up one.
     assert p._conn.sent == [
-        ("scope_costs", {"costs": [{"key": "t.py", "total": 1.75, "count": 2}]})
+        (
+            "scope_costs",
+            {
+                "costs": [
+                    {"key": "t.py", "total": 1.75, "count": 2},
+                    {"key": "", "total": 2.0, "count": 1},
+                    {"key": "tests/pkg", "total": 3.0, "count": 1},
+                ]
+            },
+        )
     ]
 
 

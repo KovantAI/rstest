@@ -1269,6 +1269,124 @@ def gate_order_fail_fast(g, args, binary):
     )
 
 
+def gate_budget(g, args, binary):
+    print("== --budget ==")
+    suite = g.tmp / "bgsuite"
+    shutil.rmtree(suite, ignore_errors=True)
+    g.write("bgsuite/pytest.ini", "[pytest]\n")
+    for f in "abcdef":
+        g.write(
+            f"bgsuite/test_slow_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.2)\n" for i in range(4)),
+        )
+    g.write("bgsuite/test_fast.py", "".join(f"def test_{i}(): pass\n" for i in range(10)))
+    g.write("bgsuite/test_red.py", "def test_red(): assert False\n")
+    g.write("bgsuite/test_edit.py", "def test_e(): pass\n")
+    git_init_commit(suite)
+    # Cold: no durations to estimate from, so everything runs (and is timed).
+    r = g.run("-n", "2", "--budget", "2s", cwd=str(suite))
+    check(
+        "budget: a cold cache runs everything and says so",
+        r.returncode == 1
+        and "no recorded durations yet, running all 36" in r.stderr
+        and "35 passed" in r.stdout
+        and "deselected" not in r.stdout,
+        r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Warm, with a test file edited: the edit and the recorded failure run,
+    # the fast tests fill, and most of the 4.8s of slow tests are left out.
+    g.write("bgsuite/test_edit.py", "def test_e(): assert True\n")
+    r = g.run("-n", "2", "--budget", "2s", "-v", cwd=str(suite))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "budget: changed file and last failure run, the rest is cut to fit",
+        r.returncode == 1
+        and re.search(r"--budget 2s -> \d+ of 36 test\(s\)", r.stderr) is not None
+        and "1 changed-file, 1 failed" in r.stderr
+        and "test_edit.py::test_e PASSED" in r.stdout
+        and "test_red.py::test_red FAILED" in r.stdout
+        and "deselected" in r.stdout
+        and m is not None
+        and 11 <= int(m.group(1)) < 35,
+        r.stdout[-600:] + r.stderr[-300:],
+    )
+    # Under --shard each shard spends the budget on its own bucket, and
+    # shard-verify counts what a budget left out as covered, not dropped.
+    snap = g.tmp / "bgsuite_cache"
+    shutil.rmtree(snap, ignore_errors=True)
+    shutil.copytree(suite / ".rstest_cache", snap)
+    reports, lines = [], []
+    for k in (1, 2):
+        # One cache snapshot for every shard, as CI restores it per job.
+        shutil.rmtree(suite / ".rstest_cache", ignore_errors=True)
+        shutil.copytree(snap, suite / ".rstest_cache")
+        rp = g.tmp / f"bg.shard{k}.json"
+        r = g.run(
+            "-n",
+            "2",
+            "--shard",
+            f"{k}/2",
+            "--budget",
+            "1s",
+            "--report-json",
+            str(rp),
+            cwd=str(suite),
+        )
+        reports.append(rp)
+        lines += [ln for ln in r.stderr.splitlines() if "--budget 1s ->" in ln]
+    skipped = sum(
+        len(json.loads(rp.read_text())["meta"]["shard"].get("budget_skipped", [])) for rp in reports
+    )
+    r = g.run("shard-verify", *map(str, reports))
+    check(
+        "budget: each shard picks from its bucket and shard-verify accepts the cut",
+        len(lines) == 2
+        and all(" of 36 " not in ln for ln in lines)
+        and skipped > 0
+        and r.returncode == 0
+        and f"{skipped} left out by --budget" in r.stdout,
+        f"rc={r.returncode} skipped={skipped} {lines} " + r.stdout[-200:] + r.stderr[-300:],
+    )
+    # A budget run is never green: it leaves out tests, so a pass proves
+    # nothing about them. Neither the environment snapshot nor the
+    # --since-green baseline may move; the plain runs after show they would.
+    green = g.tmp / "bggreen"
+    shutil.rmtree(green, ignore_errors=True)
+    g.write("bggreen/pytest.ini", "[pytest]\n")
+    g.write("bggreen/.gitignore", ".rstest_cache/\n")
+    g.write("bggreen/test_g.py", "".join(f"def test_{i}(): pass\n" for i in range(4)))
+    git_init_commit(green)
+    cache = green / ".rstest_cache"
+    r = g.run("-n", "2", "--budget", "30s", cwd=str(green))
+    check(
+        "budget: a green budget run records no green environment",
+        r.returncode == 0 and not (cache / "green_env.json").exists(),
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run("-n", "2", "--since-green", "--budget", "30s", cwd=str(green))
+    check(
+        "budget: a green --since-green budget run leaves the baseline alone",
+        r.returncode == 0
+        and not (cache / "last_green.json").exists()
+        and "baseline not advanced" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run("-n", "2", "--since-green", cwd=str(green))
+    g.run("-n", "2", cwd=str(green))
+    check(
+        "budget: the same runs without --budget record both",
+        (cache / "last_green.json").exists() and (cache / "green_env.json").exists(),
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # It picks from the pool's dispatch list: refused where there is none.
+    r = g.run("-n", "0", "--budget", "2s", cwd=str(suite))
+    check(
+        "budget: refused without the parallel pool",
+        r.returncode != 0 and "--budget needs the parallel pool" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+
+
 def gate_session_exit_stops_pool(g, args, binary):
     # R6: pytest.exit() stops the whole run, as under pytest and -n 0: every
     # worker stops starting tests, pytest's Exit banner names the reason, and
