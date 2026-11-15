@@ -181,7 +181,8 @@ A module that imports one of these is imported per worker too. Known limits:
 a module that copied `os.environ` before the template started is not
 checked, and coverage is not supported yet (`--cov` turns `app` off; under
 `--watch` the default is then the plain spawn path). On Windows, which has
-no fork, `app` falls back to plain spawns with a note.
+no fork, `app` falls back to plain spawns with a note (see
+[Running on Windows](../guides/windows.md#worker-startup)).
 
 Per run, `app` saves little wall time, because workers already import in
 parallel; its value is under `--watch`. The `--doctor` `startup:` line shows
