@@ -137,6 +137,16 @@ def gate_lazy_collection(g, args, binary):
         r.returncode == 0 and "2 passed, 1 skipped" in r.stdout and "error" not in r.stdout,
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )
+    # R54: `::` in an option value is no nodeid selection; lazy stays on and
+    # honors the deselect.
+    r = g.run("dirskip", "-n", "2", "--collect", "lazy", "--deselect", "dirskip/test_a.py::test_a")
+    check(
+        "lazy: a --deselect nodeid keeps lazy collection",
+        r.returncode == 0
+        and "1 passed, 1 skipped, 1 deselected" in r.stdout
+        and "falls back" not in r.stdout + r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
     # R32: a send to a dead worker is not fatal; its ids are requeued and
     # run on the respawned worker.
     if not WINDOWS:
