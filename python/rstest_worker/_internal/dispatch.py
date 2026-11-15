@@ -464,6 +464,7 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
         by_path = {p: [] for p in paths}
         if not paths:
             return by_path
+        skips_before = self._collect_skips
         try:
             items = session.perform_collect(list(paths), genitems=True)
         except pytest.UsageError as e:
@@ -472,8 +473,11 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
                 # its batch down: retry per file to find it.
                 for p in paths:
                     by_path.update(self._collect_by_path(session, [p]))
-            else:
+            elif self._collect_skips == skips_before:
                 self._conn.send("collect_error", {"path": paths[0], "longrepr": str(e)})
+            # Else a directory on the way was skipped (an ancestor conftest's
+            # `importorskip`), which pytest reports as a skipped collector, not
+            # an error; its collect_skip already went out, the file is empty.
             return by_path
         base = session.config.invocation_params.dir
         index = {(base / p).absolute(): p for p in paths}

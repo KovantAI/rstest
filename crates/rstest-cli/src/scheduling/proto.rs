@@ -248,7 +248,6 @@ pub enum Event {
     /// A collector (module/dir) was skipped wholesale (importorskip,
     /// skip marks at module level). pytest counts these in "skipped".
     CollectSkip {
-        #[allow(dead_code)]
         path: String,
     },
     /// A collector the previous lastfailed recorded as failed collected now;

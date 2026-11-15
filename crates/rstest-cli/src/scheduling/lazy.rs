@@ -262,6 +262,7 @@ pub fn run_lazy_pool(
     // Keep only the FIRST attempt of a rerun/redistributed id: replay runs
     // with reruns off, so a duplicate entry would run the test twice.
     let mut journaled: HashSet<String> = HashSet::new();
+    let mut collect_skipped: HashSet<String> = HashSet::new();
 
     // SIGINT/SIGTERM: stop the workers and fall through to the wind-down, as
     // in run_pool.
@@ -352,9 +353,13 @@ pub fn run_lazy_pool(
                         .filter(|e| idx == 0 || e.when != "config"),
                 );
             }
-            Ok(Event::CollectSkip { .. }) => {
-                // Each skipped collector is seen by exactly one worker.
-                run.collect_skips += 1;
+            Ok(Event::CollectSkip { path }) => {
+                // A skipped directory (conftest `importorskip`) is reported
+                // again for every file below it, on whichever worker collects
+                // it: count each collector once, as directory collection does.
+                if collect_skipped.insert(path) {
+                    run.collect_skips += 1;
+                }
             }
             Ok(Event::LfRecollected { path, ids }) => {
                 run.lf_recollected.insert(path, ids);

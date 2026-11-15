@@ -120,6 +120,23 @@ def gate_lazy_collection(g, args, binary):
     r = g.run("crash", "-n", "2", "--collect", "lazy")
     check("lazy: crash completes", "1 failed, 5 passed" in r.stdout, r.stdout[-200:])
     check("lazy: crash attributed", "crashed while running" in r.stdout, r.stdout[-300:])
+    # R52: a conftest that skips its directory skips it, as directory
+    # collection does; it used to abort the run as a collection error. Two
+    # files below it: the directory skip still counts once.
+    g.write(
+        "dirskip/skipped/conftest.py",
+        'import pytest\npytest.importorskip("no_such_module_xyz")\n',
+    )
+    g.write("dirskip/skipped/test_s1.py", "def test_s(): pass\n")
+    g.write("dirskip/skipped/test_s2.py", "def test_s(): pass\n")
+    g.write("dirskip/test_a.py", "def test_a(): pass\n")
+    g.write("dirskip/test_b.py", "def test_b(): pass\n")
+    r = g.run("dirskip", "-n", "2", "--collect", "lazy")
+    check(
+        "lazy: conftest skipping its directory skips it",
+        r.returncode == 0 and "2 passed, 1 skipped" in r.stdout and "error" not in r.stdout,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
     # R32: a send to a dead worker is not fatal; its ids are requeued and
     # run on the respawned worker.
     if not WINDOWS:
