@@ -380,7 +380,7 @@ def _conftest_lines(pm: Any, root: Path) -> list[str]:
         found = unit_findings([src]) if src is not None else []
         if found:
             try:
-                label = str(Path(path).relative_to(root))
+                label = Path(path).relative_to(root).as_posix()
             except ValueError:
                 label = str(path)
             out.append(recommend(label, found, conftest=True))

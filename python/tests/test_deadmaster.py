@@ -261,6 +261,16 @@ def test_scan_reports_plugin_submodule_and_conftest(scan, tmp_path, capsys):
     assert err[1].startswith("rstest: warning: conftest.py:1 runs only when")
 
 
+def test_nested_conftest_label_uses_forward_slashes(scan, tmp_path, capsys):
+    # Windows printed `sub\conftest.py:1`; the label is posix like a nodeid.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "conftest.py").write_text(_CRASH)
+    conftest = SimpleNamespace(__file__=str(tmp_path / "sub" / "conftest.py"))
+    config = SimpleNamespace(pluginmanager=_PM([], [conftest]), rootpath=tmp_path)
+    deadmaster.warn_dead_master(config)
+    assert capsys.readouterr().err.startswith("rstest: warning: sub/conftest.py:1 reads")
+
+
 def test_curated_plugin_is_not_scanned(scan, tmp_path, capsys):
     deadmaster.warn_dead_master(_setup(tmp_path, "pytest_html"))
     err = capsys.readouterr().err
