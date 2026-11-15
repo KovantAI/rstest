@@ -22,7 +22,8 @@
 //! run could not locate is stored untagged and kept as-is, like the pre-#18
 //! bare timings.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -394,9 +395,9 @@ pub fn sum_secs_in(cache_dir: &Path) -> Option<f64> {
 /// for fixture-cost-aware dispatch. See `pool::dispatch::fixture_lead`.
 pub const SCOPE_FILE: &str = "scope_costs.json";
 
-/// Merge this run's module/class fixture setup costs over the previous ones:
-/// a scope this run set up takes its new mean, the rest keep theirs (a `-k`
-/// run must not forget the suite).
+/// Merge this run's session/package/module/class fixture setup costs over the
+/// previous ones: a scope this run set up takes its new mean, the rest keep
+/// theirs (a `-k` run must not forget the suite).
 // ponytail: never pruned; a renamed module leaves a dead key that matches nothing.
 pub fn save_scope_costs(run: &Run) {
     if run.scope_costs.is_empty() {
@@ -420,7 +421,7 @@ pub fn overlay_scope_costs_in(path: &Path, costs: impl IntoIterator<Item = (Stri
     }
 }
 
-/// The saved module/class fixture setup costs (empty when none or unreadable).
+/// The saved session/package/module/class fixture setup costs (empty when none or unreadable).
 pub fn load_scope_costs() -> HashMap<String, f64> {
     load_scope_costs_from(&cache::file(SCOPE_FILE))
 }
@@ -654,72 +655,364 @@ pub fn dispatch_order(ids: &[String], cache: &HashMap<String, f64>) -> Vec<u64> 
     slow.into_iter().map(|(i, _)| i).chain(rest).collect()
 }
 
-/// A test with a hard failure or a flake on record: fail-fast pulls it to the
-/// front of the queue.
-pub fn is_suspect(id: &str, flakes: &HashMap<String, FlakeStats>) -> bool {
-    flakes.get(id).is_some_and(|f| f.failed > 0 || f.flaky > 0)
-}
-
 /// Most suspects fail-fast pulls to the front (and dispatches one at a time).
 /// Bounds the damage of a mass failure: after one bad commit fails thousands
 /// of tests, every later run would otherwise single-dispatch all of them for
 /// the whole retention window. Suspects past the cap rejoin the clean tail.
 pub const FAILFAST_SUSPECT_CAP: usize = 128;
 
-/// Fail-fast dispatch order: surface a red as early as possible. Suspects
-/// (see [`is_suspect`]) go first, hard-failed before flaky-only; within each,
-/// most recent event first (`last_epoch` desc) so a test that failed last run
-/// beats one that failed often but long ago (for hard-failed tests this is the
-/// last FAILURE, not a later flake), then event count (desc), then
-/// collection order (a same-run cohort stays module-contiguous). At most
-/// [`FAILFAST_SUSPECT_CAP`] suspects lead. Everything after is exactly
+/// Past this share of the run's tests, [`crate::select::NEAR_AFFECTED`] stops
+/// ranking anything: a change to a core module reaches nearly every test, and
+/// pulling them all forward is just the throughput order with worse packing.
+pub const NEAR_AFFECTED_MAX_SHARE: f64 = 0.25;
+
+/// What fail-fast ranks on besides durations: failure/flake records
+/// (`flakes.json`), proximity to changed code ([`crate::select::near_changes`])
+/// and co-failure partners ([`History::cofail`]). Empty = throughput order.
+#[derive(Debug, Default)]
+pub struct FailFastSignals {
+    pub flakes: HashMap<String, FlakeStats>,
+    pub near: HashMap<String, u8>,
+    pub cofail: crate::reporting::history::CoFail,
+}
+
+/// A suspect whose failure follows an earlier suspect's this often is the
+/// same failure cluster, so it doesn't lead alongside it.
+pub const COFAIL_SHADOW_P: f32 = 0.8;
+
+/// What [`failfast_order`] pulled to the front, per group.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct FailFastLead {
+    pub failed: usize,
+    pub near: usize,
+    pub flaky: usize,
+}
+
+impl FailFastLead {
+    pub fn len(&self) -> usize {
+        self.failed + self.near + self.flaky
+    }
+}
+
+/// Fail-fast dispatch order: surface a red as early as possible. Suspects go
+/// first, in three groups:
+/// 1. hard-failed on record, most recent failure first (`failed_epoch` desc,
+///    so a test that failed last run beats one that failed often long ago),
+///    then failure count;
+/// 2. near a code change (`near`, from [`crate::select::near_changes`]), by
+///    tier;
+/// 3. flaky-only, most recent flake first, then flake count.
+///
+/// Full ties keep collection order (a same-run cohort stays module-contiguous).
+/// A suspect that nearly always fails with one ranked ahead of it
+/// ([`COFAIL_SHADOW_P`]) moves behind the other suspects, so the lead covers
+/// distinct failures first. At most [`FAILFAST_SUSPECT_CAP`] suspects lead. Everything after is exactly
 /// [`dispatch_order`]: long poles longest-first, then collection order, so
-/// clean tests keep module locality and workers still pack. The caller
-/// dispatches the suspect + long-pole prefix one test at a time. Only ids
-/// passing `include` are returned. Pairs with `--maxfail`/`-x` for true early
-/// exit.
+/// clean tests keep module locality and workers still pack. Returns the order
+/// and what the suspect lead is made of; the caller dispatches that lead and
+/// the long poles behind it one test at a time. Only ids passing `include` are
+/// returned. Pairs with `--maxfail`/`-x` for true early exit.
 pub fn failfast_order(
     ids: &[String],
     cache: &HashMap<String, f64>,
-    flakes: &HashMap<String, FlakeStats>,
+    signals: &FailFastSignals,
     include: impl Fn(u64) -> bool,
-) -> Vec<u64> {
-    // Filter (shard / serial) BEFORE ranking and capping, so the cap counts
-    // only suspects this run will actually dispatch.
-    let (mut suspects, mut clean): (Vec<u64>, Vec<u64>) = (0..ids.len() as u64)
-        .filter(|&i| include(i))
-        .partition(|&i| is_suspect(&ids[i as usize], flakes));
-    // Recency: last hard failure for failed tests, last flake otherwise.
-    let recency = |f: &FlakeStats| {
-        if f.failed > 0 {
-            f.failed_epoch()
-        } else {
-            f.last_epoch
+) -> (Vec<u64>, FailFastLead) {
+    let FailFastSignals {
+        flakes,
+        near,
+        cofail,
+    } = signals;
+    // Filter (shard / serial) BEFORE ranking and capping, so the cap and the
+    // affected share count only tests this run will actually dispatch.
+    let included: Vec<u64> = (0..ids.len() as u64).filter(|&i| include(i)).collect();
+    let class = suspects(ids, flakes, near, &included);
+    let (mut suspects, mut clean): (Vec<u64>, Vec<u64>) = included
+        .into_iter()
+        .partition(|&i| class[i as usize].is_some());
+    // Stable: full ties keep collection order.
+    suspects.sort_by_cached_key(|&i| {
+        let f = flakes.get(&ids[i as usize]).copied().unwrap_or_default();
+        match class[i as usize] {
+            Some(Suspect::Near(tier)) => (1, tier, Reverse(0), Reverse(0), Reverse(0)),
+            // Recency: last hard failure for failed tests, last flake otherwise.
+            g => {
+                let recency = if f.failed > 0 {
+                    f.failed_epoch()
+                } else {
+                    f.last_epoch
+                };
+                (
+                    if g == Some(Suspect::Flaky) { 2 } else { 0 },
+                    0,
+                    Reverse(recency),
+                    Reverse(f.failed),
+                    Reverse(f.flaky),
+                )
+            }
         }
-    };
-    // Stable sort: full ties keep collection order.
-    suspects.sort_by(|&a, &b| {
-        let (fa, fb) = (flakes[&ids[a as usize]], flakes[&ids[b as usize]]);
-        (fa.failed == 0)
-            .cmp(&(fb.failed == 0))
-            .then(recency(&fb).cmp(&recency(&fa)))
-            .then(fb.failed.cmp(&fa.failed))
-            .then(fb.flaky.cmp(&fa.flaky))
     });
+    // One test per co-failure cluster first: a suspect that nearly always
+    // fails along with one already ahead of it goes behind the rest of the
+    // lead (and is the first to fall past the cap).
+    let mut shadowed: HashSet<&str> = HashSet::new();
+    let (mut first, mut behind) = (Vec::new(), Vec::new());
+    for i in suspects {
+        let id = ids[i as usize].as_str();
+        if shadowed.contains(id) {
+            behind.push(i);
+            continue;
+        }
+        let partners = cofail.get(id).into_iter().flatten();
+        shadowed.extend(
+            partners
+                .filter(|(_, p)| *p >= COFAIL_SHADOW_P)
+                .map(|(b, _)| b.as_str()),
+        );
+        first.push(i);
+    }
+    first.extend(behind);
+    let mut suspects = first;
     if suspects.len() > FAILFAST_SUSPECT_CAP {
         clean.extend(suspects.drain(FAILFAST_SUSPECT_CAP..));
         clean.sort_unstable();
     }
+    let mut lead = FailFastLead::default();
+    for &i in &suspects {
+        match class[i as usize] {
+            Some(Suspect::Failed) => lead.failed += 1,
+            Some(Suspect::Near(_)) => lead.near += 1,
+            _ => lead.flaky += 1,
+        }
+    }
     // Clean tail: reuse throughput ordering over the clean subset.
     let clean_ids: Vec<String> = clean.iter().map(|&i| ids[i as usize].clone()).collect();
-    suspects
+    let order = suspects
         .into_iter()
         .chain(
             dispatch_order(&clean_ids, cache)
                 .into_iter()
                 .map(|j| clean[j as usize]),
         )
-        .collect()
+        .collect();
+    (order, lead)
+}
+
+/// Why [`failfast_order`] leads a test, and how [`budget_select`] ranks it.
+/// Ordered as they lead: hard-failed, then near a change (closest tier
+/// first), then flaky.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Suspect {
+    Failed,
+    Near(u8),
+    Flaky,
+}
+
+/// `id`'s [`crate::select::near_changes`] tier: its own nodeid where the
+/// coverage map is that precise, else its file's.
+fn near_tier(near: &HashMap<String, u8>, id: &str) -> Option<u8> {
+    near.get(id)
+        .or_else(|| near.get(crate::text::nodeid_file(id)))
+        .copied()
+}
+
+/// Each test's [`Suspect`] class, indexed like `ids` (`None` = clean, or not in
+/// `included`). A hard failure outranks proximity. Past
+/// [`NEAR_AFFECTED_MAX_SHARE`] of `included`, the affected tier ranks nothing.
+fn suspects(
+    ids: &[String],
+    flakes: &HashMap<String, FlakeStats>,
+    near: &HashMap<String, u8>,
+    included: &[u64],
+) -> Vec<Option<Suspect>> {
+    use crate::select::NEAR_AFFECTED;
+    let affected = included
+        .iter()
+        .filter(|&&i| near_tier(near, &ids[i as usize]) == Some(NEAR_AFFECTED))
+        .count();
+    let max_tier = if affected as f64 > included.len() as f64 * NEAR_AFFECTED_MAX_SHARE {
+        NEAR_AFFECTED - 1
+    } else {
+        NEAR_AFFECTED
+    };
+    let mut class = vec![None; ids.len()];
+    for &i in included {
+        let id = ids[i as usize].as_str();
+        let f = flakes.get(id);
+        class[i as usize] = match near_tier(near, id).filter(|&t| t <= max_tier) {
+            _ if f.is_some_and(|f| f.failed > 0) => Some(Suspect::Failed),
+            Some(t) => Some(Suspect::Near(t)),
+            None if f.is_some_and(|f| f.flaky > 0) => Some(Suspect::Flaky),
+            None => None,
+        };
+    }
+    class
+}
+
+/// What [`budget_select`] picked, and why, for the summary line.
+#[derive(Debug, Default, PartialEq)]
+pub struct BudgetPick {
+    /// Indices into `ids` to run.
+    pub keep: std::collections::HashSet<u64>,
+    /// Estimated wall seconds of the picked tests on the pool, the session
+    /// fixtures' per-worker cost included.
+    pub est_secs: f64,
+    /// Tests the budget chose from (those passing `include`).
+    pub candidates: usize,
+    /// Picked from a test file changed since the base (always run).
+    pub changed: usize,
+    pub failed: usize,
+    /// Picked for reaching a changed source file.
+    pub near: usize,
+    pub flaky: usize,
+    /// Picked with no signal, shortest first, to use what was left.
+    pub fill: usize,
+    /// No candidate has a recorded duration, so there is nothing to estimate
+    /// from: every candidate is kept.
+    pub cold: bool,
+}
+
+/// `--budget`: the tests most worth running in `budget_secs` of wall time on
+/// `workers` workers. Only ids passing `include` (shard bucket, incremental
+/// skips) are candidates.
+///
+/// - Tests in a test file changed since the base (`near` tiers
+///   [`crate::select::NEAR_DIRTY_TEST`] and [`crate::select::NEAR_TEST`])
+///   always run, over budget or not.
+/// - Then the [`Suspect`] groups, in [`failfast_order`]'s order: hard-failed,
+///   reaching a changed source file, flaky. Within a group, cheapest first:
+///   the group sets the risk, so the cheapest test is the most risk per second.
+/// - Then clean tests, shortest first, while they fit.
+///
+/// A test costs its `cost` (call + setup seconds; a test with none costs the
+/// candidates' median) plus, the first time a picked test needs them, its
+/// module's and classes' fixture setup from `scope_costs`, once, and its
+/// packages', once per worker. The session's (key `""`) comes off every
+/// worker's budget up front. A test that doesn't fit is passed over, and
+/// cheaper ones after it can still be picked.
+// ponytail: a test's setup time from history also holds the wider fixtures it
+// set up first, so those count twice and the estimate runs high. Have the
+// worker report setup minus wider-scope time if budgets come out too small.
+#[allow(clippy::too_many_arguments)]
+pub fn budget_select(
+    ids: &[String],
+    cost: &HashMap<String, f64>,
+    scope_costs: &HashMap<String, f64>,
+    flakes: &HashMap<String, FlakeStats>,
+    near: &HashMap<String, u8>,
+    budget_secs: f64,
+    workers: usize,
+    include: impl Fn(u64) -> bool,
+) -> BudgetPick {
+    use crate::select::NEAR_TEST;
+    let included: Vec<u64> = (0..ids.len() as u64).filter(|&i| include(i)).collect();
+    let mut pick = BudgetPick {
+        candidates: included.len(),
+        ..Default::default()
+    };
+    let mut known: Vec<f64> = included
+        .iter()
+        .filter_map(|&i| cost.get(&ids[i as usize]).copied())
+        .collect();
+    if known.is_empty() {
+        pick.cold = !included.is_empty();
+        pick.keep = included.into_iter().collect();
+        return pick;
+    }
+    known.sort_by(f64::total_cmp);
+    let median = known[known.len() / 2];
+    let own = |i: u64| cost.get(&ids[i as usize]).copied().unwrap_or(median);
+    let workers = workers.max(1) as f64;
+    let session = scope_costs.get("").copied().unwrap_or(0.0);
+    // Worker-seconds still free after the session setup, those spent, and the
+    // scopes already paid for.
+    struct Spend {
+        left: f64,
+        used: f64,
+        paid: std::collections::HashSet<String>,
+    }
+    let mut st = Spend {
+        left: (budget_secs - session) * workers,
+        used: 0.0,
+        paid: std::collections::HashSet::new(),
+    };
+    // The saved scopes `i` sets up besides the session, each with its cost in
+    // worker-seconds: a package is set up on every worker that reaches it. A
+    // package at the rootdir has the session's nodeid "", so it is costed
+    // with the session.
+    let scopes_of = |i: u64| -> Vec<(&str, f64)> {
+        let id = ids[i as usize].as_str();
+        let file = Path::new(crate::text::nodeid_file(id));
+        let packages = file
+            .ancestors()
+            .skip(1)
+            .filter_map(|dir| dir.to_str().filter(|d| !d.is_empty()))
+            .map(|k| (k, workers));
+        let nodes = id.match_indices("::").map(|(pos, _)| (&id[..pos], 1.0));
+        packages
+            .chain(nodes)
+            .filter_map(|(k, per)| {
+                scope_costs
+                    .get_key_value(k)
+                    .map(|(k, &c)| (k.as_str(), c * per))
+            })
+            .collect()
+    };
+    let added = |i: u64, paid: &std::collections::HashSet<String>| {
+        own(i)
+            + scopes_of(i)
+                .iter()
+                .filter(|(k, _)| !paid.contains(*k))
+                .map(|(_, c)| c)
+                .sum::<f64>()
+    };
+    let take = |i: u64, force: bool, st: &mut Spend, pick: &mut BudgetPick| {
+        let c = added(i, &st.paid);
+        if !force && c > st.left {
+            return false;
+        }
+        st.left -= c;
+        st.used += c;
+        st.paid
+            .extend(scopes_of(i).into_iter().map(|(k, _)| k.to_string()));
+        pick.keep.insert(i);
+        true
+    };
+    let class = suspects(ids, flakes, near, &included);
+    let (changed, rest): (Vec<u64>, Vec<u64>) = included
+        .into_iter()
+        .partition(|&i| near_tier(near, &ids[i as usize]).is_some_and(|t| t <= NEAR_TEST));
+    for i in changed {
+        take(i, true, &mut st, &mut pick);
+        pick.changed += 1;
+    }
+    let (mut ranked, mut clean): (Vec<u64>, Vec<u64>) =
+        rest.into_iter().partition(|&i| class[i as usize].is_some());
+    // Stable: ties keep collection order.
+    ranked.sort_by(|&a, &b| {
+        class[a as usize]
+            .cmp(&class[b as usize])
+            .then(own(a).total_cmp(&own(b)))
+    });
+    for i in ranked {
+        if take(i, false, &mut st, &mut pick) {
+            match class[i as usize] {
+                Some(Suspect::Failed) => pick.failed += 1,
+                Some(Suspect::Near(_)) => pick.near += 1,
+                _ => pick.flaky += 1,
+            }
+        }
+    }
+    // Shortest first, counting the fixtures not yet paid for.
+    let fill_key: HashMap<u64, f64> = clean.iter().map(|&i| (i, added(i, &st.paid))).collect();
+    clean.sort_by(|a, b| fill_key[a].total_cmp(&fill_key[b]));
+    for i in clean {
+        if take(i, false, &mut st, &mut pick) {
+            pick.fill += 1;
+        }
+    }
+    pick.est_secs = session + st.used / workers;
+    pick
 }
 
 #[cfg(test)]
@@ -966,7 +1259,16 @@ mod tests {
         // hard-failed first, then flaky, then the clean tail in throughput
         // order: the long pole first, then collection order.
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, |_| true),
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![0, 1, 3, 2]
         );
     }
@@ -1009,7 +1311,16 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, |_| true),
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0, 2]
         );
     }
@@ -1035,7 +1346,16 @@ mod tests {
             })
             .collect();
         flakes.get_mut(&names[n - 1]).unwrap().last_epoch = 200;
-        let order = failfast_order(&names, &HashMap::new(), &flakes, |_| true);
+        let order = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes: flakes.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        )
+        .0;
         assert_eq!(order.len(), n, "a permutation, nothing lost");
         // Newest failure leads, then the tied cohort in collection order
         // (no duration shuffling), capped; overflow rejoins in collection order.
@@ -1076,7 +1396,16 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            failfast_order(&names, &HashMap::new(), &flakes, |_| true),
+            failfast_order(
+                &names,
+                &HashMap::new(),
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0]
         );
     }
@@ -1104,7 +1433,16 @@ mod tests {
                 )
             })
             .collect();
-        let order = failfast_order(&names, &HashMap::new(), &flakes, |i| i % 2 == 1);
+        let order = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes: flakes.clone(),
+                ..Default::default()
+            },
+            |i| i % 2 == 1,
+        )
+        .0;
         assert_eq!(order.len(), n / 2);
         assert!(order.iter().all(|i| i % 2 == 1));
         let expected: Vec<u64> = (0..n as u64).filter(|i| i % 2 == 1).collect();
@@ -1120,13 +1458,408 @@ mod tests {
         let cache = HashMap::from([("a".to_string(), 0.5), ("b".to_string(), 3.0)]);
         let flakes: HashMap<String, FlakeStats> = HashMap::new();
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, |_| true),
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             vec![1, 0, 2]
         );
         assert_eq!(
-            failfast_order(&names, &cache, &flakes, |_| true),
+            failfast_order(
+                &names,
+                &cache,
+                &FailFastSignals {
+                    flakes: flakes.clone(),
+                    ..Default::default()
+                },
+                |_| true
+            )
+            .0,
             dispatch_order(&names, &cache)
         );
+    }
+
+    #[test]
+    fn failfast_ranks_near_changes_between_failed_and_flaky() {
+        use crate::reporting::flakes::FlakeStats;
+        use crate::select::{NEAR_AFFECTED, NEAR_DIRTY_TEST, NEAR_TEST};
+        let names: Vec<String> = [
+            "t/a.py::clean",
+            "t/a.py::flaky",
+            "t/b.py::affected",
+            "t/c.py::committed",
+            "t/d.py::dirty",
+            "t/e.py::failed",
+            "t/f.py::clean",
+            "t/g.py::clean",
+            "t/h.py::clean",
+            "t/i.py::clean",
+            "t/j.py::clean",
+            "t/k.py::clean",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let flakes = HashMap::from([
+            (
+                "t/a.py::flaky".to_string(),
+                FlakeStats {
+                    flaky: 3,
+                    ..Default::default()
+                },
+            ),
+            (
+                "t/e.py::failed".to_string(),
+                FlakeStats {
+                    failed: 1,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        // Whole files and a coverage-precise nodeid both match.
+        let near = HashMap::from([
+            ("t/b.py::affected".to_string(), NEAR_AFFECTED),
+            ("t/c.py".to_string(), NEAR_TEST),
+            ("t/d.py".to_string(), NEAR_DIRTY_TEST),
+            // A hard failure outranks its own proximity.
+            ("t/e.py".to_string(), NEAR_DIRTY_TEST),
+        ]);
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                flakes,
+                near,
+                ..Default::default()
+            },
+            |_| true,
+        );
+        assert_eq!(&order[..5], &[5, 4, 3, 2, 1]);
+        assert_eq!(
+            lead,
+            FailFastLead {
+                failed: 1,
+                near: 3,
+                flaky: 1
+            }
+        );
+        assert_eq!(&order[5..], &[0, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn failfast_drops_affected_tier_when_it_covers_too_much_of_the_run() {
+        use crate::select::{NEAR_AFFECTED, NEAR_TEST};
+        // A core-module change reaches 2 of 4 tests (> 25%): only the edited
+        // test file still leads.
+        let names: Vec<String> = ["a.py::t", "b.py::t", "c.py::t", "d.py::t"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let near = HashMap::from([
+            ("b.py".to_string(), NEAR_AFFECTED),
+            ("c.py".to_string(), NEAR_AFFECTED),
+            ("d.py".to_string(), NEAR_TEST),
+        ]);
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        );
+        assert_eq!((order, lead.len()), (vec![3, 0, 1, 2], 1));
+        // The share counts only tests this run dispatches: with a.py filtered
+        // out, the edited file alone still leads (2 of 3 affected).
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |i| i != 0,
+        );
+        assert_eq!((order, lead.len()), (vec![3, 1, 2], 1));
+    }
+
+    #[test]
+    fn failfast_near_changes_share_the_suspect_cap() {
+        use crate::select::NEAR_TEST;
+        let n = FAILFAST_SUSPECT_CAP + 10;
+        let names: Vec<String> = (0..n).map(|i| format!("t{i}.py::t")).collect();
+        let near: HashMap<String, u8> = names
+            .iter()
+            .map(|id| (crate::text::nodeid_file(id).to_string(), NEAR_TEST))
+            .collect();
+        let (order, lead) = failfast_order(
+            &names,
+            &HashMap::new(),
+            &FailFastSignals {
+                near: near.clone(),
+                ..Default::default()
+            },
+            |_| true,
+        );
+        assert_eq!(lead.near, FAILFAST_SUSPECT_CAP);
+        assert_eq!(order, (0..n as u64).collect::<Vec<_>>());
+    }
+
+    fn strs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn secs(entries: &[(&str, f64)]) -> HashMap<String, f64> {
+        entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    fn kept(pick: &BudgetPick) -> Vec<u64> {
+        let mut k: Vec<u64> = pick.keep.iter().copied().collect();
+        k.sort_unstable();
+        k
+    }
+
+    #[test]
+    fn budget_always_runs_changed_test_files_even_over_budget() {
+        use crate::select::{NEAR_DIRTY_TEST, NEAR_TEST};
+        let names = strs(&["a.py::t", "b.py::t", "c.py::t"]);
+        let cost = secs(&[("a.py::t", 10.0), ("b.py::t", 1.0), ("c.py::t", 1.0)]);
+        let near = HashMap::from([
+            ("a.py".to_string(), NEAR_TEST),
+            ("c.py::t".to_string(), NEAR_DIRTY_TEST),
+        ]);
+        // 0 workers counts as 1, never a division by zero.
+        for workers in [0, 1] {
+            let pick = budget_select(
+                &names,
+                &cost,
+                &HashMap::new(),
+                &HashMap::new(),
+                &near,
+                5.0,
+                workers,
+                |_| true,
+            );
+            assert_eq!(kept(&pick), vec![0, 2]);
+            assert_eq!((pick.changed, pick.fill, pick.candidates), (2, 0, 3));
+            assert_eq!(pick.est_secs, 11.0);
+        }
+    }
+
+    #[test]
+    fn budget_ranks_failed_near_flaky_then_fills_shortest_first() {
+        use crate::reporting::flakes::FlakeStats;
+        use crate::select::NEAR_AFFECTED;
+        let names = strs(&[
+            "a.py::clean",
+            "b.py::flaky",
+            "c.py::affected",
+            "d.py::failed_dear",
+            "e.py::failed_cheap",
+            "f.py::clean_short",
+        ]);
+        let cost = secs(&[
+            ("a.py::clean", 1.0),
+            ("b.py::flaky", 1.0),
+            ("c.py::affected", 1.0),
+            ("d.py::failed_dear", 2.0),
+            ("e.py::failed_cheap", 1.0),
+            ("f.py::clean_short", 0.5),
+        ]);
+        let stats = |failed, flaky| FlakeStats {
+            failed,
+            flaky,
+            ..Default::default()
+        };
+        let flakes = HashMap::from([
+            ("b.py::flaky".to_string(), stats(0, 2)),
+            ("d.py::failed_dear".to_string(), stats(1, 0)),
+            ("e.py::failed_cheap".to_string(), stats(1, 0)),
+        ]);
+        let near = HashMap::from([("c.py".to_string(), NEAR_AFFECTED)]);
+        let pick = |budget| {
+            budget_select(
+                &names,
+                &cost,
+                &HashMap::new(),
+                &flakes,
+                &near,
+                budget,
+                1,
+                |_| true,
+            )
+        };
+        // Both failures, and nothing else fits.
+        let p = pick(3.0);
+        assert_eq!(kept(&p), vec![3, 4]);
+        assert_eq!((p.failed, p.near, p.flaky, p.fill), (2, 0, 0, 0));
+        // Then the affected test. The flaky one (1s) no longer fits in the
+        // 0.5s left, but the shortest clean test after it still does.
+        let p = pick(4.5);
+        assert_eq!(kept(&p), vec![2, 3, 4, 5]);
+        assert_eq!((p.failed, p.near, p.flaky, p.fill), (2, 1, 0, 1));
+        assert_eq!(p.est_secs, 4.5);
+    }
+
+    #[test]
+    fn budget_costs_an_untimed_test_at_the_median() {
+        let names = strs(&["a.py::t", "b.py::t", "c.py::t", "d.py::new"]);
+        let cost = secs(&[("a.py::t", 1.0), ("b.py::t", 3.0), ("c.py::t", 2.0)]);
+        let pick = budget_select(
+            &names,
+            &cost,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            3.0,
+            1,
+            |_| true,
+        );
+        // Free, d.py::new would have fit; at the 2s median it loses the tie
+        // with c.py::t on collection order.
+        assert_eq!(kept(&pick), vec![0, 2]);
+    }
+
+    #[test]
+    fn budget_pays_scope_fixtures_once_and_packages_and_session_per_worker() {
+        let names = strs(&["pkg/m.py::t0", "pkg/m.py::t1", "pkg/m.py::TestK::t"]);
+        let cost = secs(&[
+            ("pkg/m.py::t0", 1.0),
+            ("pkg/m.py::t1", 1.0),
+            ("pkg/m.py::TestK::t", 1.0),
+        ]);
+        let scopes = secs(&[
+            ("", 1.0),
+            ("pkg", 1.0),
+            ("pkg/m.py", 2.0),
+            ("pkg/m.py::TestK", 1.0),
+        ]);
+        let pick = |budget| {
+            budget_select(
+                &names,
+                &cost,
+                &scopes,
+                &HashMap::new(),
+                &HashMap::new(),
+                budget,
+                2,
+                |_| true,
+            )
+        };
+        // 2 workers x (5s - 1s session) = 8 worker-seconds: t0 pays its own
+        // 1, the module's 2 and the package's 1 on both workers (5); t1 only
+        // its own 1; the class test its own 1 and the class's 1.
+        let p = pick(5.0);
+        assert_eq!(kept(&p), vec![0, 1, 2]);
+        assert_eq!(p.est_secs, 5.0);
+        // 7 worker-seconds: the class fixture no longer fits.
+        assert_eq!(kept(&pick(4.5)), vec![0, 1]);
+    }
+
+    #[test]
+    fn budget_spent_on_session_setup_runs_only_changed_files() {
+        use crate::select::NEAR_TEST;
+        let names = strs(&["a.py::t", "b.py::t"]);
+        let cost = secs(&[("a.py::t", 1.0), ("b.py::t", 0.25)]);
+        let near = HashMap::from([("a.py".to_string(), NEAR_TEST)]);
+        let pick = budget_select(
+            &names,
+            &cost,
+            &secs(&[("", 10.0)]),
+            &HashMap::new(),
+            &near,
+            5.0,
+            1,
+            |_| true,
+        );
+        assert_eq!(kept(&pick), vec![0]);
+        assert_eq!(pick.est_secs, 11.0);
+    }
+
+    #[test]
+    fn budget_picks_only_from_included_and_keeps_all_when_cold() {
+        let names = strs(&["a.py::t", "b.py::t", "c.py::t"]);
+        let none = HashMap::new();
+        let pick = budget_select(
+            &names,
+            &none,
+            &none,
+            &HashMap::new(),
+            &HashMap::new(),
+            1.0,
+            1,
+            |i| i != 1,
+        );
+        assert_eq!(kept(&pick), vec![0, 2]);
+        assert!(pick.cold);
+        assert_eq!(pick.candidates, 2);
+        // Warm: the excluded test is never picked, even when it fits best.
+        let cost = secs(&[("a.py::t", 1.0), ("b.py::t", 0.25), ("c.py::t", 1.0)]);
+        let pick = budget_select(
+            &names,
+            &cost,
+            &none,
+            &HashMap::new(),
+            &HashMap::new(),
+            1.0,
+            1,
+            |i| i != 1,
+        );
+        assert_eq!(kept(&pick), vec![0]);
+        assert!(!pick.cold);
+        // Nothing to pick from is not a cold cache.
+        let pick = budget_select(
+            &names,
+            &none,
+            &none,
+            &HashMap::new(),
+            &HashMap::new(),
+            1.0,
+            1,
+            |_| false,
+        );
+        assert_eq!(pick, BudgetPick::default());
+    }
+
+    #[test]
+    fn failfast_puts_one_test_per_cofailure_cluster_first() {
+        use crate::reporting::flakes::FlakeStats;
+        let names: Vec<String> = ["a", "a_twin", "b", "a_loose"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let failed = |epoch| FlakeStats {
+            failed: 1,
+            last_epoch: epoch,
+            ..Default::default()
+        };
+        // Newest failure first: a, a_twin, b, a_loose.
+        let flakes = HashMap::from([
+            ("a".to_string(), failed(40)),
+            ("a_twin".to_string(), failed(30)),
+            ("b".to_string(), failed(20)),
+            ("a_loose".to_string(), failed(10)),
+        ]);
+        // a_twin fails nearly every time a does; a_loose only sometimes.
+        let cofail = HashMap::from([(
+            "a".to_string(),
+            vec![("a_twin".to_string(), 0.9), ("a_loose".to_string(), 0.6)],
+        )]);
+        let signals = FailFastSignals {
+            flakes,
+            cofail,
+            ..Default::default()
+        };
+        let (order, lead) = failfast_order(&names, &HashMap::new(), &signals, |_| true);
+        assert_eq!(order, vec![0, 2, 3, 1]);
+        assert_eq!(lead.failed, 4);
     }
 
     #[test]

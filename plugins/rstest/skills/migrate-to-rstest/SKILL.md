@@ -60,7 +60,10 @@ may need the upgrade steps in `docs/guides/upgrade-to-pytest9.md`.
    it by hand: record `pytest` pass/fail + wall time, then confirm `rstest -n 0`
    matches pytest exactly.) A parity diff is either an unstable id or a real
    compatibility issue. Surface it, don't paper over it; `migrate-check`
-   classifies it.
+   classifies it. `try` also lists installed plugins and conftests that expect
+   an xdist controller (`⚠ plugins that expect an xdist controller:`); handle
+   each per `flag-map.md` § Unlisted plugins. On a normal run the same check is
+   `--warn-on-dead-master-path`.
 2. **Preflight + fix.** `rstest migrate-check --migrate-check-json findings.json`. Work each
    finding via `fix-playbook.md`; re-run until it reports **ready**. (It blocks
    on unstable-id "WILL bail" findings before the parallel phase can even run;

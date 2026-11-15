@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Monorepo mode, illustrated with -n 12 at a repo root that has no pytest config of its own. The worker budget is split across the discovered projects by last-known cost, from wall.json or else summed durations, with at least one worker each: libs/core gets 7 workers (last run 84s), services/api 3 (36s), libs/util 1 (8s), tools/cli 1 (6s). Each project runs at the same time as its own child session, with its directory as the working directory and its own rootdir, ini, conftest, .rstest_cache and settings. On a first run with no caches the budget splits evenly. Output is printed per project, each block whole, in completion order." viewBox="0 0 820 672">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<rect class="rs-loop" x="160" y="20" width="500" height="76" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="52">rstest -n 12 at the repo root</text>
+<text class="rs-sub rs-sm" x="410" y="76">no pytest config here; projects found up to 5 levels down</text>
+<line class="rs-edge" x1="410" y1="96" x2="410" y2="136"/>
+<rect class="rs-box rs-hot" x="40" y="136" width="740" height="236" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="168">Split the budget by last-known cost</text>
+<text class="rs-sub rs-sm" x="410" y="192">wall.json, else summed durations.json; at least 1 worker each</text>
+<rect class="rs-row" x="56" y="212" width="708" height="30" rx="6"/>
+<text class="rs-row-text rs-start" x="72" y="232">libs/core</text>
+<rect class="rs-bar-hot" x="200" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="224" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="248" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="272" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="296" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="320" y="218" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="344" y="218" width="18" height="18" rx="3"/>
+<text class="rs-note rs-start" x="500" y="232">7 workers, last run 84s</text>
+<rect class="rs-row" x="56" y="250" width="708" height="30" rx="6"/>
+<text class="rs-row-text rs-start" x="72" y="270">services/api</text>
+<rect class="rs-bar-hot" x="200" y="256" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="224" y="256" width="18" height="18" rx="3"/><rect class="rs-bar-hot" x="248" y="256" width="18" height="18" rx="3"/>
+<text class="rs-note rs-start" x="500" y="270">3 workers, last run 36s</text>
+<rect class="rs-row" x="56" y="288" width="708" height="30" rx="6"/>
+<text class="rs-row-text rs-start" x="72" y="308">libs/util</text>
+<rect class="rs-bar-hot" x="200" y="294" width="18" height="18" rx="3"/>
+<text class="rs-note rs-start" x="500" y="308">1 worker, last run 8s</text>
+<rect class="rs-row" x="56" y="326" width="708" height="30" rx="6"/>
+<text class="rs-row-text rs-start" x="72" y="346">tools/cli</text>
+<rect class="rs-bar-hot" x="200" y="332" width="18" height="18" rx="3"/>
+<text class="rs-note rs-start" x="500" y="346">1 worker, last run 6s</text>
+<line class="rs-edge" x1="410" y1="372" x2="410" y2="412"/>
+<rect class="rs-box" x="40" y="412" width="740" height="130" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="444">Each project runs as its own child, all at once</text>
+<g class="rs-chips">
+<rect x="94" y="464" width="135" height="32" rx="8"/><text x="161.5" y="485">cwd = project dir</text>
+<rect x="239" y="464" width="198" height="32" rx="8"/><text x="338" y="485">own rootdir, ini, conftest</text>
+<rect x="447" y="464" width="135" height="32" rx="8"/><text x="514.5" y="485">own .rstest_cache</text>
+<rect x="592" y="464" width="135" height="32" rx="8"/><text x="659.5" y="485">own settings</text>
+</g>
+<text class="rs-note" x="410" y="526">first run, no caches yet: the budget splits evenly</text>
+<line class="rs-edge" x1="410" y1="542" x2="410" y2="582"/>
+<rect class="rs-loop" x="160" y="582" width="500" height="70" rx="14"/>
+<text class="rs-title rs-sm" x="410" y="612">Output per project</text>
+<text class="rs-sub rs-sm" x="410" y="636">each block whole, in completion order</text>
+</svg>

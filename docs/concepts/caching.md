@@ -194,6 +194,8 @@ clobber each other.
   segments/seg-<id>.json          # one immutable segment per run/shard
 ```
 
+![Each run or shard pushes its own segment; cache-compact folds segments into base.json; a pull merges the base and every segment into the local cache per data type.](../assets/shared-cache.svg)
+
 - **Pull** merges `base.json` and every segment into the local cache, per data type:
     - *durations*: newest value per test;
     - *flake counts*: summed per-run events, deduped by segment id so a re-pull

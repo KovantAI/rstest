@@ -291,7 +291,12 @@ here. Probe one yourself in a minute:
    caveat tiers above for the pattern.
 
 `rstest try` is a fast first pass: it runs your suite under pytest and
-under `rstest -n auto` and flags outcome differences, plugins included.
+under `rstest -n auto` and flags outcome differences, plugins included. It
+also lists any installed plugin or conftest that expects an xdist controller.
+To get that list on a normal run, pass
+[`--warn-on-dead-master-path`](../reference/cli.md#-warn-on-dead-master-path):
+it reads the plugin code, so it catches the crash (step 2) and the silent
+no-op (below) before you run anything at `-n 2`.
 
 ## Hook coverage
 
@@ -363,6 +368,11 @@ The warning is argv-driven: it fires on the *flag*, so it never mistakes
 rstest's own `--html` / `--junitxml` / `--report-json` (which are rendered
 from merged results and are parallel-safe) for a hazard, and it stays silent
 at `-n 0` where the plugin's own controller branch runs.
+
+For plugins and conftests outside that flag list, pass
+[`--warn-on-dead-master-path`](../reference/cli.md#-warn-on-dead-master-path)
+(or run `rstest try`, which turns it on): it reads their code for a
+controller-only branch that does real work and names each one.
 
 ### Self-audit: catch a silent no-op in your own plugins
 

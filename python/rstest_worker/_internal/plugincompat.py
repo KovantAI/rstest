@@ -8,6 +8,30 @@ import sys
 import zlib
 from typing import Any
 
+# Every `workerinput` key rstest provisions in a pool worker, so a plugin's
+# direct `workerinput["k"]` read cannot KeyError. The first group is seeded by
+# `StreamPlugin._build_workerinput`; the rest are owned by other mechanisms.
+# Shared by the dead-master-path detector and the seed guard test.
+PROVISIONED_KEYS = frozenset(
+    {
+        "workerid",  # pytest-cov + generic "am I a worker?" sniffers
+        "workercount",  # pytest-cov, xdist-compat sniffers
+        "testrunuid",  # shared run id, the spelling xdist's `testrun_uid` fixture reads
+        "testrun_uid",  # same id (xdist testrun_uid contract)
+        "randomly_seed",  # pytest-randomly
+        "random_order_seed",  # pytest-random-order
+        "mainargv",  # xdist-compat prog-name reconstruction
+        "cov_master_host",  # pytest-cov worker mode
+        "cov_master_topdir",  # pytest-cov worker mode
+        "cov_master_rsync_roots",  # pytest-cov worker mode
+        "server_port",  # _seed_pytest_retry
+        "mypy_config_stash_serialized",  # _seed_pytest_mypy
+        "follower_ident",  # sqlalchemy, via the _XdistNodeShim configure_node emulation
+        "sock_port",  # pytest-rerunfailures, unregistered wholesale
+        "statusdb_token",  # pytest-rerunfailures, unregistered wholesale
+    }
+)
+
 
 def _randomly_seed(run_uid: Any) -> int:
     """One run-level seed for pytest-randomly, derived from the shared run uid

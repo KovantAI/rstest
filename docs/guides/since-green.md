@@ -63,6 +63,8 @@ rstest: no tests affected by 0 changed file(s)
 
 ### How the baseline advances
 
+![No baseline or a changed environment runs everything; otherwise the diff from the baseline is run. Only a fully green run on a clean working tree moves the baseline to HEAD.](../assets/since-green.svg)
+
 The baseline moves to `HEAD` only when **both** hold:
 
 - **The run is fully green** (exit 0). A red run leaves the baseline where it

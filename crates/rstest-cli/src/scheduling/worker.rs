@@ -114,6 +114,9 @@ pub struct WorkerEnv {
     /// `--fork-pool=app`: workers record their imports; the zygote imports
     /// the manifest's modules before forking. None = off.
     pub warm: Option<crate::scheduling::warm::WorkerWarm>,
+    /// `--warn-on-dead-master-path`: scan plugins and conftests for code that
+    /// only runs on an xdist controller.
+    pub dead_master_scan: bool,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -1137,6 +1140,7 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_WARM_RECORD",
     "RSTEST_WARM_MANIFEST",
     "RSTEST_WARM_RESULT",
+    "RSTEST_DEAD_MASTER_SCAN",
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
@@ -1241,6 +1245,9 @@ fn build_worker_command(
     }
     if env.warm.is_some() {
         command.env("RSTEST_WARM_RECORD", "1");
+    }
+    if env.dead_master_scan {
+        command.env("RSTEST_DEAD_MASTER_SCAN", "1");
     }
     if let Some(port) = &env.debug_port {
         command.env("RSTEST_DEBUGPY_PORT", port);
@@ -1535,6 +1542,9 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
         if let Some(manifest) = &warm.manifest {
             command.env("RSTEST_WARM_MANIFEST", manifest);
         }
+    }
+    if env.dead_master_scan {
+        command.env("RSTEST_DEAD_MASTER_SCAN", "1");
     }
     if env.stream_output {
         command.env("RSTEST_STREAM_OUTPUT", "1");
@@ -2133,6 +2143,7 @@ mod tests {
             timeout: None,
             leakcheck: false,
             warm: None,
+            dead_master_scan: false,
             send_ids: false,
             debug_port: None,
             stream_output: false,
@@ -2177,6 +2188,7 @@ mod tests {
             "RSTEST_DOCTOR",
             "RSTEST_TIMEOUT",
             "RSTEST_LEAKCHECK",
+            "RSTEST_DEAD_MASTER_SCAN",
             "RSTEST_WORKER_ID",
         ] {
             assert!(!envs.contains_key(absent), "unexpected {absent}");
@@ -2212,11 +2224,13 @@ mod tests {
         env.doctor = true;
         env.timeout = Some(1.5);
         env.leakcheck = true;
+        env.dead_master_scan = true;
         let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &env, 3, 4);
         let envs = envs_of(&cmd);
         assert_eq!(envs["RSTEST_DOCTOR"], "1");
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
+        assert_eq!(envs["RSTEST_DEAD_MASTER_SCAN"], "1");
     }
 
     #[test]
@@ -2479,6 +2493,7 @@ mod tests {
                 timeout: None,
                 leakcheck: false,
                 warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2526,6 +2541,7 @@ mod tests {
                 timeout: None,
                 leakcheck: false,
                 warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2581,6 +2597,7 @@ mod tests {
                 timeout: None,
                 leakcheck: false,
                 warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -3072,6 +3089,7 @@ mod tests {
         env.timeout = Some(1.5);
         env.leakcheck = true;
         env.stream_output = true;
+        env.dead_master_scan = true;
         let mut cmd = Command::new("python");
         super::apply_shared_worker_env(&mut cmd, 3, &env);
         let envs = envs_of(&cmd);
@@ -3080,6 +3098,7 @@ mod tests {
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
         assert_eq!(envs["RSTEST_STREAM_OUTPUT"], "1");
+        assert_eq!(envs["RSTEST_DEAD_MASTER_SCAN"], "1");
         // Per-worker identity is applied post-fork, never on the shared env.
         assert!(!envs.contains_key("RSTEST_WORKER_ID"));
         assert!(!envs.contains_key("RSTEST_SEND_IDS"));

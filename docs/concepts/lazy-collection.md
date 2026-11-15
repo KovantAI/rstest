@@ -9,6 +9,8 @@ streams back the nodeids.
 
 ## Auto-default
 
+![Eight checks in order (workers, size, dist, selection, features, doctests, file walk, balance); any failure keeps full collection, and passing all of them picks lazy.](../assets/lazy-auto.svg)
+
 Setting neither `--collect` nor `[tool.rstest] collect` selects the
 strategy automatically. rstest picks `lazy` when all of these hold, and
 `full` otherwise:

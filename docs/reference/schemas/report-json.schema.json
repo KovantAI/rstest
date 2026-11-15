@@ -92,6 +92,13 @@
       "description": "Sharding identity block (only under `--shard`).",
       "type": "object",
       "properties": {
+        "budget_skipped": {
+          "description": "Tests in this shard's bucket that `--budget` left out, so\n`shard-verify` counts them as covered rather than dropped.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "collection_hash": {
           "description": "sha256 of the full ordered nodeid list (identical across shards).",
           "type": "string"

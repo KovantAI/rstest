@@ -95,7 +95,7 @@ Everything that reads the history applies the same window:
 - [`--reruns-only-known-flaky`](#target-reruns-only-known-flaky), which
   retries only tests with a `flaky > 0` record;
 - [`--order fail-fast`](../reference/cli.md#-order-throughputfail-fast),
-  which dispatches recently failed and flaky tests first;
+  which dispatches recently failed, recently changed and flaky tests first;
 - [`rstest explain`](../reference/cli-commands.md#explain),
   which reports a test's flake and failure counts.
 
@@ -343,6 +343,8 @@ everything, and only quarantined tests (from the file or the history) may
 fail without reddening the run.
 
 ## Lifecycle
+
+![A stable test that flips 3 or more times is auto-quarantined. From there it either goes back to stable when its flips age out, becomes failing when its last 3 results fail, or moves to quarantine.txt when it needs an owner, until the fix removes the entry.](../assets/flaky-lifecycle.svg)
 
 1. `--reruns` keeps the suite green; both histories record who needed it.
 2. A test that keeps flipping is auto-quarantined. Its failures stop

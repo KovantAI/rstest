@@ -261,6 +261,13 @@ pub struct Cli {
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
 
+    /// Opt-in: scan installed plugins and loaded conftests for code that only
+    /// works on an xdist controller (rstest has none) and warn about the ones
+    /// that will crash or silently do nothing at `-n >= 2`. `rstest try` turns
+    /// it on for its rstest run.
+    #[arg(long = "warn-on-dead-master-path")]
+    pub(crate) warn_on_dead_master_path: bool,
+
     /// Internal: turn on the workers' cpu/fixture instrumentation without the
     /// doctor report. Passed only by a parent rstest (migrate-check's
     /// classifier runs); a flag rather than an env var so a user's shell or CI
@@ -316,8 +323,8 @@ pub struct Cli {
 
     /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
     /// to pack workers — the default) or "fail-fast" (recently-failed, then
-    /// flaky tests first, then the throughput order for the rest, for the
-    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// tests near changed code, then flaky tests first, then the throughput
+    /// order for the rest, for the earliest possible red signal). Pairs with `--maxfail`/`-x` for true
     /// early exit. Auto-selects fail-fast under `--watch`. Config
     /// `[tool.rstest] order`.
     #[arg(long, value_name = "MODE")]
@@ -489,6 +496,15 @@ pub struct Cli {
     /// `rstest shard-verify` proves it after the fact. Needs `-n 2` or more.
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
+
+    /// Run the tests most worth running in this much wall time (`90s`, `5m`),
+    /// from recorded durations: test files changed since the last green run
+    /// always, then recently failed, near-change and flaky tests, then the
+    /// shortest of the rest. An estimate that picks tests, not a timeout. A
+    /// budget run is never a green baseline. Under `--shard` each shard gets
+    /// the whole budget. Needs `-n 2` or more; implies `--order fail-fast`.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) budget: Option<String>,
 
     /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
     /// mount, or a dir a CI step materializes), an `s3://` / `gs://` bucket
@@ -847,6 +863,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--xdist-trial",
     "--watch",
     "--fail-on-leak",
+    "--warn-on-dead-master-path",
     "--instrument-workers",
     "--reruns-only-known-flaky",
     "--since-green",
@@ -987,6 +1004,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--html",
     "--dist",
     "--shard",
+    "--budget",
     "--collect",
     "--order",
     "--keep-last",
@@ -1993,6 +2011,16 @@ mod tests {
         assert_eq!(parse(&["--fork-pool=app"]).0.unwrap(), Some(ForkPool::App));
         assert_eq!(parse(&[]).0.unwrap(), None);
         assert!(parse(&["--fork-pool=bogus"]).0.is_err());
+    }
+
+    #[test]
+    fn warn_on_dead_master_path_is_an_owned_flag() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (own, session) = split_args(v(&["--warn-on-dead-master-path", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--warn-on-dead-master-path"]));
+        assert_eq!(session, v(&["tests/"]));
+        assert!(Cli::parse_from(&own).warn_on_dead_master_path);
+        assert!(!Cli::parse_from(["rstest"]).warn_on_dead_master_path);
     }
 
     #[test]

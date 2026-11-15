@@ -278,6 +278,10 @@ pub struct ShardJson<'a> {
     pub k: usize,
     /// Total shard count.
     pub n: usize,
+    /// Tests in this shard's bucket that `--budget` left out, so
+    /// `shard-verify` counts them as covered rather than dropped.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub budget_skipped: &'a [String],
 }
 
 /// One failed phase report, in arrival order.
@@ -413,6 +417,9 @@ pub struct Run {
     /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
     /// in the summary line only, as pytest does.
     pub deselected: u64,
+    /// Collected tests `--budget` left out, in collection order. Counted as
+    /// deselected in the summary line.
+    pub budget_skipped: Vec<String>,
     /// Passed/skipped/xfailed subtests pytest shows (`verbosity_subtests`,
     /// -v), by pytest's category: `subtests passed`, `skipped`, `xfailed`.
     /// Summary line only, as the categories exist only at that verbosity.
@@ -499,7 +506,8 @@ impl Interruption {
 }
 
 impl Run {
-    /// One setup's mean seconds per module/class scope this run set up.
+    /// One setup's mean seconds per session/package/module/class scope this run
+    /// set up.
     pub fn scope_cost_means(&self) -> impl Iterator<Item = (&String, f64)> {
         self.scope_costs
             .iter()
@@ -507,7 +515,8 @@ impl Run {
             .map(|(k, &(secs, setups))| (k, secs / setups as f64))
     }
 
-    /// Fold one worker session's module/class fixture setup costs in.
+    /// Fold one worker session's session/package/module/class fixture setup
+    /// costs in.
     pub fn add_scope_costs(&mut self, costs: Vec<proto::ScopeCost>) {
         for c in costs {
             let e = self.scope_costs.entry(c.key).or_default();
@@ -917,7 +926,11 @@ impl Run {
             (n("failed"), "failed", "failed"),
             (n("passed"), "passed", "passed"),
             (n("skipped"), "skipped", "skipped"),
-            (self.deselected, "deselected", "deselected"),
+            (
+                self.deselected + self.budget_skipped.len() as u64,
+                "deselected",
+                "deselected",
+            ),
             (n("xfailed"), "xfailed", "xfailed"),
             (n("xpassed"), "xpassed", "xpassed"),
             (warnings, "warning", "warnings"),
@@ -1009,6 +1022,7 @@ impl Run {
                     collection_size: s.collection_size,
                     k: s.k,
                     n: s.n,
+                    budget_skipped: &self.budget_skipped,
                 }),
                 started_at_epoch: run_meta.started_at_epoch,
                 warm_template: run_meta.warm.as_ref().map(|w| WarmTemplateJson {
@@ -1524,6 +1538,9 @@ mod tests {
             "2 failed, 1 passed, 3 deselected, 1 warning, 2 errors"
         );
         assert!(run.summary_line_with(2).contains("2 warnings, 2 errors"));
+        // Tests --budget left out count as deselected, as pytest would say.
+        run.budget_skipped = vec!["c.py::x".into(), "c.py::y".into()];
+        assert!(run.summary_line().contains("1 passed, 5 deselected"));
     }
 
     #[test]
@@ -1832,6 +1849,17 @@ mod tests {
         assert_eq!(s["n"], 4);
         assert_eq!(s["collection_hash"], "deadbeef");
         assert_eq!(s["collection_size"], 42);
+        // No --budget: no list.
+        assert!(s.get("budget_skipped").is_none());
+        let run = Run {
+            budget_skipped: vec!["t.py::slow".into()],
+            ..Default::default()
+        };
+        let s = run.snapshot_value(&meta);
+        assert_eq!(
+            s["meta"]["shard"]["budget_skipped"],
+            serde_json::json!(["t.py::slow"])
+        );
     }
 
     #[test]

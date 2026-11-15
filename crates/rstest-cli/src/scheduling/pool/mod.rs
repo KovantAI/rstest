@@ -91,8 +91,8 @@ pub enum Order {
     /// Slow tests first, to pack workers (best wall-clock throughput).
     #[default]
     Throughput,
-    /// Recently failed, then flaky tests first, then the throughput order for
-    /// the rest: earliest red signal, for `--watch` and PR CI (compose with
+    /// Recently failed, then near changed code, then flaky tests first, then
+    /// the throughput order for the rest: earliest red signal, for `--watch` and PR CI (compose with
     /// `--maxfail`).
     FailFast,
 }
@@ -115,6 +115,19 @@ impl std::str::FromStr for Order {
     }
 }
 
+/// The `-v` line saying what fail-fast pulled to the front, so a run's order
+/// is explainable.
+fn failfast_note(l: crate::scheduling::durations::FailFastLead) -> String {
+    if l.len() == 0 {
+        return "rstest: fail-fast: no recent failures, changes or flakes; throughput order"
+            .to_string();
+    }
+    format!(
+        "rstest: fail-fast: leading with {} recent failures, {} near changes, {} flaky",
+        l.failed, l.near, l.flaky
+    )
+}
+
 /// Drop quarantined ids from the flake history fail-fast ranks on, so they
 /// fall into the normal (clean) tail instead of leading the queue.
 fn without_quarantined(
@@ -125,6 +138,38 @@ fn without_quarantined(
         history.retain(|id, _| !q.is_match(id));
     }
     history
+}
+
+/// `--budget`: the wall time to fill, and each test's median setup seconds
+/// from the run history (its call seconds come from the duration cache).
+pub struct Budget {
+    pub secs: f64,
+    /// As typed (`90s`), for the summary line.
+    pub label: String,
+    pub setup: std::collections::HashMap<String, f64>,
+}
+
+/// [`without_quarantined`] for co-failure partners: a quarantined test
+/// neither leads nor gets pulled forward by another's failure.
+fn without_quarantined_partners(
+    mut cofail: crate::reporting::history::CoFail,
+    quarantine: Option<&regex::RegexSet>,
+) -> crate::reporting::history::CoFail {
+    if let Some(q) = quarantine {
+        cofail.retain(|id, _| !q.is_match(id));
+        for partners in cofail.values_mut() {
+            partners.retain(|(b, _)| !q.is_match(b));
+        }
+    }
+    cofail
+}
+
+/// A counted failure of queue item `failed`: pull its co-failure partners
+/// forward (a no-op unless fail-fast found some).
+fn promote_partners(dispatch: &mut Option<Dispatch>, failed: Option<u64>) {
+    if let (Some(d), Some(i)) = (dispatch.as_mut(), failed) {
+        d.promote(i);
+    }
 }
 
 /// Worker-pool parameters common to the eager (`run_pool`) and lazy
@@ -323,6 +368,12 @@ pub fn run_pool(
     // is unchanged. Collected but never dispatched; carried forward as cached
     // passes. Empty = feature off.
     skip_ids: &std::collections::HashSet<String>,
+    // `--order fail-fast` and `--budget`: tests near changed code (see
+    // `select::near_changes`). Empty under throughput or with no signal.
+    near_changes: std::collections::HashMap<String, u8>,
+    // `--budget`: run only what fits, picked after the shard and incremental
+    // filters (see `durations::budget_select`).
+    budget: Option<&Budget>,
     // `rstest replay`: a recorded per-worker schedule to re-pin. When Some, the
     // dynamic dispatch queue is bypassed entirely — each worker runs exactly its
     // recorded nodeids in order — and no new journal is written.
@@ -379,13 +430,24 @@ pub fn run_pool(
 
     let duration_cache = crate::scheduling::durations::load();
     let scope_costs = crate::scheduling::durations::load_scope_costs();
-    // Flake history feeds fail-fast ordering; empty (and untouched) under the
-    // throughput default so a cold cache costs nothing.
-    let flake_history = if order == Order::FailFast {
-        without_quarantined(crate::reporting::flakes::load(), quarantine.map(|q| &q.all))
-    } else {
-        std::collections::HashMap::new()
-    };
+    // Fail-fast ranks on flake records, proximity to changes and co-failure
+    // partners; --budget ranks on the first two. All empty (and untouched)
+    // under the throughput default so a cold cache costs nothing. The run
+    // history behind co-failure can be big (tens of MB), so it loads on a
+    // thread while workers spawn and collect, and is joined only when the
+    // queue is built.
+    let mut signals = crate::scheduling::durations::FailFastSignals::default();
+    let mut cofail_job = None;
+    if order == Order::FailFast || budget.is_some() {
+        let q = quarantine.map(|q| q.all.clone());
+        signals.flakes = without_quarantined(crate::reporting::flakes::load(), q.as_ref());
+        signals.near = near_changes;
+        if order == Order::FailFast {
+            cofail_job = Some(std::thread::spawn(move || {
+                without_quarantined_partners(crate::reporting::history::load().cofail(), q.as_ref())
+            }));
+        }
+    }
     let mut run = Run::default();
     run.track_phase_durations = track_durations;
     let mut prog = Progress::default();
@@ -569,7 +631,11 @@ pub fn run_pool(
                         continue;
                     }
                 }
+                let counted = fail_count.n;
                 fail_count.record(&r);
+                if fail_count.n > counted {
+                    promote_partners(&mut dispatch, states[idx].running);
+                }
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
@@ -798,12 +864,53 @@ pub fn run_pool(
                             cached_ids.append(&mut cached);
                             Some(run_idx)
                         };
+                        // --budget: what fits, from what the shard and the
+                        // skip set left. Wall time already spent (pool start,
+                        // collection) comes off the budget.
+                        let keep = match budget {
+                            None => keep,
+                            Some(b) => {
+                                let cost = ids
+                                    .iter()
+                                    .filter_map(|id| {
+                                        let call = duration_cache.get(id).copied();
+                                        let setup = b.setup.get(id).copied();
+                                        (call.is_some() || setup.is_some()).then(|| {
+                                            (id.clone(), call.unwrap_or(0.0) + setup.unwrap_or(0.0))
+                                        })
+                                    })
+                                    .collect();
+                                let spent = spawn_start.elapsed().as_secs_f64();
+                                let in_keep = |i: u64| keep.as_ref().is_none_or(|k| k.contains(&i));
+                                let pick = crate::scheduling::durations::budget_select(
+                                    &ids,
+                                    &cost,
+                                    &scope_costs,
+                                    &signals.flakes,
+                                    &signals.near,
+                                    b.secs - spent,
+                                    states.len(),
+                                    in_keep,
+                                );
+                                sink.warn(&budget_summary(b, &pick, spent, states.len()));
+                                run.budget_skipped = (0..ids.len() as u64)
+                                    .filter(|&i| in_keep(i) && !pick.keep.contains(&i))
+                                    .map(|i| ids[i as usize].clone())
+                                    .collect();
+                                fail_count.set_total(pick.keep.len());
+                                prog.set_total(pick.keep.len());
+                                Some(pick.keep)
+                            }
+                        };
+                        if let Some(job) = cofail_job.take() {
+                            signals.cofail = job.join().unwrap_or_default();
+                        }
                         dispatch = build_dispatch(
                             &ids,
                             serial.unwrap_or_default(),
                             groups.unwrap_or_default(),
                             &duration_cache,
-                            &flake_history,
+                            &signals,
                             &scope_costs,
                             states.len(),
                             dist,
@@ -811,6 +918,11 @@ pub fn run_pool(
                             shuffle,
                             keep.as_ref(),
                         );
+                        if mode == crate::reporting::progress::Mode::Verbose {
+                            if let Some(l) = dispatch.as_ref().and_then(|d| d.failfast) {
+                                sink.warn(&failfast_note(l));
+                            }
+                        }
                     }
                     ids_store.get_or_insert(ids);
                 }
@@ -897,6 +1009,7 @@ pub fn run_pool(
                         let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
                         let attempt = std::mem::take(&mut s.attempt);
                         s.attempt_failed = false;
+                        let counted = fail_count.n;
                         orchestrator::finalize_attempt(
                             sink,
                             &mut run,
@@ -910,6 +1023,9 @@ pub fn run_pool(
                                 flaky_key,
                             },
                         );
+                        if fail_count.n > counted {
+                            promote_partners(&mut dispatch, Some(index));
+                        }
                         if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
                             stopping = true;
                             run.stopped_after = Some(fail_count.n);
@@ -1196,6 +1312,8 @@ pub fn run_pool(
                 slow_count: 0,
                 lead_ends: Vec::new(),
                 fixture_groups: Vec::new(),
+                failfast: None,
+                partners: Default::default(),
                 cursor: 0,
                 group_ends: None,
                 requeued: VecDeque::new(),
@@ -1599,6 +1717,40 @@ pub(crate) fn merge_statuses(statuses: &[i32]) -> i32 {
 }
 
 /// Split collected indices into (run, cached, skipped_positions) for
+/// The `--budget` line: what was picked and why, against the estimate.
+fn budget_summary(
+    b: &Budget,
+    pick: &crate::scheduling::durations::BudgetPick,
+    spent: f64,
+    workers: usize,
+) -> String {
+    if pick.cold {
+        return format!(
+            "rstest: --budget {}: no recorded durations yet, running all {} test(s) \
+             (this run records them)",
+            b.label, pick.candidates
+        );
+    }
+    let est = spent + pick.est_secs;
+    let over = if est > b.secs {
+        "; over budget: tests in changed test files always run"
+    } else {
+        ""
+    };
+    format!(
+        "rstest: --budget {} -> {} of {} test(s), est. {est:.0}s on {workers} worker(s) \
+         ({} changed-file, {} failed, {} near-change, {} flaky, {} fill){over}",
+        b.label,
+        pick.keep.len(),
+        pick.candidates,
+        pick.changed,
+        pick.failed,
+        pick.near,
+        pick.flaky,
+        pick.fill,
+    )
+}
+
 /// `--incremental`: starting from `keep` (None = every index), deselect any
 /// index whose nodeid is in `skip_ids` and move it to the cached set instead.
 /// Cached nodeids are DEDUPLICATED — parametrized tests can share one nodeid
@@ -1663,12 +1815,49 @@ fn seed_round_due(
 mod tests {
     use super::*;
 
+    #[test]
+    fn budget_summary_names_the_pick_and_flags_cold_and_overrun() {
+        use crate::scheduling::durations::BudgetPick;
+        let b = Budget {
+            secs: 60.0,
+            label: "1m".into(),
+            setup: Default::default(),
+        };
+        let pick = BudgetPick {
+            keep: [0, 1, 2].into_iter().collect(),
+            est_secs: 50.0,
+            candidates: 10,
+            changed: 1,
+            failed: 1,
+            fill: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            budget_summary(&b, &pick, 4.0, 2),
+            "rstest: --budget 1m -> 3 of 10 test(s), est. 54s on 2 worker(s) \
+             (1 changed-file, 1 failed, 0 near-change, 0 flaky, 1 fill)"
+        );
+        // Collection time counts: 50s of tests after 20s spent is over 60s.
+        assert!(budget_summary(&b, &pick, 20.0, 2)
+            .ends_with("; over budget: tests in changed test files always run"));
+        let cold = BudgetPick {
+            candidates: 10,
+            cold: true,
+            ..Default::default()
+        };
+        assert!(
+            budget_summary(&b, &cold, 4.0, 2).contains("no recorded durations yet, running all 10")
+        );
+    }
+
     fn queue(len: u64, cursor: usize, slow_count: usize, groups: bool) -> Dispatch {
         Dispatch {
             order: (0..len).collect(),
             slow_count,
             lead_ends: Vec::new(),
             fixture_groups: Vec::new(),
+            failfast: None,
+            partners: Default::default(),
             cursor,
             group_ends: groups.then(|| vec![2, len as usize]),
             requeued: VecDeque::new(),

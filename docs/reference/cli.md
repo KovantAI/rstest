@@ -52,9 +52,10 @@ means none.
 | [`-n, --numprocesses`](#-n-numprocesses-nauto) | worker count | `auto` | `numprocesses` | |
 | [`--fork-pool[=core\|app]`](#-fork-pool) | fork workers off a prewarmed template (Unix) | off; `app` under `--watch` | | |
 | [`--dist`](#-dist-loadloadfileloadscopeloadgroupeach) | distribution mode | `load` | `dist` | |
-| [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch`) | `order` | |
+| [`--order`](#-order-throughputfail-fast) | dispatch order under `--dist load` | `throughput` (`fail-fast` under `--watch` or `--budget`) | `order` | |
 | [`--shuffle[=SEED]`](#-shuffleseed) | seeded random dispatch order | off | | |
 | [`--shard K/N`](#-shard-kn) | run one of N CI shards | off | | |
+| [`--budget DURATION`](#-budget-duration) | run what fits in a time budget | off | | |
 | [`--collect`](#-collect-fulllazy) | collection strategy (`full` / `lazy`) | auto | `collect` | |
 | [`--changed[=REV]`](#-changedrev) | run only tests affected by changes | off | | |
 | [`--changed-strict`](#-changed-strict) | `--changed` hardened for gating CI | off | | |
@@ -78,6 +79,7 @@ means none.
 | [`--doctor-md PATH`](#-doctor-md-path) | write the diagnosis as markdown | none | | |
 | [`--doctor-fail-on COND`](#-doctor-fail-on-cond) | fail on a doctor metric threshold | none | | |
 | [`--fail-on-leak`](#-fail-on-leak) | fail on a leaked thread or fd | off | | |
+| [`--warn-on-dead-master-path`](#-warn-on-dead-master-path) | warn about plugins that expect an xdist controller (opt-in) | off | | |
 | [`--cov-diff-fail-under PCT`](#-cov-diff-fail-under-pct) | fail on low diff coverage | none | | |
 | [`--cov-diff-json PATH`](#-cov-diff-json-path) | write diff coverage as JSON | none | | |
 | [`--output STYLE`](#output) | terminal output style | `bar` on a TTY, else `dots`; pytest's own in single-worker mode | `output` | |
@@ -214,16 +216,23 @@ affinity order).
 - `throughput` (default): slowest cached tests first, individually, to pack
   workers for the best wall-clock time.
 - `fail-fast`: earliest **red** signal first. Tests that hard-failed lead
-  (most recent failure first), then flaky tests (most recent flake first),
-  both read from `.rstest_cache/flakes.json`, each dispatched alone so they
-  run in parallel. At most 128 lead, and tests matched by
-  [`--quarantine`](#-quarantine-file) are never pulled forward. The rest
-  follow in `throughput` order. Pair with
-  [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. With
-  a cold `flakes.json` it matches `throughput`.
+  (most recent failure first), then tests near changed code (test files
+  edited in the working tree, then test files changed since the last green
+  run, then tests that reach a changed source file), then flaky tests (most
+  recent flake first). Failures and flakes come from
+  `.rstest_cache/flakes.json`; changes from `git diff`. Each leading test is
+  dispatched alone so they run in parallel. At most 128 lead, and tests
+  matched by [`--quarantine`](#-quarantine-file) are never pulled forward as
+  failed or flaky. The rest follow in `throughput` order. Pair with
+  [`--maxfail`/`-x`](#forwarded-pytest-flags) to stop at the first red. When
+  a test fails, tests that usually fail with it (from the run history) jump
+  the queue. With a cold cache and no changes it matches `throughput`. `-v`
+  prints what leads the queue. Details:
+  [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
 
 **Auto:** with neither the flag nor `[tool.rstest] order` set, rstest picks
-`fail-fast` under [`--watch`](#-watch) and `throughput` otherwise. Where an
+`fail-fast` under [`--watch`](#-watch) and [`--budget`](#-budget-duration),
+and `throughput` otherwise. Where an
 explicit `fail-fast` has no effect (and warns), and why it can't combine with
 `--shuffle`:
 [Fail-fast ordering](../concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
@@ -262,9 +271,47 @@ verify with [`shard-verify`](cli-commands.md#shard-verify).
 Orthogonal to `-n`: each shard still fans out across local workers. Requires
 `-n 2` or more; rejected with `--shuffle` (a per-run shuffle breaks the
 identical-partition guarantee) and `--dist each`. Under `--collect lazy` it
-shards by file. Composes with `--changed` (select, then partition). Restore
+shards by file. Composes with `--changed` (select, then partition) and
+[`--budget`](#-budget-duration) (partition, then fit each bucket). Restore
 the **same** duration cache on every job: see the
 [Sharding guide](../guides/sharding.md).
+
+### `--budget <DURATION>`
+
+Run the tests most worth running in `DURATION` of wall time (`90s`, `5m`, or
+bare seconds), and leave the rest out. The duration is an estimate that picks
+tests, not a timeout: nothing is stopped when it runs out. Picked, in order:
+
+1. Tests in a test file changed since the last green run or edited in the
+   working tree. These always run, even past the budget.
+2. Tests that recently failed, then tests that reach a changed source file,
+   then flaky tests (the [`fail-fast`](#-order-throughputfail-fast) signals),
+   cheapest first within each group.
+3. The rest, shortest first, while they fit.
+
+A test costs its recorded call time plus its median setup time from the run
+history (a test with no record costs the median). Module and class fixtures
+are counted once, by the first picked test that needs them; package and
+session fixtures once per worker. Time already spent starting workers and
+collecting comes off the budget. One line on stderr says what was picked and
+why, and the summary counts the rest as deselected:
+
+```text
+rstest: --budget 2s -> 30 of 36 test(s), est. 2s on 2 worker(s) (1 changed-file, 1 failed, 0 near-change, 0 flaky, 28 fill)
+```
+
+A budget run is never a green run: it doesn't advance the
+[`--since-green`](#-since-green) baseline or record the last green
+environment, since a pass says nothing about the tests it left out.
+
+Under [`--shard`](#-shard-kn) each shard gets the whole budget for its own
+bucket, and [`shard-verify`](cli-commands.md#shard-verify) counts what the
+budget left out as covered.
+
+With no recorded durations yet it runs everything (and records them). Needs
+`-n 2` or more and full collection; rejected with `--dist each` and
+`--watch`. Implies [`--order fail-fast`](#-order-throughputfail-fast) unless
+`--order` is set.
 
 ## Test selection and collection
 
@@ -816,6 +863,34 @@ only the test outcome, so a green session that fails the gate still shows
 
 `--fail-on-leak` and `--doctor-fail-on` are command-line only (neither is a
 `[tool.rstest]` key): put them in the CI step that invokes rstest.
+
+### `--warn-on-dead-master-path`
+
+**Opt-in.** Scan the installed plugins and the loaded conftests for code that
+only works on an xdist controller, which rstest does not run, and print one
+warning per plugin or conftest before the run starts. Two shapes are reported:
+
+- **crash**: a direct `workerinput["k"]` read of a key rstest does not
+  provision. It will `KeyError` at `-n >= 2`.
+- **silent**: a branch gated on "there is no `workerinput`" (the controller)
+  that registers a plugin, writes a file or schedules session-end work, or an
+  xdist controller hook rstest never calls. That work never happens at
+  `-n >= 2`.
+
+```console
+$ rstest -n auto --warn-on-dead-master-path
+rstest: warning: tests/conftest.py:12 reads workerinput["db_port"], which only an
+xdist controller sets; it will KeyError at -n >= 2. Use config.workerinput.get("k")
+with a fallback, or set the value in a pytest_configure_node hook (rstest calls it
+per worker). See docs/guides/plugins.md#plugins-that-expect-an-xdist-controller
+```
+
+Plugins in the [top-100 matrix](top-100-plugins.md) are not scanned: their
+behavior is already handled or documented there. Defensive reads
+(`workerinput.get("k")`, `getattr(config, "workerinput", None)`), keys the
+same plugin or conftest sets itself, and branches that only paint the terminal
+are not reported. [`rstest try`](cli-commands.md#try) turns the scan on for its rstest
+run and lists the findings in its summary. Command-line only.
 
 ## Coverage
 

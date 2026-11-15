@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Dispatch order. The queue, front to back: slow tests and costly module or class units, biggest first, one per dispatch (a 54 second test, a 12 second module unit, an 8 second test, a 4 second class unit, a 3 second test), then the rest in contiguous chunks. Below, an illustrative run on 4 workers: with collection-order chunks the 54 second test starts at 90 seconds and the run ends at 144 seconds; with longest first it starts at 0 and the run ends at 104 seconds, for the same total work." viewBox="0 0 820 540">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #00897b; --accent-bg: #e0f2f1; --bg: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #4db6ac; --accent-bg: #15302d; --bg: #1a1c22; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.rs-title { font-size: 19px; font-weight: 700; }
+.rs-sub { font-size: 14.5px; }
+.rs-sm.rs-title { font-size: 17px; }
+.rs-sm.rs-sub { font-size: 13.5px; }
+.rs-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; }
+.rs-start { text-anchor: start; }
+.rs-end { text-anchor: end; }
+.rs-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.rs-bg { fill: var(--bg); }
+.rs-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.rs-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.rs-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.rs-chips rect { fill: var(--chip); stroke: var(--accent); }
+.rs-chips text { font-size: 12px; font-weight: 600; }
+.rs-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.rs-row-text { font-size: 13.5px; }
+.rs-note { fill: var(--muted); font-size: 12.5px; }
+.rs-bar { fill: var(--line); }
+.rs-bar-hot { fill: var(--accent); }
+.rs-dash { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+.rs-line, .rs-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.rs-thin { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.rs-edge { marker-end: url(#rs-arrow); }
+.rs-edge.rs-accent { stroke: var(--accent); marker-end: url(#rs-arrow-accent); }
+.rs-head { fill: var(--ink); }
+.rs-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="rs-arrow" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head" d="M0 0L10 5L0 10"/></marker>
+<marker id="rs-arrow-accent" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto"><path class="rs-head-accent" d="M0 0L10 5L0 10"/></marker>
+</defs>
+<rect class="rs-bg" width="100%" height="100%" rx="16"/>
+<text class="rs-label rs-start" x="40" y="28">THE QUEUE, FRONT TO BACK</text>
+<rect class="rs-box rs-hot" x="40" y="42" width="96" height="44" rx="8"/><text class="rs-row-text" x="88" y="69">test 54s</text>
+<rect class="rs-loop" x="144" y="42" width="96" height="44" rx="8"/><text class="rs-row-text" x="192" y="69">module 12s</text>
+<rect class="rs-box rs-hot" x="248" y="42" width="96" height="44" rx="8"/><text class="rs-row-text" x="296" y="69">test 8s</text>
+<rect class="rs-loop" x="352" y="42" width="96" height="44" rx="8"/><text class="rs-row-text" x="400" y="69">class 4s</text>
+<rect class="rs-box rs-hot" x="456" y="42" width="96" height="44" rx="8"/><text class="rs-row-text" x="504" y="69">test 3s</text>
+<rect class="rs-box" x="566" y="42" width="46" height="44" rx="8"/><text class="rs-note" x="589" y="68">chunk</text>
+<rect class="rs-box" x="618" y="42" width="46" height="44" rx="8"/><text class="rs-note" x="641" y="68">chunk</text>
+<rect class="rs-box" x="670" y="42" width="46" height="44" rx="8"/><text class="rs-note" x="693" y="68">chunk</text>
+<rect class="rs-box" x="722" y="42" width="46" height="44" rx="8"/><text class="rs-note" x="745" y="68">chunk</text>
+<text class="rs-note" x="788" y="68">...</text>
+<path class="rs-thin" d="M40 96 V104 H552 V96"/>
+<text class="rs-note" x="296" y="122">slow tests (1s or more) and costly module or class units</text>
+<text class="rs-note" x="296" y="140">biggest first, one per dispatch, so they spread out</text>
+<path class="rs-thin" d="M566 96 V104 H768 V96"/>
+<text class="rs-note" x="667" y="122">the rest, in contiguous chunks</text>
+<text class="rs-note" x="667" y="140">refilled when a worker half-drains</text>
+<text class="rs-label rs-start" x="40" y="186">ILLUSTRATIVE RUN, SAME WORK ON 4 WORKERS</text>
+<text class="rs-title rs-sm rs-start" x="40" y="214">Collection-order chunks</text>
+<text class="rs-note rs-end" x="108" y="241">gw0</text><rect class="rs-bar" x="120" y="226" width="368" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="269">gw1</text><rect class="rs-bar" x="120" y="254" width="360" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="297">gw2</text><rect class="rs-bar" x="120" y="282" width="358" height="22" rx="4"/><rect class="rs-bar-hot" x="480" y="282" width="216" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="325">gw3</text><rect class="rs-bar" x="120" y="310" width="364" height="22" rx="4"/>
+<line class="rs-dash" x1="696" y1="220" x2="696" y2="338"/>
+<text class="rs-label rs-start" x="704" y="300">144s</text>
+<text class="rs-title rs-sm rs-start" x="40" y="370">rstest: longest first</text>
+<text class="rs-note rs-end" x="108" y="397">gw0</text><rect class="rs-bar-hot" x="120" y="382" width="214" height="22" rx="4"/><rect class="rs-bar" x="336" y="382" width="200" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="425">gw1</text><rect class="rs-bar" x="120" y="410" width="412" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="453">gw2</text><rect class="rs-bar" x="120" y="438" width="416" height="22" rx="4"/>
+<text class="rs-note rs-end" x="108" y="481">gw3</text><rect class="rs-bar" x="120" y="466" width="412" height="22" rx="4"/>
+<line class="rs-dash" x1="536" y1="376" x2="536" y2="494"/>
+<text class="rs-label rs-start" x="544" y="400">104s</text>
+<path class="rs-thin" d="M120 504 H720 M120 504 V510 M240 504 V510 M360 504 V510 M480 504 V510 M600 504 V510 M720 504 V510"/>
+<text class="rs-note" x="120" y="526">0s</text>
+<text class="rs-note" x="240" y="526">30s</text>
+<text class="rs-note" x="360" y="526">60s</text>
+<text class="rs-note" x="480" y="526">90s</text>
+<text class="rs-note" x="600" y="526">120s</text>
+<text class="rs-note" x="720" y="526">150s</text>
+</svg>
