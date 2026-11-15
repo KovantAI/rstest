@@ -1771,7 +1771,14 @@ fn dispatch_run(
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
-                files = shard::shard_files(&files, duration_cache.get(), &cwd, k, total);
+                files = shard::shard_files(
+                    &files,
+                    duration_cache.get(),
+                    &cwd,
+                    &crate::cache::base_dir(),
+                    k,
+                    total,
+                );
                 sink.warn(&format!(
                     "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                     files.len()
