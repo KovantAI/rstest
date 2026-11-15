@@ -1090,6 +1090,34 @@ def gate_silent_master_warning(g, args, binary):
     )
 
 
+def gate_dead_master_path_warning(g, args, binary):
+    print("== --warn-on-dead-master-path (conftest reads a controller-only key) ==")
+    # A conftest whose worker branch reads a workerinput key only an xdist
+    # controller sets: with the flag rstest names it once (gw0) before the run;
+    # without the flag it prints nothing.
+    g.write(
+        "deadmaster/conftest.py",
+        "def pytest_configure(config):\n"
+        "    if hasattr(config, 'workerinput'):\n"
+        "        config.db_port = config.workerinput.get('db_port_fallback', 0)\n"
+        "    port = getattr(config, 'workerinput', {}).get('x')\n"
+        "\n"
+        "def _later(config):\n"
+        "    return config.workerinput['db_port']\n",
+    )
+    g.write("deadmaster/test_dm.py", "def test_a(): pass\ndef test_b(): pass\n")
+    needle = 'deadmaster/conftest.py:7 reads workerinput["db_port"]'
+    r = g.run("deadmaster", "-n", "2", "--warn-on-dead-master-path")
+    check(
+        "dead-master: warned once with path:line and key",
+        r.stderr.count(needle) == 1 and "pytest_configure_node" in r.stderr,
+        r.stderr[-400:],
+    )
+    check("dead-master: run unaffected", "2 passed" in r.stdout, r.stdout[-200:])
+    r0 = g.run("deadmaster", "-n", "2")
+    check("dead-master: silent without the flag", "workerinput" not in r0.stderr, r0.stderr[-300:])
+
+
 def gate_pytest_random_order(g, args, binary):
     print("== pytest-random-order (seeded workerinput, no dead-master-path crash) ==")
     # pytest-random-order's pytest_configure reads workerinput["random_order_seed"]

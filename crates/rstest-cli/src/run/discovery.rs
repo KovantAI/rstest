@@ -81,6 +81,7 @@ pub(super) fn run_collect_discovery(
         doctor: false,
         timeout: None,
         leakcheck: false,
+        dead_master_scan: false,
         send_ids: true,
         debug_port: None,
         stream_output: false,
