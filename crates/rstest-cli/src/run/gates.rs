@@ -813,6 +813,17 @@ pub(super) fn run_post_gates(
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" && !replay {
+        if let Some(anchored) = crate::cache::rootdir() {
+            if let Some(real) = outcome.sources.rootdir_mismatch(anchored) {
+                sink.warn(&format!(
+                    "rstest: pytest's rootdir ({}) differs from the one rstest resolved \
+                     ({}); cached durations won't match its tests, so scheduling ignores \
+                     them. Pass --rootdir to pin it",
+                    real.display(),
+                    anchored.display()
+                ));
+            }
+        }
         durations::save(&outcome.run, &outcome.sources);
         durations::save_scope_costs(&outcome.run);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
