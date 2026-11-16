@@ -1793,7 +1793,14 @@ fn dispatch_run(
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
-                files = shard::shard_files(&files, duration_cache.get(), &cwd, k, total);
+                files = shard::shard_files(
+                    &files,
+                    duration_cache.get(),
+                    &cwd,
+                    &crate::cache::base_dir(),
+                    k,
+                    total,
+                );
                 sink.warn(&format!(
                     "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                     files.len()
@@ -2029,6 +2036,15 @@ const AUTO_LAZY_MIN_TESTS: usize = 2000;
 /// size and worker count; 2000 tests need >= 8 workers, 4000 need >= 4.
 const AUTO_LAZY_MIN_WORK: usize = 16_000;
 
+/// A nodeid positional (`tests/a.py::t`) or `--pyargs`: selections the lazy
+/// file walk can't see. Option values don't count: `-W default::X` and
+/// `--deselect a.py::t` hold `::` but select no test.
+fn selects_nodeids_or_pyargs(args: &[String]) -> bool {
+    args.iter()
+        .zip(crate::cli::positional_mask(args))
+        .any(|(a, pos)| (pos && a.contains("::")) || a == "--pyargs")
+}
+
 /// Auto-default heuristic (only reached when neither `--collect` nor
 /// `[tool.rstest] collect` was set): pick lazy for a big-enough suite on a
 /// file-affine dist, so a large parallel run stops re-collecting the whole
@@ -2041,7 +2057,7 @@ fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
         && matches!(dist_name, "load" | "loadfile")
         // nodeid / --pyargs selection can't ride the file walk (same reason
         // explicit lazy falls back), so never auto-pick lazy for those.
-        && !args.iter().any(|a| a.contains("::") || a == "--pyargs")
+        && !selects_nodeids_or_pyargs(args)
         // `tests` counts the whole cached suite, not the selection. A path
         // selection (explicit, or --changed/--since-green narrowing) can be a
         // handful of files, and auto-lazy's strict file affinity would cap
@@ -2161,7 +2177,7 @@ fn collect_lazy(
             // Single-test selection by nodeid wants exact-item dispatch;
             // --pyargs selects by import path, which the file walk can't
             // see. Both fall back to full collection.
-            if args.iter().any(|a| a.contains("::") || a == "--pyargs") {
+            if selects_nodeids_or_pyargs(args) {
                 sink.warn(
                     "rstest: nodeid/--pyargs arguments given; --collect lazy falls back \
                      to full collection",
@@ -3646,6 +3662,25 @@ mod tests {
         assert!(!auto_lazy("load", &["--pyargs".to_string()], 8, 100_000));
         assert!(!auto_lazy("loadscope", &[], 8, 100_000));
         assert!(!auto_lazy("loadgroup", &[], 8, 100_000));
+    }
+
+    #[test]
+    fn auto_lazy_ignores_double_colons_in_option_values() {
+        // R54: a `-W` filter or a `--deselect` nodeid is not a selection.
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for a in [
+            args(&["-W", "default::pytest.PytestRemovedIn10Warning"]),
+            args(&["--pythonwarnings", "error::DeprecationWarning"]),
+            args(&["--deselect", "tests/a.py::t"]),
+        ] {
+            assert!(auto_lazy("load", &a, 8, 100_000), "{a:?}");
+        }
+        assert!(!auto_lazy(
+            "load",
+            &args(&["-W", "x::Y", "tests/a.py::t"]),
+            8,
+            100_000
+        ));
     }
 
     fn timings(entries: &[(&str, f64)]) -> std::collections::HashMap<String, f64> {

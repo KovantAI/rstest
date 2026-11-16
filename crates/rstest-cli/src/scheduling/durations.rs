@@ -148,11 +148,13 @@ fn slash_joined(rel: &Path) -> String {
         .join("/")
 }
 
-/// `file` as a duration-cache file key: relative to `cwd` when under it, with
-/// `/` separators, so it matches the file part of the cached nodeids on
-/// Windows too.
-pub(crate) fn file_key(file: &Path, cwd: &Path) -> String {
-    file.strip_prefix(cwd)
+/// `file` (absolute, or relative to `cwd`) relative to `root` when under it,
+/// with `/` separators, so it matches the file part of the cached nodeids on
+/// Windows too. Cached nodeids hang off pytest's rootdir, which need not be
+/// the cwd: pass [`cache::base_dir`] as `root` for a cache lookup.
+pub(crate) fn file_key(file: &Path, cwd: &Path, root: &Path) -> String {
+    cwd.join(file)
+        .strip_prefix(root)
         .unwrap_or(file)
         .to_string_lossy()
         .replace('\\', "/")

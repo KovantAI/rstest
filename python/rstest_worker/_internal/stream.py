@@ -340,6 +340,7 @@ class StreamPlugin:
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
         self._config: Any = None  # set at pytest_configure
         self._deselected = 0  # items pytest deselected (-k/-m, hooks)
+        self._collect_skips = 0  # skipped collectors seen (lazy: conftest skips)
         self._lastfailed: dict[str, bool] | None = None  # cache as of session start
 
     # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
@@ -1094,6 +1095,7 @@ class StreamPlugin:
                 {"path": report.nodeid, "longrepr": report.longreprtext},
             )
         elif report.skipped:
+            self._collect_skips += 1
             self._conn.send("collect_skip", {"path": report.nodeid})
         # pytest's LFPlugin swaps a once-failing collector's lastfailed key for
         # the nodeids it yields now; the orchestrator writes the merged cache,
