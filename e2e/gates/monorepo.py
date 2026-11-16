@@ -558,6 +558,9 @@ def gate_shared_cache_backend(g, args, binary):
         '{"local_only.py::t_local": 4.2}', encoding="utf-8"
     )
     g.write("scproj_pull_local/test_s.py", "def test_a(): assert True\n")
+    # The local-only id's file exists: a duration whose test file is gone is
+    # pruned on load, pull or not.
+    g.write("scproj_pull_local/local_only.py", "def t_local(): pass\n")
     r = g.run("test_s.py", "-n", "2", "--cache-remote", str(remote), "--cache-pull", cwd=scpl)
     merged_local = json.loads((scpl / ".rstest_cache" / "durations.json").read_text())
     check(
