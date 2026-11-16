@@ -612,6 +612,24 @@ def test_sessionfinish_emits_warnings():
     ]
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_sessionfinish_records_the_warm_manifest(monkeypatch, fails):
+    # Best-effort: a record() that raises leaves no manifest, never a failure.
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_RECORD", "1")
+    monkeypatch.setattr(warm, "recorded", "stale")
+
+    def record(session):
+        if fails:
+            raise RuntimeError("boom")
+        return ["app"]
+
+    monkeypatch.setattr(warm, "record", record)
+    _plugin().pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    assert warm.recorded == (None if fails else ["app"])
+
+
 def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
     monkeypatch.setenv("RSTEST_DOCTOR", "1")
     p = _plugin()  # _doctor read from env at init

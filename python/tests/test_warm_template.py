@@ -460,3 +460,152 @@ def test_plugin_rewrite_names_covers_every_module_of_a_pytest11_dist(monkeypatch
     other = SimpleNamespace(entry_points=[], files=["numpy/__init__.py"])
     monkeypatch.setattr(importlib.metadata, "distributions", lambda: [plugin, editable, other])
     assert warm.plugin_rewrite_names() == {"hyp", "_hyp_globals", "_hyp_plugin", "edit_pkg"}
+
+
+# ── guard edges ─────────────────────────────────────────────────────────────
+
+
+def test_record_falls_back_to_default_python_files_when_getini_fails(monkeypatch):
+    def getini(name):
+        raise ValueError(name)
+
+    config = SimpleNamespace(
+        pluginmanager=SimpleNamespace(get_plugins=lambda: []),
+        stash={},
+        getini=getini,
+        rootpath="/proj",
+    )
+    fake = {"x_test": _mod("x_test", "/proj/x_test.py"), "keep": _mod("keep", "/proj/keep.py")}
+    monkeypatch.setattr(sys, "modules", fake)
+    assert warm.record(SimpleNamespace(config=config, items=[])) == ["keep"]
+
+
+def test_coverage_active_is_false_when_coverage_raises(monkeypatch):
+    def current():
+        raise RuntimeError
+
+    monkeypatch.setitem(
+        sys.modules, "coverage", SimpleNamespace(Coverage=SimpleNamespace(current=current))
+    )
+    assert not warm.coverage_active()
+
+
+def test_a_membership_test_on_a_worker_key_is_a_hazard(app):
+    app.write("wt_in", "import os\nHAS = 'RSTEST_WORKER_ID' in os.environ\n")
+    clean, result = app.run(["wt_in"])
+    assert clean
+    assert result["denied"]["wt_in"] == "reads RSTEST_WORKER_ID at import"
+
+
+def test_an_env_unset_at_import_is_a_hazard_and_the_recorder_writes_after(app, monkeypatch):
+    monkeypatch.setenv("WT_DEL", "1")
+    app.write("wt_unset", "import os\nENV = os.environ\ndel os.environ['WT_DEL']\n")
+    app.write("wt_keep", "import os\nENV = os.environ\n")
+    clean, result = app.run(["wt_unset", "wt_keep"])
+    assert clean
+    assert result["denied"]["wt_unset"] == "unsets WT_DEL at import"
+    assert os.environ["WT_DEL"] == "1"
+    # Disarmed, a kept recorder writes through to the real environment.
+    env = sys.modules["wt_keep"].ENV
+    env["WT_LATER"] = "x"
+    assert os.environ["WT_LATER"] == "x"
+    del env["WT_LATER"]
+    assert "WT_LATER" not in os.environ
+
+
+def test_a_manifest_module_already_imported_is_skipped(app):
+    clean, result = app.run(["os"])
+    assert clean and result["imported"] == 0 and result["denied"] == {}
+
+
+def test_an_error_after_imports_began_makes_the_template_unfit(app, monkeypatch):
+    class FailsOnSecondClear(list):
+        calls = 0
+
+        def clear(self):
+            FailsOnSecondClear.calls += 1
+            if FailsOnSecondClear.calls == 2:
+                raise RuntimeError("guard state lost")
+            super().clear()
+
+    monkeypatch.setattr(warm, "_env_hazards", FailsOnSecondClear())
+    app.write("wt_first", "X = 1\n")
+    app.write("wt_second", "X = 1\n")
+    clean, result = app.run(["wt_first", "wt_second"])
+    assert not clean
+    assert result["imported"] == 1
+    assert result["error"] == "RuntimeError: guard state lost"
+
+
+def test_an_error_before_any_import_keeps_the_template(app, monkeypatch):
+    class AlwaysFails(list):
+        def clear(self):
+            raise RuntimeError("x")
+
+    monkeypatch.setattr(warm, "_env_hazards", AlwaysFails())
+    app.write("wt_never", "X = 1\n")
+    clean, result = app.run(["wt_never"])
+    assert clean and result["imported"] == 0
+
+
+def test_hazard_flags_a_new_non_regular_fd():
+    import stat
+
+    before = (1, {}, 0, (0, ()))
+    pipe = (1, {7: (stat.S_IFIFO, os.O_RDONLY)}, 0, (0, ()))
+    writable = (1, {8: (stat.S_IFREG, os.O_WRONLY)}, 0, (0, ()))
+    assert warm.hazard(before, pipe) == "leaves a file descriptor open at import"
+    assert warm.hazard(before, writable) == "leaves a file descriptor open at import"
+
+
+def test_hazard_ignores_a_new_image_that_is_not_a_system_framework(monkeypatch):
+    import ctypes
+
+    name = ctypes.c_char_p(b"/usr/lib/libfoo.dylib")
+    dyld = SimpleNamespace(
+        _dyld_image_count=lambda: 1,
+        _dyld_get_image_name=lambda i: ctypes.cast(name, ctypes.c_void_p).value,
+    )
+    monkeypatch.setattr(warm, "_dyld", dyld)
+    assert warm.hazard((1, {}, 0, (0, ())), (1, {}, 1, (0, ()))) is None
+
+
+def test_threads_counts_proc_tasks_off_macos(monkeypatch):
+    monkeypatch.setattr(warm.sys, "platform", "linux")
+    monkeypatch.setattr(warm.os, "listdir", lambda p: ["1", "2", "3"])
+    assert warm._threads() == 3
+
+    def missing(p):
+        raise FileNotFoundError(p)
+
+    monkeypatch.setattr(warm.os, "listdir", missing)
+    assert warm._threads() is None
+
+
+def test_threads_is_unknown_when_proc_pidinfo_fails(monkeypatch):
+    import ctypes
+
+    monkeypatch.setattr(warm.sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", lambda path: SimpleNamespace(proc_pidinfo=lambda *a: 0))
+    assert warm._threads() is None
+
+
+def test_binds_stdio_is_false_for_an_object_without_vars():
+    assert not warm.binds_stdio(1, frozenset({id(sys.stdout)}))
+
+
+def test_caller_module_is_none_past_the_last_frame():
+    assert warm._caller_module(None) is None
+
+
+def test_guarded_import_passes_through_when_disarmed():
+    load = warm._guarded_find_and_load(lambda name, import_: ("orig", name))
+    assert load("wt_whatever", None) == ("orig", "wt_whatever")
+
+
+def test_prewarm_without_a_result_path_or_with_an_unwritable_one(tmp_path):
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"modules": []}))
+    assert warm.prewarm(str(manifest), None)
+    assert warm.prewarm(str(manifest), str(tmp_path / "no" / "such" / "dir.json"))
+    assert not (tmp_path / "no").exists()

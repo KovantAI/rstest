@@ -288,3 +288,134 @@ def test_peak_rss_is_none_without_resource_module(monkeypatch):
     # Windows has no `resource`: the done message just omits peak RSS.
     monkeypatch.setitem(sys.modules, "resource", None)
     assert worker_main._peak_rss() is None
+
+
+# ── --fork-pool=app / --template-server ─────────────────────────────────────
+
+
+def test_main_routes_template_server(monkeypatch):
+    monkeypatch.setattr(worker_main.sys, "argv", ["prog", "--template-server", "/s"])
+    seen = {}
+    monkeypatch.setattr(worker_main, "_template_server", lambda argv: seen.setdefault("argv", argv))
+    worker_main.main()
+    assert seen["argv"] == ["/s"]
+
+
+class _Execv(BaseException):
+    pass
+
+
+def _raise_execv(path, args):
+    raise _Execv(args)
+
+
+@pytest.mark.parametrize("entry", ["--fork-pool", "--template-server"])
+def test_a_tripped_guard_restarts_cold_with_the_same_argv(monkeypatch, entry):
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_MANIFEST", "/m.json")
+    monkeypatch.setattr(warm, "prewarm", lambda manifest, result: False)
+    monkeypatch.setattr(worker_main.os, "execv", _raise_execv)
+    fn = worker_main._fork_pool if entry == "--fork-pool" else worker_main._template_server
+    argv = ["1", "9", "8", "10", "20", "30"] if entry == "--fork-pool" else ["/s"]
+    with pytest.raises(_Execv) as exc:
+        fn(argv)
+    assert exc.value.args[0] == [sys.executable, "-m", "rstest_worker", entry, *argv]
+    # The restarted process must not try the manifest again.
+    assert "RSTEST_WARM_MANIFEST" not in os.environ
+
+
+def test_a_warm_fork_pool_child_reseeds(monkeypatch):
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_MANIFEST", "/m.json")
+    monkeypatch.setattr(warm, "prewarm", lambda manifest, result: True)
+    reseeded = []
+    monkeypatch.setattr(warm, "reseed_after_fork", lambda: reseeded.append(1))
+    monkeypatch.setattr(worker_main.os, "fork", lambda: 0)
+    monkeypatch.setattr(worker_main.os, "close", lambda fd: None)
+    monkeypatch.setattr(worker_main.os, "dup2", lambda fd, to: None)
+    monkeypatch.setattr(worker_main.protocol, "Connection", lambda c, e: object())
+    monkeypatch.setattr(worker_main, "_serve", lambda conn: None)
+    monkeypatch.setenv("RSTEST_WORKER_ID", "")
+    monkeypatch.setenv("RSTEST_SEND_IDS", "")
+    with pytest.raises(SystemExit):
+        worker_main._fork_pool(["1", "9", "8", "10", "20", "30"])
+    assert reseeded == [1]
+
+
+@pytest.mark.parametrize("manifest", [None, "/m.json"])
+def test_template_server_serves_after_the_imports(monkeypatch, manifest):
+    from rstest_worker._internal import template, warm
+
+    if manifest:
+        monkeypatch.setenv("RSTEST_WARM_MANIFEST", manifest)
+    else:
+        monkeypatch.delenv("RSTEST_WARM_MANIFEST", raising=False)
+    monkeypatch.setattr(warm, "prewarm", lambda manifest, result: True)
+    seen = {}
+    monkeypatch.setattr(
+        template, "serve", lambda path, run, warm_used: seen.update(path=path, warm=warm_used)
+    )
+    worker_main._template_server(["/s"])
+    assert seen == {"path": "/s", "warm": bool(manifest)}
+
+
+def test_template_worker_exits_like_a_spawned_worker(monkeypatch):
+    monkeypatch.setattr(worker_main, "_serve", lambda conn: None)
+    with pytest.raises(SystemExit) as exc:
+        worker_main._template_worker(object())
+    assert exc.value.code == 0
+
+    def raise_broken(conn):
+        raise BrokenPipeError
+
+    monkeypatch.setattr(worker_main, "_serve", raise_broken)
+    monkeypatch.setattr(
+        worker_main.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(("os._exit", code)))
+    )
+    with pytest.raises(SystemExit) as exc:
+        worker_main._template_worker(object())
+    assert exc.value.code == ("os._exit", 0)
+
+
+def test_done_carries_the_warm_record(monkeypatch):
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_RECORD", "1")
+    monkeypatch.setattr(worker_main, "_peak_rss", lambda: None)
+    monkeypatch.setattr(runner_pytest, "run", lambda args, conn: 0)
+    monkeypatch.setattr(warm, "env_at_start", None)
+    monkeypatch.setattr(warm, "recorded", ["app"])
+    monkeypatch.setattr(warm, "rewrite_marked", ["plug"])
+    monkeypatch.setattr(warm, "env_changed", ["K"])
+    monkeypatch.setattr(warm, "coverage_active", lambda: True)
+    conn = _FakeConn([{"kind": "run_tests", "payload": {"args": []}}])
+    worker_main._serve(conn)
+    # _serve snapshots the environment so record() can diff it later.
+    assert warm.env_at_start == dict(os.environ)
+    assert conn.sent == [
+        (
+            "done",
+            {
+                "exitstatus": 0,
+                "imported": ["app"],
+                "rewrite": ["plug"],
+                "env": ["K"],
+                "sys_path": list(sys.path),
+                "coverage": True,
+            },
+        )
+    ]
+
+
+def test_done_without_a_recorded_manifest_omits_it(monkeypatch):
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_RECORD", "1")
+    monkeypatch.setattr(worker_main, "_peak_rss", lambda: None)
+    monkeypatch.setattr(warm, "env_at_start", None)
+    monkeypatch.setattr(warm, "recorded", None)
+    conn = _FakeConn([])
+    worker_main._done(conn, 3)
+    assert conn.sent == [("done", {"exitstatus": 3})]
