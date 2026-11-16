@@ -334,7 +334,8 @@ An explicit `--collect lazy` accepts only `--dist load` and `loadfile`;
 --collect lazy is file-affine and cannot honor --dist loadscope (only load/loadfile: loadscope/loadgroup need a global id list and each runs the full suite on every worker; use --collect full)
 ```
 
-Nodeid and `--pyargs` arguments fall back to full collection.
+Nodeid arguments fall back to full collection, as does a `--pyargs` name
+that doesn't resolve to a module or package path.
 
 **Default: auto.** With neither the flag nor the config key, rstest picks
 `lazy` for large warm-cache parallel runs and `full` otherwise, and prints a

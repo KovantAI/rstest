@@ -148,6 +148,43 @@ def gate_lazy_collection(g, args, binary):
         and "falls back" not in r.stdout + r.stderr,
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )
+    # --pyargs: each name resolves to its package (or module) path, which the
+    # lazy file walk starts from; same tests as full collection. A name that
+    # doesn't resolve keeps full collection.
+    g.write("pyargs_proj/pytest.ini", "")
+    g.write("pyargs_proj/pkgx/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/test_a.py", "def test_a(): pass\ndef test_b(): pass\n")
+    g.write("pyargs_proj/pkgx/tests/test_c.py", "def test_c(): pass\n")
+    pcwd = g.tmp / "pyargs_proj"
+    ids = {}
+    for mode in ("full", "lazy"):
+        rp = pcwd / f"{mode}.json"
+        r = g.run(
+            "--pyargs", "pkgx", "-n", "2", "--collect", mode, "--report-json", str(rp), cwd=pcwd
+        )
+        ids[mode] = set(json.loads(rp.read_text())["tests"]) if rp.exists() else set()
+    check(
+        "lazy: --pyargs package runs lazy, same tests as full",
+        r.returncode == 0
+        and "falls back" not in r.stdout + r.stderr
+        and len(ids["full"]) == 3
+        and ids["lazy"] == ids["full"],
+        f"rc={r.returncode} full={sorted(ids['full'])} lazy={sorted(ids['lazy'])} "
+        + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "pkgx.tests.test_c", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: --pyargs module runs lazy",
+        r.returncode == 0 and "1 passed" in r.stdout and "falls back" not in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "no_such_pkg_xyz", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: unresolved --pyargs falls back to full collection",
+        "did not resolve" in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
     # R32: a send to a dead worker is not fatal; its ids are requeued and
     # run on the respawned worker.
     if not WINDOWS:
