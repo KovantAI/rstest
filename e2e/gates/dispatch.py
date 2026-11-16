@@ -288,12 +288,13 @@ def gate_lazy_collection(g, args, binary):
     )
 
 
-def gate_rootdir_mismatch_warning(g, args, binary):
-    print("== rootdir mismatch warning ==")
-    # The duration cache keys files on rstest's own rootdir guess and tests
-    # on pytest's real one; when they differ nothing matches and duration
-    # scheduling silently falls back to path order. rstest's guess reads
-    # argv only, so a `--rootdir` in PYTEST_ADDOPTS splits them.
+def gate_rootdir_matches_pytest(g, args, binary):
+    print("== rootdir matches pytest ==")
+    # rstest anchors .rstest_cache at its own reading of pytest's rootdir and
+    # keys file lookups on it; cached test ids hang off pytest's real one. If
+    # they differ nothing matches, scheduling silently falls back to path
+    # order, and rstest warns. pytest reads PYTEST_ADDOPTS before it settles
+    # the rootdir, so a `--rootdir` there moves it, and rstest must follow.
     g.write("rootmm/pytest.ini", "")
     g.write("rootmm/tests/test_a.py", "def test_a(): pass\n")
     g.write("rootmm/tests/test_b.py", "def test_b(): pass\n")
@@ -315,8 +316,10 @@ def gate_rootdir_mismatch_warning(g, args, binary):
             env_extra={"PYTEST_ADDOPTS": "--rootdir=tests"},
         )
         check(
-            f"rootdir: warns when pytest's rootdir differs ({mode})",
-            r.returncode == 0 and "differs from the one rstest resolved" in r.stderr,
+            f"rootdir: a PYTEST_ADDOPTS --rootdir anchors the cache there ({mode})",
+            r.returncode == 0
+            and "differs from the one rstest resolved" not in r.stderr
+            and (cwd / "tests" / ".rstest_cache" / "durations.json").exists(),
             r.stderr[-300:],
         )
 

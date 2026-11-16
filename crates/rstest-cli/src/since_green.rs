@@ -486,28 +486,7 @@ pub fn after_run(sink: &mut Sink, exitstatus: i32, full_suite: bool, now: &Snaps
 /// pytest's rootdir for these args, with `testpaths` only from a config file
 /// in that dir. See [`narrows_selection`].
 pub(crate) fn run_narrows_suite(args: &[String], cwd: &Path) -> bool {
-    let mut all = std::env::var("PYTEST_ADDOPTS")
-        .map(|v| crate::config::shell_split(&v))
-        .unwrap_or_default();
-    all.extend_from_slice(args);
-    // pytest expands an `@argsfile` (one arg per line) before anything else,
-    // the rootdir included.
-    let all: Vec<String> = all
-        .into_iter()
-        .flat_map(|a| {
-            match a
-                .strip_prefix('@')
-                .map(|f| std::fs::read_to_string(cwd.join(f)))
-            {
-                Some(Ok(body)) => body
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect(),
-                _ => vec![a],
-            }
-        })
-        .collect();
+    let all = crate::config::session_args(cwd, args);
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let root = crate::config::rootdir(cwd, &all);
     // ponytail: `-c other.ini` still reads testpaths from the rootdir's own
