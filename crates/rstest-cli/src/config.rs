@@ -137,6 +137,33 @@ pub fn common_ancestor(invocation_dir: &Path, paths: &[PathBuf]) -> PathBuf {
     ancestor.unwrap_or_else(|| invocation_dir.to_path_buf())
 }
 
+/// The args pytest parses before it settles the rootdir: `PYTEST_ADDOPTS`
+/// ahead of argv, each `@argsfile` (one arg per line) expanded. Ini `addopts`
+/// join only after the rootdir is fixed, so they aren't here. Pass this, not
+/// the bare argv, to [`rootdir`]: a `--rootdir` / `-c` / path in
+/// `PYTEST_ADDOPTS` moves pytest's rootdir too.
+pub(crate) fn session_args(invocation_dir: &Path, args: &[String]) -> Vec<String> {
+    let mut all = std::env::var("PYTEST_ADDOPTS")
+        .map(|v| shell_split(&v))
+        .unwrap_or_default();
+    all.extend_from_slice(args);
+    all.into_iter()
+        .flat_map(|a| {
+            match a
+                .strip_prefix('@')
+                .map(|f| std::fs::read_to_string(invocation_dir.join(f)))
+            {
+                Some(Ok(body)) => body
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => vec![a],
+            }
+        })
+        .collect()
+}
+
 /// The directory pytest picks as rootdir for these session args, by the same
 /// rule as the vendored `determine_setup`: `--rootdir` wins; `-c FILE` anchors
 /// at FILE's directory; else the first directory from the args' common
@@ -1332,6 +1359,32 @@ worker-timeout = 120
             root.join("tests")
         );
         assert_eq!(rootdir(&root, &sv(&["-c", "tests/unit/x.ini"])), unit);
+    }
+
+    #[test]
+    fn rootdir_reads_pytest_addopts_and_argsfiles_like_pytest() {
+        // pytest puts PYTEST_ADDOPTS ahead of argv before it settles the
+        // rootdir, so a `--rootdir` there moves it; the argv alone does not.
+        let held = crate::test_env::lock();
+        let root = tmpdir("rootdir-addopts");
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("pytest.ini"), "").unwrap();
+        let args = sv(&["tests"]);
+        {
+            let _v = crate::test_env::set_var(&held, "PYTEST_ADDOPTS", "--rootdir=tests");
+            assert_eq!(
+                rootdir(&root, &session_args(&root, &args)),
+                root.join("tests")
+            );
+        }
+        let _v = crate::test_env::remove_var(&held, "PYTEST_ADDOPTS");
+        assert_eq!(rootdir(&root, &session_args(&root, &args)), root);
+        // An `@argsfile` is expanded first, its `--rootdir` included.
+        std::fs::write(root.join("args.txt"), "--rootdir=tests\ntests\n").unwrap();
+        assert_eq!(
+            rootdir(&root, &session_args(&root, &sv(&["@args.txt"]))),
+            root.join("tests")
+        );
     }
 
     #[test]
