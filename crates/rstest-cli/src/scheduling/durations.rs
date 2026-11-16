@@ -180,6 +180,16 @@ impl Collected {
         self.rootdir.get_or_insert_with(|| PathBuf::from(rootdir));
     }
 
+    /// pytest's rootdir, when it differs from `anchored` (the rootdir rstest
+    /// resolved itself and keyed the cache on). Cached nodeids are relative
+    /// to pytest's, file lookups to rstest's: on a mismatch none match, and
+    /// duration scheduling silently falls back to path order.
+    pub fn rootdir_mismatch(&self, anchored: &Path) -> Option<&Path> {
+        let real = self.rootdir.as_deref()?;
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        (canon(real) != canon(anchored)).then_some(real)
+    }
+
     /// Hash the source file of each collected nodeid not seen yet. A no-op
     /// until the rootdir is known, since the ids are relative to it.
     pub fn record<'a>(&mut self, ids: impl IntoIterator<Item = &'a String>) {
@@ -1918,6 +1928,26 @@ mod tests {
         c.set_rootdir(root.to_str().unwrap());
         c.record(ids.iter().copied());
         c
+    }
+
+    #[test]
+    fn rootdir_mismatch_names_pytests_rootdir_only_when_it_differs() {
+        let root = temp_root("mismatch");
+        let sub = root.join("tests");
+        std::fs::create_dir_all(&sub).unwrap();
+        let at = |dir: &Path| {
+            let mut c = Collected::default();
+            c.set_rootdir(dir.to_str().unwrap());
+            c
+        };
+        assert_eq!(at(&root).rootdir_mismatch(&root), None);
+        // pytest rooted below rstest's guess (`PYTEST_ADDOPTS=--rootdir=tests`).
+        assert_eq!(at(&sub).rootdir_mismatch(&root), Some(sub.as_path()));
+        assert_eq!(at(&root).rootdir_mismatch(&sub), Some(root.as_path()));
+        // Same dir spelled through `..` still matches (canonical compare).
+        assert_eq!(at(&sub.join("..")).rootdir_mismatch(&root), None);
+        // No worker reported one (single-session run): nothing to compare.
+        assert_eq!(Collected::default().rootdir_mismatch(&root), None);
     }
 
     #[test]

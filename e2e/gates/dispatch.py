@@ -288,6 +288,39 @@ def gate_lazy_collection(g, args, binary):
     )
 
 
+def gate_rootdir_mismatch_warning(g, args, binary):
+    print("== rootdir mismatch warning ==")
+    # The duration cache keys files on rstest's own rootdir guess and tests
+    # on pytest's real one; when they differ nothing matches and duration
+    # scheduling silently falls back to path order. rstest's guess reads
+    # argv only, so a `--rootdir` in PYTEST_ADDOPTS splits them.
+    g.write("rootmm/pytest.ini", "")
+    g.write("rootmm/tests/test_a.py", "def test_a(): pass\n")
+    g.write("rootmm/tests/test_b.py", "def test_b(): pass\n")
+    cwd = g.tmp / "rootmm"
+    for mode in ("full", "lazy"):
+        r = g.run("tests", "-n", "2", "--collect", mode, cwd=cwd)
+        check(
+            f"rootdir: no warning when pytest agrees ({mode})",
+            r.returncode == 0 and "rootdir" not in r.stderr,
+            r.stderr[-300:],
+        )
+        r = g.run(
+            "tests",
+            "-n",
+            "2",
+            "--collect",
+            mode,
+            cwd=cwd,
+            env_extra={"PYTEST_ADDOPTS": "--rootdir=tests"},
+        )
+        check(
+            f"rootdir: warns when pytest's rootdir differs ({mode})",
+            r.returncode == 0 and "differs from the one rstest resolved" in r.stderr,
+            r.stderr[-300:],
+        )
+
+
 def gate_serial_mark(g, args, binary):
     print("== serial mark ==")
     g.write("serial/test_serial.py", SERIAL)
