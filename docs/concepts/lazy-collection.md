@@ -22,10 +22,13 @@ strategy automatically. rstest picks `lazy` when all of these hold, and
   are both large; smaller suites keep full collection's locality.
 - **Dist:** `--dist load` (the default, implicit or explicit) or
   `--dist loadfile`.
-- **Selection:** no nodeid, no `--pyargs`, and no path selection (explicit
-  paths, or `--changed`/`--since-green` narrowing). The test count covers
-  the whole cached suite, so a run narrowed to a few files keeps full
-  collection's per-test spread across workers.
+- **Selection:** no nodeid and no path selection (explicit paths, or
+  `--changed`/`--since-green` narrowing). The test count covers the whole
+  cached suite, so a run narrowed to a few files keeps full collection's
+  per-test spread across workers. `--pyargs` names don't count as a
+  selection: each resolves to its package or module path, the file walk
+  starts there, and the walk check below confirms they cover the whole
+  cached suite.
 - **Features:** no `--shard`, `--shuffle`, `--incremental` or fail-fast
   `--order` (including the one `--watch` picks by default).
 - **Doctests:** none enabled (argv, ini `addopts` or `PYTEST_ADDOPTS`). Lazy
@@ -152,7 +155,12 @@ also overrides the auto default) or fix the tests.
   consolidate groups across a global nodeid list that lazy never builds.
 - `--dist each` is rejected too: it runs the full suite on every worker,
   so there is nothing to collect lazily.
-- Nodeid arguments (`tests/test_x.py::test_y`) and `--pyargs` fall
-  back to full collection automatically.
+- Nodeid arguments (`tests/test_x.py::test_y`) fall back to full
+  collection automatically.
+- `--pyargs` names resolve as pytest resolves them
+  (`importlib.util.find_spec`: a module's file, a package's directory), and
+  the file walk starts there. A name that doesn't resolve that way (a
+  namespace package, or one importable only through an ini `pythonpath`)
+  falls back to full collection with a warning.
 - Collection-time side effects of *unselected* files never happen:
   the point of the mode, and the trade documented above.

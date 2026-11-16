@@ -1386,7 +1386,7 @@ fn resolve_incremental(
     // full-collection pool. Refusing (not ignoring) matters: a user probing for
     // order dependence must not get a silently ordered run. `is_lazy` is computed
     // once and reused by the incremental gate below.
-    let is_lazy = collect_lazy(cli, settings, dist_name, args, n, cache, sink)?;
+    let is_lazy = collect_lazy(cli, settings, dist_name, &cfg.python, args, n, cache, sink)?;
     let shuffle_seed = resolve_shuffle_seed(
         cli.shuffle.as_deref(),
         n,
@@ -1807,11 +1807,8 @@ fn dispatch_run(
             }
             let cwd = std::env::current_dir()?;
             let project = config::discover(&cwd, sink.err());
-            let paths: Vec<PathBuf> = crate::cli::path_args(args)
-                .into_iter()
-                .filter(|a| !a.starts_with('@'))
-                .map(PathBuf::from)
-                .collect();
+            // `collect_lazy` already resolved these (memoized), so Some.
+            let paths = lazy_roots(python, args).unwrap_or_default();
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
@@ -2058,13 +2055,96 @@ const AUTO_LAZY_MIN_TESTS: usize = 2000;
 /// size and worker count; 2000 tests need >= 8 workers, 4000 need >= 4.
 const AUTO_LAZY_MIN_WORK: usize = 16_000;
 
-/// A nodeid positional (`tests/a.py::t`) or `--pyargs`: selections the lazy
-/// file walk can't see. Option values don't count: `-W default::X` and
-/// `--deselect a.py::t` hold `::` but select no test.
-fn selects_nodeids_or_pyargs(args: &[String]) -> bool {
+/// A nodeid positional (`tests/a.py::t`, or `pkg.mod::t` under `--pyargs`):
+/// a selection the lazy file walk can't see. Option values don't count:
+/// `-W default::X` and `--deselect a.py::t` hold `::` but select no test.
+fn selects_nodeids(args: &[String]) -> bool {
     args.iter()
         .zip(crate::cli::positional_mask(args))
-        .any(|(a, pos)| (pos && a.contains("::")) || a == "--pyargs")
+        .any(|(a, pos)| pos && a.contains("::"))
+}
+
+/// pytest's `search_pypath` (no namespace packages), run in the worker
+/// interpreter: one line per name, the module file or package directory, or
+/// empty when it doesn't resolve.
+const PYARGS_PROBE: &str = r#"
+import importlib.util, os, sys
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except (AttributeError, ImportError, ValueError):
+        spec = None
+    path = ""
+    if spec is not None:
+        if not spec.submodule_search_locations:
+            path = spec.origin or ""
+        elif spec.origin:
+            path = os.path.dirname(spec.origin)
+    print(path)
+"#;
+
+/// Where the lazy file walk starts: the positional paths, or under `--pyargs`
+/// each positional resolved as pytest does (a dotted name to its module or
+/// package, else the arg as a path). `None` when a `--pyargs` arg resolves to
+/// nothing pytest could collect: lazy can't reproduce that run.
+fn lazy_roots(python: &Path, args: &[String]) -> Option<Vec<PathBuf>> {
+    let positional = || {
+        args.iter()
+            .zip(crate::cli::positional_mask(args))
+            .filter(|(a, pos)| *pos && !a.starts_with('@'))
+            .map(|(a, _)| a.clone())
+    };
+    if !args.iter().any(|a| a == "--pyargs") {
+        return Some(
+            crate::cli::path_args(args)
+                .into_iter()
+                .filter(|a| !a.starts_with('@'))
+                .map(PathBuf::from)
+                .collect(),
+        );
+    }
+    let names: Vec<String> = positional().collect();
+    if names.is_empty() {
+        return Some(Vec::new());
+    }
+    // Resolved once per process: the lazy decision and the dispatch walk
+    // both ask. ponytail: sys.path is the bare interpreter's plus the cwd,
+    // so an ini `pythonpath` entry pytest adds is not seen; such a name
+    // stays unresolved and the run keeps full collection.
+    type Memo = std::collections::HashMap<(PathBuf, Vec<String>), Option<Vec<PathBuf>>>;
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    let key = (python.to_path_buf(), names.clone());
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return hit;
+    }
+    let resolved = (|| {
+        let mut cmd = std::process::Command::new(python);
+        cmd.args(["-c", PYARGS_PROBE])
+            .args(&names)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::scheduling::worker::scrub_secrets(&mut cmd);
+        let out = cmd.output().ok().filter(|o| o.status.success())?;
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (lines.len() == names.len()).then_some(())?;
+        names
+            .iter()
+            .zip(lines)
+            .map(|(name, found)| {
+                // Unresolved: pytest falls back to the arg as a path.
+                let p = PathBuf::from(if found.is_empty() { name } else { &found });
+                p.exists().then_some(p)
+            })
+            .collect::<Option<Vec<_>>>()
+    })();
+    if let Ok(mut m) = memo.lock() {
+        m.insert(key, resolved.clone());
+    }
+    resolved
 }
 
 /// Auto-default heuristic (only reached when neither `--collect` nor
@@ -2079,7 +2159,7 @@ fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
         && matches!(dist_name, "load" | "loadfile")
         // nodeid / --pyargs selection can't ride the file walk (same reason
         // explicit lazy falls back), so never auto-pick lazy for those.
-        && !selects_nodeids_or_pyargs(args)
+        && !selects_nodeids(args)
         // `tests` counts the whole cached suite, not the selection. A path
         // selection (explicit, or --changed/--since-green narrowing) can be a
         // handful of files, and auto-lazy's strict file affinity would cap
@@ -2176,10 +2256,12 @@ fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Re
 /// Resolve the collection strategy (CLI > [tool.rstest] > auto) and validate
 /// lazy-mode constraints. When neither the flag nor the setting is present,
 /// [`auto_lazy`] decides from suite size and worker count.
+#[allow(clippy::too_many_arguments)]
 fn collect_lazy(
     cli: &Cli,
     settings: &config::RstestSettings,
     dist_name: &str,
+    python: &Path,
     args: &[String],
     n: usize,
     cache: &DurationCache,
@@ -2197,12 +2279,19 @@ fn collect_lazy(
                 );
             }
             // Single-test selection by nodeid wants exact-item dispatch;
-            // --pyargs selects by import path, which the file walk can't
-            // see. Both fall back to full collection.
-            if selects_nodeids_or_pyargs(args) {
+            // a --pyargs name that doesn't resolve leaves the file walk
+            // nothing to start from. Both fall back to full collection.
+            if selects_nodeids(args) {
                 sink.warn(
-                    "rstest: nodeid/--pyargs arguments given; --collect lazy falls back \
+                    "rstest: nodeid arguments given; --collect lazy falls back \
                      to full collection",
+                );
+                return Ok(false);
+            }
+            if lazy_roots(python, args).is_none() {
+                sink.warn(
+                    "rstest: a --pyargs argument did not resolve to a module or \
+                     package path; --collect lazy falls back to full collection",
                 );
                 return Ok(false);
             }
@@ -2251,9 +2340,14 @@ fn collect_lazy(
                 return Ok(false);
             }
             // A walk error (a glob or missing `testpaths` entry, an unreadable
-            // dir) only means auto can't vouch for lazy: stay full, never fail
-            // a run that didn't ask for lazy.
-            let Ok(files) = collect::collect_test_files(&[], &project) else {
+            // dir) or an unresolved --pyargs name only means auto can't vouch
+            // for lazy: stay full, never fail a run that didn't ask for lazy.
+            // Under --pyargs the walk starts at the resolved packages; the
+            // cache then vouches that they are the whole suite it timed.
+            let Some(roots) = lazy_roots(python, args) else {
+                return Ok(false);
+            };
+            let Ok(files) = collect::collect_test_files(&roots, &project) else {
                 return Ok(false);
             };
             let rel: Vec<String> = files
@@ -3305,6 +3399,7 @@ mod tests {
             &cli(),
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3320,6 +3415,7 @@ mod tests {
             &cli(),
             &s,
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3330,6 +3426,7 @@ mod tests {
             &cli(),
             &s,
             "loadfile",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3346,6 +3443,7 @@ mod tests {
             &cli(),
             &s,
             "loadscope",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3356,6 +3454,7 @@ mod tests {
             &cli(),
             &s,
             "loadgroup",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3367,6 +3466,7 @@ mod tests {
             &cli(),
             &s,
             "each",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3387,18 +3487,20 @@ mod tests {
             &cli(),
             &s,
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &["test_x.py::test_a".to_string()],
             8,
             &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
-        // --pyargs selects by import path => full.
+        // A --pyargs name the interpreter can't resolve => full.
         assert!(!collect_lazy(
             &cli(),
             &s,
             "load",
-            &["--pyargs".to_string()],
+            std::path::Path::new("/nonexistent/python"),
+            &["--pyargs".to_string(), "no_such_pkg_xyz".to_string()],
             8,
             &DurationCache::default(),
             &mut Sink::captured().0
@@ -3412,6 +3514,7 @@ mod tests {
             &cli(),
             &settings_collect(Some("sometimes")),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3632,6 +3735,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3644,6 +3748,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3656,6 +3761,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3668,6 +3774,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3681,7 +3788,12 @@ mod tests {
         // Big suite, but nodeid/--pyargs selection and non-file-affine dists
         // can't ride the file walk => stay full.
         assert!(!auto_lazy("load", &["a.py::t".to_string()], 8, 100_000));
-        assert!(!auto_lazy("load", &["--pyargs".to_string()], 8, 100_000));
+        assert!(!auto_lazy(
+            "load",
+            &["pkg.mod::t".to_string(), "--pyargs".to_string()],
+            8,
+            100_000
+        ));
         assert!(!auto_lazy("loadscope", &[], 8, 100_000));
         assert!(!auto_lazy("loadgroup", &[], 8, 100_000));
     }
