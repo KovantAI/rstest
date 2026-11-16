@@ -155,6 +155,15 @@ fn file_batch(queue: &VecDeque<String>, weights: &HashMap<String, f64>, workers:
     take
 }
 
+/// Whether a worker takes another file batch: nothing left to collect and
+/// little left to run, counting its collected-but-undispatched ids. A busy
+/// worker must not hoard files an idle one could collect: lazy keeps file
+/// affinity by default, so nothing moves them later (pandas: one worker sat
+/// on 78k queued ids and kept taking files).
+fn wants_files(uncollected: usize, own_queue: usize, outstanding: usize, chunk: usize) -> bool {
+    uncollected == 0 && own_queue <= chunk && outstanding <= chunk
+}
+
 pub fn run_lazy_pool(
     cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
@@ -635,16 +644,16 @@ pub fn run_lazy_pool(
         let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
 
         // File assignment: a worker takes a batch of files (see
-        // `file_batch`), picked up when it has nothing left to collect and
-        // little left to run, counting its collected-but-undispatched ids (a
-        // busy worker must not hoard files an idle one could collect).
+        // `file_batch`) when `wants_files`.
         if !stopping {
             let workers = states.len();
             for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
-                if s.uncollected_files.is_empty()
-                    && s.own_queue.len() <= chunk
-                    && s.outstanding.len() <= chunk
-                {
+                if wants_files(
+                    s.uncollected_files.len(),
+                    s.own_queue.len(),
+                    s.outstanding.len(),
+                    chunk,
+                ) {
                     let take = file_batch(&file_queue, &file_weights, workers);
                     let paths: Vec<String> = file_queue.drain(..take).collect();
                     if !paths.is_empty() {
@@ -924,7 +933,7 @@ fn start_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_batch, order_files};
+    use super::{file_batch, order_files, wants_files};
     use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
 
@@ -955,6 +964,17 @@ mod tests {
         // The light tail goes back to the count cap.
         let tail: VecDeque<String> = q.into_iter().skip(8).collect();
         assert_eq!(file_batch(&tail, &weights, 8), 31);
+    }
+
+    #[test]
+    fn wants_files_only_when_idle_enough() {
+        assert!(wants_files(0, 0, 0, 64));
+        assert!(wants_files(0, 64, 64, 64)); // at the limit
+        assert!(!wants_files(1, 0, 0, 64)); // still collecting
+        assert!(!wants_files(0, 0, 65, 64)); // enough in flight
+                                             // Plenty queued but little in flight: took files before, piling the
+                                             // heaviest files on one worker.
+        assert!(!wants_files(0, 78_000, 10, 64));
     }
 
     #[test]
