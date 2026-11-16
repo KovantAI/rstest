@@ -54,6 +54,11 @@ A clean run here means none of the removed APIs below apply to you. Still
 check the [behavioral changes the probe won't catch](#behavioral-changes-the-w-probe-wont-catch),
 then go to step 3.
 
+On pytest older than 9.1 the probe can't see the deprecations 9.1 and 9.2
+added: your pytest doesn't raise them, rstest's 9.2.0 core does. Run it once
+more under rstest to list those too:
+`rstest -n 0 -W error::pytest.PytestDeprecationWarning`.
+
 !!! tip "No config change needed"
     `-W` is a command-line flag; it overrides your `filterwarnings` ini for
     this one run. Don't commit it yet: it's a probe, not the fix.
@@ -148,7 +153,7 @@ parallel. That's a *different* migration
 
 ## Already on pytest 9.0.x or 9.1.x?
 
-Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is three items:
+Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is four items:
 
 1. `importorskip` catches only `ModuleNotFoundError` by default (pass
    `exc_type=ImportError` to restore the old catch-all).
@@ -156,6 +161,12 @@ Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is three items:
 3. `PytestRemovedIn9Warning` no longer exists: delete any
    `ignore::pytest.PytestRemovedIn9Warning` entry from `filterwarnings`, or
    9.1 aborts the run with a usage error (see the warning in step 1).
+4. Passing an iterable that isn't a list or tuple (a generator,
+   `itertools.chain`, `zip`, `map`) as `parametrize`'s values warns
+   `PytestRemovedIn10Warning: Passing a non-Collection iterable to parametrize
+   is deprecated`. It keeps working, but under `filterwarnings = error` it is
+   a collection error. Wrap the values in `list(...)`. See
+   [Troubleshooting](../reference/troubleshooting.md#passing-a-non-collection-iterable-to-parametrize-is-deprecated-collection-error).
 
 The 9.1 → 9.2 delta:
 
@@ -171,7 +182,8 @@ The 9.1 → 9.2 delta:
    1.7.5 fails every forked test on 9.2; its fix is
    [pending upstream](https://github.com/pytest-dev/pytest-forked/pull/112).
 
-9.2 also starts the `PytestRemovedIn10Warning` cycle for module-, package-
+The `PytestRemovedIn10Warning` cycle started in 9.1 with non-list
+iterables passed to `parametrize` (item 4 above). 9.2 adds module-, package-
 and session-scoped fixtures defined as instance methods on a test class,
 non-string values for string-typed ini options, and `yield_fixture`. They
 warn today and keep working. Your current pytest doesn't know them yet, so

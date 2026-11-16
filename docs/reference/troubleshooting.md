@@ -108,6 +108,27 @@ the whole run (`PYTHONHASHSEED=0 rstest`). `rstest migrate-check` reports
 these sites as `UNSTABLE ORDER`. See
 [Unstable parametrize ids](../concepts/compatibility.md#unstable-parametrize-ids).
 
+## `Passing a non-Collection iterable to parametrize is deprecated` (collection error)
+
+```text
+E   pytest.PytestRemovedIn10Warning: Passing a non-Collection iterable to parametrize is deprecated.
+E   Test: tests/test_x.py::test_y, argvalues type: chain
+E   Please convert to a list or tuple.
+```
+
+The suite collects under your pytest but not under rstest. pytest 9.1
+deprecated passing an iterable that isn't a list or tuple (a generator,
+`itertools.chain`, `zip`, `map`) as `parametrize`'s values. It is only a
+warning, but a suite whose `filterwarnings` turns warnings into errors
+(`error`, or `error:::yourpackage`) fails collection on it. rstest always
+runs its vendored pytest 9.2.0 core, so a project still on pytest 9.0 or
+older meets it here first; plain pytest 9.1 or newer fails the same way.
+
+Fix the test: wrap the values in `list(...)`, as the message says. Until
+then, `-W ignore::pytest.PytestRemovedIn10Warning` on the command line, or
+the same filter in your `filterwarnings` ini, lets collection through. See
+[Upgrading to pytest 9](../guides/upgrade-to-pytest9.md#already-on-pytest-90x-or-91x).
+
 ## Tests fail once the cache is warm: `auto-selected lazy collection`
 
 A large suite that passed on its first runs starts failing after rstest
