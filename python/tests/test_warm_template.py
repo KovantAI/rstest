@@ -39,6 +39,8 @@ def test_filter_keeps_app_and_third_party_modules_in_import_order():
         "myhelpers.asserts": _mod("myhelpers.asserts", "/proj/myhelpers/asserts.py"),
         "numpy": _mod("numpy", "/venv/numpy/__init__.py"),
         "ctypes._endian": _mod("ctypes._endian", "/lib/ctypes/_endian.py"),  # the guards'
+        # ...and its C extension: a file on python.org's macOS build, builtin on uv's.
+        "_ctypes": _mod("_ctypes", "/lib/lib-dynload/_ctypes.cpython-313-darwin.so"),
     }
     out = warm.filter_modules(
         modules,
