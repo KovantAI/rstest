@@ -389,6 +389,12 @@ fn startup_line(r: &DoctorReport) -> Option<String> {
     if cfg!(unix) && !r.fork_prewarm && r.workers > 1 && pct >= 15.0 && r.startup_seconds >= 0.1 {
         line.push_str(" — try --fork-pool to prewarm the pool");
     }
+    if let Some(w) = &r.warm {
+        line.push_str(&format!(
+            "; warm template: {} modules ({} denied, {:.1}s import)",
+            w.modules, w.denied, w.seconds
+        ));
+    }
     Some(line)
 }
 
@@ -795,6 +801,18 @@ mod tests {
         assert!(
             !line.contains("--fork-pool"),
             "no hint when already forked: {line}"
+        );
+
+        // --fork-pool=app: the template's counts ride the same line.
+        r.warm = Some(crate::scheduling::warm::Stats {
+            modules: 312,
+            denied: 4,
+            seconds: 1.8,
+        });
+        let line = startup_line(&r).expect("startup line present");
+        assert!(
+            line.ends_with("; warm template: 312 modules (4 denied, 1.8s import)"),
+            "{line}"
         );
 
         // Tiny share: line still shown, but no hint (not worth acting on).

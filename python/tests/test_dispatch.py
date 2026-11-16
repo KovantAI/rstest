@@ -706,6 +706,26 @@ def test_lazy_collect_file_reports_its_own_deselected_items(tmp_path):
     assert conn.sent == [("file_collected", {"path": "t.py", "ids": ["t.py::a"], "deselected": 2})]
 
 
+def test_lazy_session_items_keep_every_collected_batch():
+    # Corpus regression (django-allauth, -n 8 on 4 cores): pytest's
+    # perform_collect REPLACES session.items with its own batch. A worker that
+    # collected a DB-free file after the first DB test's file but before
+    # running it left pytest-django's django_db_setup (which picks the test
+    # databases from session.items) with no DB test in view: it created no test
+    # database and every DB test on that worker failed with "no such table".
+    batches = iter([[FakeItem("a.py::uses_db")], [FakeItem("b.py::no_db")]])
+
+    def perform_collect(paths, genitems):
+        session.items = next(batches)  # what pytest's Session does
+        return session.items
+
+    session = SimpleNamespace(config=_CWD_CONFIG, items=[], perform_collect=perform_collect)
+    plugin, by_id = LazyDispatchPlugin(FakeConn()), {}
+    plugin._collect_files(session, ["a.py"], by_id)
+    plugin._collect_files(session, ["b.py"], by_id)
+    assert [it.nodeid for it in session.items] == ["a.py::uses_db", "b.py::no_db"]
+
+
 def _lazy_session(perform_collect, *, collectonly=False):
     calls: list[tuple[str, str | None]] = []
 

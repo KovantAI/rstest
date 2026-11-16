@@ -81,10 +81,11 @@ drop (`-k api` keeps `api` even when an `api/` directory exists; see
 
 ## Per-cycle cost
 
-Each cycle spawns fresh workers at every worker count (nothing is reused
-between cycles), so an edited module is always re-imported from scratch and a
-rerun cannot show a stale-import false green. The price is a small fixed cost
-on top of your tests' own time. Measured from save to result on a one-test
+Each cycle starts fresh workers at every worker count, so a rerun never runs
+against an edited module's old code. On macOS and Linux those workers are forked from a
+warm template that already imported your app
+([below](#warm-template)); on Windows each worker imports it again. Either
+way the price is a small fixed cost on top of your tests' own time. Measured from save to result on a one-test
 project (Apple M4 Max, rstest 0.11.0, CPython 3.13; median of 10 saves, min-max
 in parentheses):
 
@@ -97,6 +98,38 @@ The first column is the 300ms debounce plus file-event delivery; the rerun
 itself costs 140-165ms here, growing with `-n`. Reproduce with
 `python3 corpus/watch_cycle.py --out <file>`; the measured run is
 [`corpus/bench-results/2026-11-10-watch-cycle.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
+
+### Warm template { #warm-template }
+
+On macOS and Linux a watch session keeps one **template** process that has imported
+your app's modules (`--fork-pool=app`, the `--watch` default there), and forks
+each cycle's workers from it. A save then pays no app import. On a test file
+that imports scikit-learn (Apple M4 Max, rstest 0.11.1; 10 saves):
+
+| Worker count | Without the template | With it, from the 3rd save |
+|---|---|---|
+| `-n 2` | 897ms save to result (rerun 569-584ms) | 521ms (rerun 194-213ms) |
+| `-n 4` | 975ms save to result (rerun 645-668ms) | 539ms (rerun 215-227ms) |
+
+The first save records which modules your tests import, and the second builds
+the template from that record, so those two cost slightly more than without
+it. The record lives in `.rstest_cache/warm/` and carries over to the next
+session. Measured run:
+[`corpus/bench-results/2026-11-12-warm-template-watch-phase2.json`](https://github.com/KovantAI/rstest/tree/main/corpus/bench-results).
+
+The template is rebuilt before a cycle when anything it imported changed: a
+module file it loaded, an installed package (`site-packages` moved), your
+pytest config, or the modules your tests now import. An edit to a test file
+alone reuses it. A module whose import isn't safe to share across workers (it
+reads a worker's environment, starts a thread, opens a socket, and so on) is
+imported per worker instead and named once in an `rstest: note:` line; the
+full list is under [`--fork-pool`](../reference/cli.md#-fork-pool). If the
+template fails, that cycle spawns its workers the usual way, and after two
+failures in a row the session stops using it.
+
+It is off under coverage (`--cov`), which it doesn't support yet. To turn it
+off, pass `--fork-pool` (prewarm the pytest core only) or `--fork-pool=core`.
+Single-worker cycles (`-n 0`/`-n 1`) never use it.
 
 Selection is **incremental** across the session: the import graph stays warm,
 and each save re-parses only files whose mtime or size changed (adding or

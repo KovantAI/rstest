@@ -35,6 +35,11 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--fork-pool":
         _fork_pool(sys.argv[2:])
         return
+    # `--watch --fork-pool=app`: a template that outlives one run and forks a
+    # pool per watch cycle. See _template_server.
+    if len(sys.argv) > 1 and sys.argv[1] == "--template-server":
+        _template_server(sys.argv[2:])
+        return
     cmd_arg, evt_arg = int(sys.argv[1]), int(sys.argv[2])
     if os.name == "nt":
         # The orchestrator passes HANDLE values on Windows; convert to
@@ -80,6 +85,19 @@ def _fork_pool(argv: list[str]) -> None:
     triples = [(fds[3 * i], fds[3 * i + 1], fds[3 * i + 2]) for i in range(count)]
     all_fds = set(fds) | {report_fd, release_fd}
 
+    # `--fork-pool=app`: import the app's modules once, here, before forking.
+    manifest = os.environ.get("RSTEST_WARM_MANIFEST")
+    if manifest:
+        from rstest_worker._internal import warm
+
+        if not warm.prewarm(manifest, os.environ.get(warm.RESULT_ENV)):
+            # A guard fired: this process carries a side effect no child may
+            # share. Start over as a plain core zygote (same pid, same
+            # inherited pipe fds), and the next run skips the denied module.
+            os.environ.pop("RSTEST_WARM_MANIFEST")
+            sys.stderr.flush()
+            os.execv(sys.executable, [sys.executable, "-m", "rstest_worker", "--fork-pool", *argv])
+
     pids = []
     for idx, (cmd_fd, evt_fd, err_fd) in enumerate(triples):
         pid = os.fork()
@@ -95,6 +113,8 @@ def _fork_pool(argv: list[str]) -> None:
             sys.stderr.flush()
             os.dup2(err_fd, 2)
             os.close(err_fd)
+            if manifest:
+                warm.reseed_after_fork()
             os.environ["RSTEST_WORKER_ID"] = f"gw{idx}"
             # Exactly worker 0 ships the full id list (matches build_worker_command).
             os.environ["RSTEST_SEND_IDS"] = "1" if idx == 0 else "0"
@@ -129,6 +149,39 @@ def _fork_pool(argv: list[str]) -> None:
     os._exit(0)
 
 
+def _template_server(argv: list[str]) -> None:
+    """Template server entry: `--template-server <socket_path>`.
+
+    Imports the warm manifest once (`RSTEST_WARM_MANIFEST`), then serves fork
+    requests from the orchestrator for the whole watch session, so a cycle
+    pays no app import. Each forked worker connects back to the orchestrator's
+    socket (see template.serve). A guard that fires during the imports restarts
+    this process cold, as the per-run zygote does."""
+    manifest = os.environ.get("RSTEST_WARM_MANIFEST")
+    if manifest:
+        from rstest_worker._internal import warm
+
+        if not warm.prewarm(manifest, os.environ.get(warm.RESULT_ENV)):
+            os.environ.pop("RSTEST_WARM_MANIFEST")
+            sys.stderr.flush()
+            os.execv(
+                sys.executable, [sys.executable, "-m", "rstest_worker", "--template-server", *argv]
+            )
+    from rstest_worker._internal import template
+
+    template.serve(argv[0], _template_worker, warm_used=bool(manifest))
+
+
+def _template_worker(conn) -> None:
+    """A worker forked by the template server: serve, then exit the way a
+    spawned worker does."""
+    try:
+        _serve(conn)
+    except BrokenPipeError:
+        os._exit(0)
+    sys.exit(0)
+
+
 def _peak_rss() -> int | None:
     """This process's peak resident set size in bytes, None where it can't be
     read (no `resource` module on Windows). ru_maxrss is KiB on Linux, bytes
@@ -146,10 +199,23 @@ def _done(conn, exitstatus: int) -> None:
     peak = _peak_rss()
     if peak is not None:
         payload["peak_rss"] = peak
+    if os.environ.get("RSTEST_WARM_RECORD"):
+        from rstest_worker._internal import warm
+
+        if warm.recorded is not None:
+            payload["imported"] = warm.recorded
+            payload["rewrite"] = warm.rewrite_marked
+            payload["env"] = warm.env_changed
+            payload["sys_path"] = list(sys.path)
+            payload["coverage"] = warm.coverage_active()
     conn.send("done", payload)
 
 
 def _serve(conn) -> None:
+    if os.environ.get("RSTEST_WARM_RECORD"):
+        from rstest_worker._internal import warm
+
+        warm.env_at_start = dict(os.environ)
     for cmd in conn.commands():
         kind = cmd["kind"]
         if kind == "shutdown":

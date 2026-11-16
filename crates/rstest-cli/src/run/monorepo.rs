@@ -382,7 +382,7 @@ struct ChildSpec<'a> {
     durations_regress: Option<f64>,
     require_baseline: bool,
     incremental: bool,
-    fork_pool: bool,
+    fork_pool: Option<crate::scheduling::warm::ForkPool>,
 }
 
 /// Build the args appended to a child `rstest` process (after the env/pipe
@@ -512,8 +512,10 @@ fn build_child_args(spec: &ChildSpec) -> Vec<String> {
     if spec.incremental {
         a.push("--incremental".into());
     }
-    if spec.fork_pool {
-        a.push("--fork-pool".into());
+    match spec.fork_pool {
+        Some(crate::scheduling::warm::ForkPool::Core) => a.push("--fork-pool".into()),
+        Some(crate::scheduling::warm::ForkPool::App) => a.push("--fork-pool=app".into()),
+        None => {}
     }
     a
 }
@@ -740,7 +742,7 @@ mod tests {
             durations_regress: None,
             require_baseline: false,
             incremental: false,
-            fork_pool: false,
+            fork_pool: None,
         }
     }
 
@@ -798,7 +800,7 @@ mod tests {
         spec.durations_regress = Some(2.0);
         spec.require_baseline = true;
         spec.incremental = true;
-        spec.fork_pool = true;
+        spec.fork_pool = Some(crate::scheduling::warm::ForkPool::App);
 
         let args = build_child_args(&spec);
 
@@ -851,7 +853,7 @@ mod tests {
             "--reruns-only-known-flaky",
             "--incremental",
             "--shuffle=42",
-            "--fork-pool",
+            "--fork-pool=app",
         ] {
             assert!(args.iter().any(|a| a == flag), "missing {flag}: {args:?}");
         }
@@ -974,6 +976,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         let blocker =
@@ -996,6 +999,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // A real (writable) out and a temp part that exists: merge succeeds and

@@ -81,6 +81,7 @@ pub(super) fn run_collect_discovery(
         doctor: false,
         timeout: None,
         leakcheck: false,
+        warm: None,
         dead_master_scan: false,
         send_ids: true,
         debug_port: None,
@@ -360,7 +361,12 @@ mod tests {
             fold_collect_event(
                 proto::Event::Done {
                     exitstatus: 5,
-                    peak_rss: None
+                    peak_rss: None,
+                    imported: vec![],
+                    sys_path: vec![],
+                    coverage: false,
+                    rewrite: vec![],
+                    env: vec![],
                 },
                 &mut acc
             ),
