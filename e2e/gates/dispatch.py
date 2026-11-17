@@ -377,7 +377,7 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
         g.write(f"autolazy/{f}", body)
     cache = proj / ".rstest_cache"
 
-    def seed(collect):
+    def seed(collect, mode_walls=None):
         cache.mkdir(parents=True, exist_ok=True)
         timings = {
             f"{f}::test_x[{i}]": (40.0 if f == "test_big.py" else 10.0) / 500
@@ -390,6 +390,10 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
             (cache / "collect.json").write_text(
                 json.dumps({"secs": collect, "epoch": 0}), encoding="utf-8"
             )
+        # Every run records its mode's wall: start each check from a known one.
+        (cache / "mode_wall.json").unlink(missing_ok=True)
+        if mode_walls is not None:
+            (cache / "mode_wall.json").write_text(json.dumps(mode_walls), encoding="utf-8")
 
     def picked_lazy():
         r = g.run("-n", "8", cwd=proj)
@@ -407,6 +411,34 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
             lazy == want and r.returncode == 0,
             f"rc={r.returncode} " + r.stderr[-300:],
         )
+
+    # The outcome guard: with the budget allowing lazy, a recorded lazy run
+    # that took longer than the recorded full run (same workers, same suite)
+    # keeps auto on full collection; a faster one keeps lazy.
+    def walls(full_secs, lazy_secs):
+        run = lambda secs: {"secs": secs, "workers": 8, "tests": 2000, "epoch": 0}  # noqa: E731
+        return {"full": run(full_secs), "lazy": run(lazy_secs)}
+
+    for full_secs, lazy_secs, want, label in [
+        (10.0, 20.0, False, "lazy measured slower than full here: full"),
+        (20.0, 10.0, True, "lazy measured faster than full here: lazy"),
+    ]:
+        seed(40.0, walls(full_secs, lazy_secs))
+        lazy, r = picked_lazy()
+        check(
+            f"auto-lazy: {label}",
+            lazy == want and r.returncode == 0,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )
+    recorded_walls = json.loads((cache / "mode_wall.json").read_text())
+    check(
+        "auto-lazy: a parallel run records its mode's wall",
+        (recorded_walls.get("lazy") or {}).get("tests") == 2000
+        and (recorded_walls.get("lazy") or {}).get("workers") == 8
+        # seeded entries carry epoch 0; only a real recording stamps one
+        and (recorded_walls.get("lazy") or {}).get("epoch", 0) > 0,
+        f"mode_wall.json={recorded_walls}",
+    )
     seed(None)
     r = g.run("-n", "8", "--collect", "full", cwd=proj)
     recorded = (

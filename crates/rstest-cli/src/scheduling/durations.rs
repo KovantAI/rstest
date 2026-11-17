@@ -383,6 +383,72 @@ pub fn load_collect() -> Option<f64> {
     load_stamped_in(&cache::dir(), COLLECT_FILE)
 }
 
+/// The last parallel run's wall time per collection mode, so the automatic
+/// lazy choice can see where lazy collection measured slower than full and
+/// stop picking it. Same TTL as [`WALL_FILE`]: an aged-out record lets auto
+/// try lazy again.
+pub const MODE_WALL_FILE: &str = "mode_wall.json";
+
+/// One mode's last recorded run.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModeWall {
+    pub secs: f64,
+    pub workers: usize,
+    /// Tests the run reported: a narrowed run (paths, `-k`, a shard) is not
+    /// comparable with a whole-suite one.
+    pub tests: usize,
+    #[serde(default)]
+    pub epoch: u64,
+}
+
+/// The last full- and lazy-collection runs, each `None` until recorded (or
+/// once aged out).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct ModeWalls {
+    pub full: Option<ModeWall>,
+    pub lazy: Option<ModeWall>,
+}
+
+/// Record a parallel run's wall time under its collection mode.
+pub fn save_mode_wall(lazy: bool, secs: f64, workers: usize, tests: usize) {
+    let path = cache::file(MODE_WALL_FILE);
+    cache::with_lock(|| {
+        let mut walls: ModeWalls = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let w = Some(ModeWall {
+            secs,
+            workers,
+            tests,
+            epoch: crate::time::now_epoch_secs(),
+        });
+        if lazy {
+            walls.lazy = w;
+        } else {
+            walls.full = w;
+        }
+        if let Ok(bytes) = serde_json::to_vec(&walls) {
+            let _ = cache::write_atomic(&path, &bytes);
+        }
+    });
+}
+
+/// The recorded per-mode walls, aged-out ones dropped.
+pub fn load_mode_walls() -> ModeWalls {
+    let mut walls: ModeWalls = std::fs::read(cache::file(MODE_WALL_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let (now, ttl) = (crate::time::now_epoch_secs(), wall_ttl_secs());
+    for w in [&mut walls.full, &mut walls.lazy] {
+        if w.is_some_and(|m| wall_expired(m.epoch, now, ttl)) {
+            *w = None;
+        }
+    }
+    walls
+}
+
 fn save_stamped(name: &str, secs: f64) {
     let w = Wall {
         secs,

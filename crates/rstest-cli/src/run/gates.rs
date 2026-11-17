@@ -837,6 +837,16 @@ pub(super) fn run_post_gates(
         if let Some(secs) = outcome.collect_seconds {
             durations::save_collect(secs);
         }
+        // The wall per collection mode, so auto-lazy can stop picking lazy
+        // where it measured slower. Parallel pool runs only.
+        if n >= 2 && !passthrough {
+            durations::save_mode_wall(
+                outcome.lazy,
+                start.elapsed().as_secs_f64(),
+                n,
+                outcome.run.tests().len(),
+            );
+        }
         // The workers' peak RSS, for the next memory-aware `-n auto`.
         if let Some(peak) = outcome.peak_rss {
             crate::scheduling::memory::record(peak);
@@ -2443,6 +2453,7 @@ mod tests {
             peak_rss: None,
             sources: Default::default(),
             collect_seconds: None,
+            lazy: false,
             exiting: Vec::new(),
         };
         let (mut sink, _cap) = Sink::captured();

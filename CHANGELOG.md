@@ -86,8 +86,24 @@ between 0.x releases and are listed here.
   silently ignores them. The warning names both directories; pass
   `--rootdir` to pin it.
 
+- **The automatic lazy choice learns from its own runs.** rstest records each
+  parallel run's wall time per collection mode (`.rstest_cache/mode_wall.json`),
+  and once lazy has measured more than 5% slower than full at the same worker
+  count on about the same suite, it keeps full collection there. Its other
+  checks can't see every cost: a suite of 360 files in one flat `tests/`
+  directory, whose files share one-time setup, passed them all yet ran 52s
+  under lazy against 47s full. Records age out like `wall.json`, and auto then
+  tries lazy again.
+
 ### Fixes
 
+- **Lazy collection keeps related files together.** It handed out every file
+  heaviest first, which scattered neighbouring files (often sharing imports
+  and fixtures) over all the workers, so each paid their one-time setup: a
+  360-file suite in one flat `tests/` directory took 65s under lazy against
+  53s now. Files now go out in path order, and only the long poles (a file
+  of at least a sixteenth of one worker's share of the cached time) go
+  first, so none starts late. pandas is unchanged (35-36s at `-n 8`).
 - **A `--rootdir` in `PYTEST_ADDOPTS` now moves `.rstest_cache` too.**
   pytest reads `PYTEST_ADDOPTS` (and expands `@argsfile`s) before it settles
   the rootdir, but rstest read the command line only, so it kept the cache

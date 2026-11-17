@@ -39,6 +39,11 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   heaviest test file run that much past its per-worker share before it keeps
   full collection ([Lazy collection](lazy-collection.md)). Same TTL as
   `wall.json`. Safe to delete; the choice then allows one second.
+- `mode_wall.json`: the last parallel run's wall time under each collection
+  mode (full and lazy), with its worker count and test count. When lazy took
+  longer than full at the same worker count, the automatic choice keeps full
+  collection ([Lazy collection](lazy-collection.md)). Same TTL as `wall.json`.
+  Safe to delete; the choice then goes by the other checks alone.
 - `flakes.json`: sparse record of tests that flaked (passed only on rerun,
   via [`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`) or
   hard-failed, quarantined failures included. Used to surface repeat

@@ -102,14 +102,28 @@ impl WorkerState {
     }
 }
 
-/// Order files by cached duration totals, biggest first (long-pole files
-/// must start early); files with no cache data follow in path order. Returns
-/// cwd-relative paths (what workers are sent) and the known totals by path.
+/// A file at least `1 / POLE_SHARE` of a worker's share of the cached time is
+/// a long pole and goes first. Measured 2026-11-17, warm cache, against the
+/// all-by-weight order: 16 kept pandas (`-n 8`) at 35.5s against 36.2s and cut
+/// agent-platform-backend (14 workers) from 65.1s to 52.7s; 4 cut that suite
+/// to 49.3s but cost pandas 2.6s (only 2 of its files counted as poles, so its
+/// many medium files started late), 8 sat in between.
+const POLE_SHARE: usize = 16;
+
+/// Order files for dispatch: the long poles first, biggest first, so they
+/// can't end the run late; every other file in path order (the walk's), so
+/// neighbouring files, which tend to share imports and fixtures, reach the
+/// same worker. A long pole is a file whose cached total is at least
+/// `total / (POLE_SHARE * workers)`. Sorting every file by weight scattered
+/// related files over all workers, so each paid their one-time setup.
+/// Returns cwd-relative paths (what workers are sent) and the known totals by
+/// path.
 fn order_files(
     files: Vec<PathBuf>,
     cache: &HashMap<String, f64>,
     cwd: &Path,
     root: &Path,
+    workers: usize,
 ) -> (Vec<String>, HashMap<String, f64>) {
     // The duration cache keys on nodeids relative to the rootdir; group
     // totals by the file prefix.
@@ -118,18 +132,21 @@ fn order_files(
         let file = id.split("::").next().unwrap_or(id);
         *totals.entry(file.to_string()).or_insert(0.0) += secs;
     }
-    let mut known: Vec<(String, f64)> = Vec::new();
-    let mut unknown: Vec<String> = Vec::new();
+    let mut weights: HashMap<String, f64> = HashMap::new();
+    let mut walked: Vec<String> = Vec::new();
     for f in files {
         let rel = crate::scheduling::durations::file_key(&f, cwd, cwd);
-        match totals.get(&crate::scheduling::durations::file_key(&f, cwd, root)) {
-            Some(&t) => known.push((rel, t)),
-            None => unknown.push(rel),
+        if let Some(&t) = totals.get(&crate::scheduling::durations::file_key(&f, cwd, root)) {
+            weights.insert(rel.clone(), t);
         }
+        walked.push(rel);
     }
-    known.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let weights = known.iter().cloned().collect();
-    let order = known.into_iter().map(|(f, _)| f).chain(unknown).collect();
+    let cut = weights.values().sum::<f64>() / (POLE_SHARE * workers.max(1)) as f64;
+    let is_pole = |f: &String| weights.get(f).is_some_and(|&w| w > 0.0 && w >= cut);
+    let mut poles: Vec<String> = walked.iter().filter(|f| is_pole(f)).cloned().collect();
+    poles.sort_by(|a, b| weights[b].total_cmp(&weights[a]));
+    let rest = walked.into_iter().filter(|f| !is_pole(f));
+    let order = poles.into_iter().chain(rest).collect();
     (order, weights)
 }
 
@@ -222,7 +239,7 @@ pub fn run_lazy_pool(
 
     let cwd = std::env::current_dir()?;
     let (file_order, file_weights) =
-        order_files(files, duration_cache, &cwd, &crate::cache::base_dir());
+        order_files(files, duration_cache, &cwd, &crate::cache::base_dir(), n);
     let mut file_queue: VecDeque<String> = file_order.into();
 
     let continue_on_collect_errors = args.iter().any(|a| a == "--continue-on-collection-errors");
@@ -906,6 +923,7 @@ pub fn run_lazy_pool(
         // on pandas at -n 14), and lazy runs refreshing it would ratchet the
         // auto-lazy budget up. Only eager runs measure what lazy saves.
         collect_seconds: None,
+        lazy: true,
         exiting,
     })
 }
@@ -1008,7 +1026,7 @@ mod tests {
             ("test_b.py::t".to_string(), 5.0),
             // test_c.py absent => unknown, ordered last in input order.
         ]);
-        let ordered = order_files(files, &cache, cwd, cwd).0;
+        let ordered = order_files(files, &cache, cwd, cwd, 1).0;
         assert_eq!(ordered, vec!["test_b.py", "test_a.py", "test_c.py"]);
     }
 
@@ -1024,7 +1042,7 @@ mod tests {
             ("tests/test_a.py::t".to_string(), 1.0),
             ("tests/test_b.py::t".to_string(), 5.0),
         ]);
-        let ordered = order_files(files, &cache, cwd, cwd).0;
+        let ordered = order_files(files, &cache, cwd, cwd, 1).0;
         assert_eq!(ordered, vec!["tests/test_b.py", "tests/test_a.py"]);
     }
 
@@ -1042,15 +1060,53 @@ mod tests {
             ("tests/test_a.py::t".to_string(), 1.0),
             ("tests/test_b.py::t".to_string(), 5.0),
         ]);
-        let ordered = order_files(files, &cache, cwd, Path::new("/proj/pkg")).0;
+        let ordered = order_files(files, &cache, cwd, Path::new("/proj/pkg"), 1).0;
         assert_eq!(ordered, vec!["pkg/tests/test_b.py", "pkg/tests/test_a.py"]);
+    }
+
+    #[test]
+    fn order_files_puts_only_long_poles_first_and_keeps_path_order() {
+        // agent-platform-backend: one flat tests/ dir whose neighbouring files
+        // share imports and fixtures. Sorting every file by weight scattered
+        // them over the workers (65.1s against 52.7s); only a long pole
+        // (total / (POLE_SHARE * workers) or more) jumps the queue.
+        let cwd = Path::new("/proj");
+        let names = [
+            "test_a.py",
+            "test_b.py",
+            "test_big.py",
+            "test_c.py",
+            "test_d.py",
+        ];
+        let files: Vec<PathBuf> = names.iter().map(|n| cwd.join(n)).collect();
+        let cache = HashMap::from([
+            ("test_a.py::t".to_string(), 0.5),
+            ("test_b.py::t".to_string(), 0.1),
+            ("test_big.py::t".to_string(), 20.0),
+            ("test_c.py::t".to_string(), 0.4),
+            ("test_d.py::t".to_string(), 0.2),
+        ]);
+        // 21.2s over 2 workers: the pole cut is 21.2 / (16 * 2) = 0.66s, so
+        // only test_big leads; the light files keep path order, not weight
+        // order.
+        let ordered = order_files(files, &cache, cwd, cwd, 2).0;
+        assert_eq!(
+            ordered,
+            vec![
+                "test_big.py",
+                "test_a.py",
+                "test_b.py",
+                "test_c.py",
+                "test_d.py"
+            ]
+        );
     }
 
     #[test]
     fn order_files_all_unknown_keeps_input_order() {
         let cwd = Path::new("/proj");
         let files = vec![PathBuf::from("/proj/z.py"), PathBuf::from("/proj/a.py")];
-        let ordered = order_files(files, &HashMap::new(), cwd, cwd).0;
+        let ordered = order_files(files, &HashMap::new(), cwd, cwd, 1).0;
         assert_eq!(ordered, vec!["z.py", "a.py"]); // no cache => unchanged
     }
 
@@ -1060,7 +1116,7 @@ mod tests {
         // unmatched by the cwd-relative cache keys, lands in the unknown tail.
         let cwd = Path::new("/proj");
         let files = vec![PathBuf::from("/other/test_x.py")];
-        let ordered = order_files(files, &HashMap::new(), cwd, cwd).0;
+        let ordered = order_files(files, &HashMap::new(), cwd, cwd, 1).0;
         assert_eq!(ordered, vec!["/other/test_x.py"]);
     }
 }

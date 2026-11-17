@@ -248,6 +248,9 @@ pub struct PoolOutcome {
     /// long-pole budget (see `durations::COLLECT_FILE`). `None` when no worker
     /// reported it (single session, lazy pool).
     pub collect_seconds: Option<f64>,
+    /// The run used lazy collection (its wall is recorded per mode, see
+    /// `durations::MODE_WALL_FILE`).
+    pub lazy: bool,
     /// Workers already sent `Shutdown` but not yet reaped, so their teardown
     /// (atexit handlers, coverage data files) overlaps the post-run saves.
     /// Reap with [`PoolOutcome::reap_workers`] before reading anything they
@@ -1707,6 +1710,7 @@ pub fn run_pool(
             collect_times.sort_by(f64::total_cmp);
             crate::explain::median(&collect_times)
         },
+        lazy: false,
         exiting,
     })
 }
