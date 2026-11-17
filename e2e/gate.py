@@ -82,6 +82,7 @@ from gates.misc import (
     gate_lone_surrogate_in_report,
     gate_network_guard,
     gate_worker_identity_fixtures,
+    gate_worker_version_mismatch,
 )
 from gates.monorepo import (
     gate_monorepo,
@@ -218,6 +219,7 @@ def main():
         gate_failures_by_cause,
         gate_network_guard,
         gate_worker_identity_fixtures,
+        gate_worker_version_mismatch,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
         gate_crash_handling,

@@ -16,6 +16,24 @@ _vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 if _vendor not in sys.path:
     sys.path.insert(0, _vendor)
 
+# The orchestrator (the `rstest` command) and this worker exchange messages
+# whose shape changes between releases. A `rstest` on PATH newer or older than
+# the one installed in the project's environment would otherwise run this
+# worker silently and can hang or misreport, so refuse up front. Unset when
+# something other than the orchestrator starts the worker.
+from rstest_worker._version import __version__ as _worker_version
+
+_orchestrator_version = os.environ.get("RSTEST_ORCHESTRATOR_VERSION")
+if _orchestrator_version and _orchestrator_version != _worker_version:
+    sys.stderr.write(
+        f"rstest: version mismatch: the rstest command is {_orchestrator_version}, "
+        f"but the rstest installed in {sys.executable}'s environment is "
+        f"{_worker_version}. Install the same version in both "
+        f"(e.g. `pip install rstest=={_orchestrator_version}` in that environment, "
+        f"or run that environment's own rstest).\n"
+    )
+    sys.exit(4)
+
 # Absolute (not relative) imports: multiprocessing-spawn and anyio
 # to_process re-execute the parent's __main__ file via runpy without
 # package context, where relative imports raise ImportError.

@@ -102,6 +102,13 @@ between 0.x releases and are listed here.
   rstest runs the suite again without the template instead of failing, and
   records the template afresh next time. A run where tests already ran still
   fails, so their side effects are never repeated.
+- **rstest refuses a worker of another version.** The `rstest` command and
+  the rstest installed in the project's environment (whose worker runs the
+  tests) can differ, for example a `uv tool` or `pipx` install next to a
+  project that pins an older release. They exchange messages that change
+  between releases, and a mismatched pair could misreport or hang a run. Each
+  worker now checks the command's version at startup and exits with a message
+  naming both versions and how to fix it.
 - **A `--rootdir` in `PYTEST_ADDOPTS` now moves `.rstest_cache` too.**
   pytest reads `PYTEST_ADDOPTS` (and expands `@argsfile`s) before it settles
   the rootdir, but rstest read the command line only, so it kept the cache
