@@ -19,8 +19,9 @@
 //! `-c` and the path arguments); a later load never has to guess it. It is kept
 //! relative to the rootdir (the project the cache belongs to) so a cache restored
 //! into a checkout at another path still resolves. An entry whose source the
-//! run could not locate is stored untagged and kept as-is, like the pre-#18
-//! bare timings.
+//! run could not locate is stored untagged, like the pre-#18 bare timings: it
+//! has no hash to check, so it is kept while its test file exists under the
+//! rootdir.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -217,9 +218,9 @@ fn project_base() -> PathBuf {
     cache::base_dir()
 }
 
-/// Keep untagged entries and tagged ones whose source still hashes as
-/// recorded; drop edited bodies and vanished files. `base` resolves a relative
-/// `src` (the rootdir).
+/// Keep tagged entries whose source still hashes as recorded and untagged
+/// ones whose test file still exists; drop edited bodies and vanished files.
+/// `base` resolves a relative `src` and an id's file (the rootdir).
 fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
     let mut check = Freshness::new(base);
     map.into_iter()
@@ -234,6 +235,7 @@ fn fresh(map: HashMap<String, Timing>, base: &Path) -> HashMap<String, Timing> {
 struct Freshness<'a> {
     base: &'a Path,
     current: HashMap<String, Option<String>>,
+    exists: HashMap<String, bool>,
 }
 
 impl<'a> Freshness<'a> {
@@ -241,12 +243,22 @@ impl<'a> Freshness<'a> {
         Freshness {
             base,
             current: HashMap::new(),
+            exists: HashMap::new(),
         }
     }
 
     fn keep(&mut self, id: &str, t: &Timing) -> bool {
         if !t.is_tagged() {
-            return true;
+            // No hash to check, but a live test's file exists under the
+            // rootdir. One that doesn't was keyed under another rootdir (or
+            // deleted): it never recurs, and kept forever it fails auto-lazy's
+            // walk check (pandas' cache carried 177k such ids).
+            let base = self.base;
+            let file = crate::text::nodeid_file(id);
+            return *self
+                .exists
+                .entry(file.to_string())
+                .or_insert_with(|| base.join(file).exists());
         }
         // `src` is recorded as `rootdir/<the id's own file>`, relative to the
         // cache base when under it, so it always ends with the id's file. One
@@ -351,12 +363,33 @@ enum StoredWall {
 
 /// Record this run's total wall time for the project.
 pub fn save_wall(secs: f64) {
+    save_stamped(WALL_FILE, secs);
+}
+
+/// Seconds one full-collection worker spends collecting the whole suite: what
+/// each worker saves under lazy collection, the budget auto-lazy weighs a long
+/// pole against: the workers' median collection phase in the last full-
+/// collection pool run (under that run's contention). Lazy runs leave it as is.
+/// Same shape and TTL as [`WALL_FILE`].
+pub const COLLECT_FILE: &str = "collect.json";
+
+/// Record this run's per-worker whole-suite collection seconds.
+pub fn save_collect(secs: f64) {
+    save_stamped(COLLECT_FILE, secs);
+}
+
+/// The last recorded per-worker collection seconds, if still within the TTL.
+pub fn load_collect() -> Option<f64> {
+    load_stamped_in(&cache::dir(), COLLECT_FILE)
+}
+
+fn save_stamped(name: &str, secs: f64) {
     let w = Wall {
         secs,
         epoch: crate::time::now_epoch_secs(),
     };
     if let Ok(bytes) = serde_json::to_vec(&w) {
-        let _ = cache::write_atomic(&cache::file(WALL_FILE), &bytes);
+        let _ = cache::write_atomic(&cache::file(name), &bytes);
     }
 }
 
@@ -385,7 +418,11 @@ fn wall_expired(epoch: u64, now: u64, max_age: u64) -> bool {
 /// Last run's wall seconds from a project's cache dir, if recorded and still
 /// within the TTL.
 pub fn load_wall_in(cache_dir: &Path) -> Option<f64> {
-    let bytes = std::fs::read(cache_dir.join(WALL_FILE)).ok()?;
+    load_stamped_in(cache_dir, WALL_FILE)
+}
+
+fn load_stamped_in(cache_dir: &Path, name: &str) -> Option<f64> {
+    let bytes = std::fs::read(cache_dir.join(name)).ok()?;
     let w: Wall = match serde_json::from_slice::<StoredWall>(&bytes).ok()? {
         StoredWall::Tagged(w) => w,
         StoredWall::Bare(secs) => Wall { secs, epoch: 0 },
@@ -2054,12 +2091,23 @@ mod tests {
     }
 
     #[test]
-    fn fresh_keeps_untagged_entries_unconditionally() {
-        // No recorded source (legacy, or a run that could not locate it): never
-        // invalidated, whatever the working tree looks like.
+    fn fresh_keeps_untagged_entries_only_while_their_file_exists() {
+        // No recorded source (legacy, or a run that could not locate it): no
+        // hash to check, so kept while the id's file exists under the rootdir.
+        // pandas 2026-11-16: 177k untagged ids keyed under another rootdir
+        // (`tests/...` where the rootdir holds `venv/.../pandas/tests/...`)
+        // were kept forever and made auto-lazy's walk check fail.
         let root = temp_root("untagged");
-        let m = HashMap::from([("gone.py::t".to_string(), Timing::untagged(1.0))]);
-        assert_eq!(fresh(m, &root).len(), 1);
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/test_a.py"), b"a\n").unwrap();
+        let m = HashMap::from([
+            ("pkg/test_a.py::t".to_string(), Timing::untagged(1.0)),
+            ("pkg/test_a.py::u[1]".to_string(), Timing::untagged(1.0)),
+            ("tests/test_a.py::t".to_string(), Timing::untagged(1.0)),
+        ]);
+        let kept = fresh(m, &root);
+        assert_eq!(kept.len(), 2);
+        assert!(!kept.contains_key("tests/test_a.py::t"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2174,6 +2222,7 @@ mod tests {
         // untagged and is kept rather than dropped on the next load.
         let root = temp_root("norootdir");
         std::fs::write(root.join("test_k.py"), b"k\n").unwrap();
+        std::fs::write(root.join("test_n.py"), b"n\n").unwrap();
         let (k, n) = ("test_k.py::t".to_string(), "test_n.py::t".to_string());
         let path = root.join(FILE);
         persist_to(

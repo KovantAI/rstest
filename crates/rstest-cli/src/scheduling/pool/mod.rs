@@ -244,6 +244,10 @@ pub struct PoolOutcome {
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
+    /// Seconds one worker spends collecting the whole suite, for auto-lazy's
+    /// long-pole budget (see `durations::COLLECT_FILE`). `None` when no worker
+    /// reported it (single session, lazy pool).
+    pub collect_seconds: Option<f64>,
     /// Workers already sent `Shutdown` but not yet reaped, so their teardown
     /// (atexit handlers, coverage data files) overlaps the post-run saves.
     /// Reap with [`PoolOutcome::reap_workers`] before reading anything they
@@ -425,6 +429,8 @@ pub fn run_pool(
     // overstates the other.
     let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut startup_seconds = 0.0f64;
+    // Each worker's collection phase (seconds), for `PoolOutcome::collect_seconds`.
+    let mut collect_times: Vec<f64> = Vec::new();
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
@@ -705,7 +711,9 @@ pub fn run_pool(
                 confcutdir: _,
                 maxfail: reported_maxfail,
                 deselected,
+                collect_seconds,
             }) => {
+                collect_times.extend(collect_seconds);
                 run.deselected = run.deselected.max(deselected);
                 // pytest's own resolution (argv + addopts, last wins) is
                 // authoritative; it arrives before any item is dispatched.
@@ -1695,6 +1703,10 @@ pub fn run_pool(
         warm: None,
         sources,
         peak_rss,
+        collect_seconds: {
+            collect_times.sort_by(f64::total_cmp);
+            crate::explain::median(&collect_times)
+        },
         exiting,
     })
 }

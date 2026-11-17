@@ -361,6 +361,66 @@ def gate_rootdir_matches_pytest(g, args, binary):
         )
 
 
+def gate_auto_lazy_long_pole_budget(g, args, binary):
+    print("== auto-lazy long-pole budget ==")
+    # Auto-lazy keeps full collection when one file would run long past its
+    # per-worker share, unless lazy saves more than that: every eager worker
+    # re-collects the whole suite, which collect.json records. 2,000 tests x
+    # 8 workers clears the size gate; the seeded timings put test_big.py ~31s
+    # past its share. Every run rewrites both caches, so each check re-seeds.
+    proj = g.tmp / "autolazy"
+    shutil.rmtree(proj, ignore_errors=True)
+    g.write("autolazy/pytest.ini", "")
+    body = "import pytest\n@pytest.mark.parametrize('i', range(500))\ndef test_x(i): pass\n"
+    files = ["test_big.py", "test_a.py", "test_b.py", "test_c.py"]
+    for f in files:
+        g.write(f"autolazy/{f}", body)
+    cache = proj / ".rstest_cache"
+
+    def seed(collect):
+        cache.mkdir(parents=True, exist_ok=True)
+        timings = {
+            f"{f}::test_x[{i}]": (40.0 if f == "test_big.py" else 10.0) / 500
+            for f in files
+            for i in range(500)
+        }
+        (cache / "durations.json").write_text(json.dumps(timings), encoding="utf-8")
+        (cache / "collect.json").unlink(missing_ok=True)
+        if collect is not None:
+            (cache / "collect.json").write_text(
+                json.dumps({"secs": collect, "epoch": 0}), encoding="utf-8"
+            )
+
+    def picked_lazy():
+        r = g.run("-n", "8", cwd=proj)
+        return r.returncode == 0 and "auto-selected lazy" in r.stderr, r
+
+    for collect, want, label in [
+        (None, False, "no collection recorded: the 1s floor keeps full"),
+        (40.0, True, "collection lazy saves covers the long pole: lazy"),
+        (5.0, False, "too little collection saved: full"),
+    ]:
+        seed(collect)
+        lazy, r = picked_lazy()
+        check(
+            f"auto-lazy: {label}",
+            lazy == want and r.returncode == 0,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )
+    seed(None)
+    r = g.run("-n", "8", "--collect", "full", cwd=proj)
+    recorded = (
+        json.loads((cache / "collect.json").read_text())
+        if (cache / "collect.json").exists()
+        else {}
+    )
+    check(
+        "auto-lazy: a full-collection run records collect.json",
+        r.returncode == 0 and recorded.get("secs", 0) > 0,
+        f"rc={r.returncode} collect.json={recorded}",
+    )
+
+
 def gate_serial_mark(g, args, binary):
     print("== serial mark ==")
     g.write("serial/test_serial.py", SERIAL)

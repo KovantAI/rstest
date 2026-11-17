@@ -102,6 +102,7 @@ class SessionRootsPayload(TypedDict, total=False):
 
 class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
     deselected: int  # items pytest deselected (-k/-m, hooks), only when > 0
+    collect_seconds: float  # this worker's whole collection phase
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     # Discovery's lone worker only (no RSTEST_WORKER_ID), not the pool's gw0.

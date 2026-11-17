@@ -292,6 +292,7 @@ mod tests {
             confcutdir: None,
             maxfail: None,
             deselected: 0,
+            collect_seconds: None,
         }
     }
 

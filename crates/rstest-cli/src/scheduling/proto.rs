@@ -341,6 +341,11 @@ pub enum Event {
         /// Every worker collects and deselects the same items.
         #[serde(default)]
         deselected: u64,
+        /// Seconds this worker spent in pytest's collection phase: the
+        /// whole-suite collection every full-pool worker repeats, which lazy
+        /// collection saves (auto-lazy weighs it).
+        #[serde(default)]
+        collect_seconds: Option<f64>,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -750,7 +755,7 @@ mod property {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
                 rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
-                deselected,
+                deselected, collect_seconds: None,
             }
         }
     }

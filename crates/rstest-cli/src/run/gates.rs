@@ -833,6 +833,10 @@ pub(super) fn run_post_gates(
         // real elapsed cost here, so weighting by call time alone starves it
         // to one worker on the warm run. See `mono::project_cost`.
         durations::save_wall(start.elapsed().as_secs_f64());
+        // Per-worker whole-suite collection, auto-lazy's long-pole budget.
+        if let Some(secs) = outcome.collect_seconds {
+            durations::save_collect(secs);
+        }
         // The workers' peak RSS, for the next memory-aware `-n auto`.
         if let Some(peak) = outcome.peak_rss {
             crate::scheduling::memory::record(peak);
@@ -2438,6 +2442,7 @@ mod tests {
             warm: None,
             peak_rss: None,
             sources: Default::default(),
+            collect_seconds: None,
             exiting: Vec::new(),
         };
         let (mut sink, _cap) = Sink::captured();
