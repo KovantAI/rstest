@@ -62,8 +62,49 @@ between 0.x releases and are listed here.
   findings in its summary. See
   [`--warn-on-dead-master-path`](docs/reference/cli.md#-warn-on-dead-master-path).
 
+- **Lazy collection works with `--pyargs`.** Each `--pyargs` name now
+  resolves the way pytest resolves it (a module's file, a package's
+  directory) and the lazy file walk starts there, for `--collect lazy` and
+  the automatic choice alike. A name that doesn't resolve that way (a
+  namespace package, or one only importable through an ini `pythonpath`)
+  keeps full collection, with a warning under `--collect lazy`. pandas,
+  `--pyargs pandas -n 8`: 34s against 44s with full collection.
+
+- **The automatic lazy choice weighs what lazy collection saves.** Under full
+  collection every worker collects the whole suite; rstest now records how
+  long that takes (`.rstest_cache/collect.json`, from the last
+  full-collection run) and lets the heaviest file run that much past its
+  per-worker share before it keeps full collection. The fixed one-second
+  allowance it used before flipped pandas between modes from run to run at
+  `-n 8` and always kept full collection at `-n 14`, where lazy takes 27s
+  against 55s. See
+  [Lazy collection](docs/concepts/lazy-collection.md#auto-default).
+
+- **rstest warns when pytest's rootdir differs from its own.** rstest keys its
+  duration cache on the rootdir it works out before the run; when pytest's
+  turns out different, cached durations can't match any test and scheduling
+  silently ignores them. The warning names both directories; pass
+  `--rootdir` to pin it.
+
 ### Fixes
 
+- **A `--rootdir` in `PYTEST_ADDOPTS` now moves `.rstest_cache` too.**
+  pytest reads `PYTEST_ADDOPTS` (and expands `@argsfile`s) before it settles
+  the rootdir, but rstest read the command line only, so it kept the cache
+  at the project root while pytest's rootdir was elsewhere, and cached
+  durations never matched. For runs that set it there, the cache moves to
+  pytest's rootdir and starts cold once.
+- **The duration cache drops timings whose test file is gone.** Timings
+  without a recorded source file (from older rstest versions, or runs that
+  couldn't locate it) were kept forever, including ones from another rootdir
+  that never match a test again (177,000 in one pandas cache). They also
+  stopped the automatic lazy choice, whose check needs every cached file in
+  the walk. Now they're dropped once their test file no longer exists.
+- **The automatic lazy choice counts per-test overhead.** It judged balance by
+  cached call time alone, so a file of many near-instant tests looked light:
+  packaging keeps 84% of its 61,573 tests in one file, and lazy collection
+  ran them all on one worker, 18s against 10s with full collection. Each
+  test now also counts the per-test overhead `-n auto` sizing already uses.
 - **`--collect lazy` no longer piles the heaviest files on one worker.** File
   batches were sized by count, so with files ordered heaviest first the first
   worker to ask took the heaviest batch (pandas, `-n 8`: one worker ran 40%
