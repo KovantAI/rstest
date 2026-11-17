@@ -88,6 +88,20 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`--fork-pool=app` no longer forks workers from a half-imported template.**
+  A module that failed partway through its import in the template was denied,
+  but whatever its code had already done stayed: sqlmesh patches sqlglot's
+  parser and then hit a denied import, so every worker inherited the patch
+  without sqlmesh, imported sqlmesh again and recursed until it crashed at
+  conftest import. When a failed import leaves modules behind, that run's
+  workers now start without the template, and the next run leaves the module
+  out.
+- **`--fork-pool=app` reruns a run its template broke.** When every worker
+  forked from the warm template dies before any test runs (on macOS, a
+  library's thread can trip the Objective-C runtime's fork-safety abort),
+  rstest runs the suite again without the template instead of failing, and
+  records the template afresh next time. A run where tests already ran still
+  fails, so their side effects are never repeated.
 - **rstest refuses a worker of another version.** The `rstest` command and
   the rstest installed in the project's environment (whose worker runs the
   tests) can differ, for example a `uv tool` or `pipx` install next to a

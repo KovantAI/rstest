@@ -722,6 +722,53 @@ def gate_fork_pool(g, args, binary):
     )
 
 
+def gate_fork_pool_app(g, args, binary):
+    print("== --fork-pool=app ==")
+    if WINDOWS:
+        check("fork-pool=app: skipped on Windows", True)
+        return
+    tests = "".join(f"def test_{i}():\n    assert helper.VALUE == 41\n" for i in range(3))
+    g.write("fpa/pytest.ini", "")
+    g.write("fpa/helper.py", "VALUE = 41\n")
+    g.write("fpa/test_a.py", "import helper\n" + tests)
+    cwd = g.tmp / "fpa"
+    shutil.rmtree(cwd / ".rstest_cache", ignore_errors=True)
+    # Run 1 records the app modules; run 2 forks its workers off a template
+    # that imported them first. Same results either way.
+    first = g.run("-n", "2", "--fork-pool=app", "--doctor", cwd=cwd)
+    second = g.run("-n", "2", "--fork-pool=app", "--doctor", cwd=cwd)
+    check(
+        "fork-pool=app: records the template, then uses it, same results",
+        first.returncode == second.returncode == 0
+        and "3 passed" in first.stdout
+        and "3 passed" in second.stdout
+        and (cwd / ".rstest_cache" / "warm" / "manifest.json").exists()
+        and "warm template:" in second.stdout + second.stderr,
+        f"rc={first.returncode},{second.returncode} " + (second.stdout + second.stderr)[-300:],
+    )
+    # A template every forked worker dies under (here: an app module that
+    # remembers the pid that imported it; agent-platform-backend on macOS: an
+    # Objective-C fork-safety abort). Nothing ran, so rstest runs the suite
+    # again without the template instead of failing it.
+    g.write("fpb/pytest.ini", "")
+    g.write("fpb/pidmod.py", "import os\nPID = os.getpid()\n")
+    g.write(
+        "fpb/conftest.py",
+        "import os\nimport pidmod\nif pidmod.PID != os.getpid():\n    os._exit(3)\n",
+    )
+    g.write("fpb/test_b.py", "".join(f"def test_{i}():\n    pass\n" for i in range(3)))
+    cwd = g.tmp / "fpb"
+    shutil.rmtree(cwd / ".rstest_cache", ignore_errors=True)
+    g.run("-n", "2", "--fork-pool=app", cwd=cwd)
+    r = g.run("-n", "2", "--fork-pool=app", cwd=cwd)
+    out = r.stdout + r.stderr
+    check(
+        "fork-pool=app: a template that kills every worker reruns without it",
+        r.returncode == 0 and "3 passed" in r.stdout and "running again without it" in out,
+        f"rc={r.returncode} " + out[-400:],
+    )
+
+
 def gate_dist_validation(g, args, binary):
     print("== --dist validation ==")
     g.write("basic/test_basic.py", BASIC)  # self-contained (also written by gate_basics)
