@@ -153,9 +153,15 @@ fn slash_joined(rel: &Path) -> String {
 /// with `/` separators, so it matches the file part of the cached nodeids on
 /// Windows too. Cached nodeids hang off pytest's rootdir, which need not be
 /// the cwd: pass [`cache::base_dir`] as `root` for a cache lookup.
+///
+/// The walk yields canonical paths (it starts at the canonical rootdir) while
+/// the cwd may be another spelling of the same dir: on Windows a `\\?\` long
+/// path against GitHub's 8.3 `RUNNER~1` temp cwd. A plain prefix strip then
+/// fails and lazy workers get an absolute path outside pytest's rootdir, whose
+/// nodeids lose their file part (`::test_x[0]`) and collide across files.
 pub(crate) fn file_key(file: &Path, cwd: &Path, root: &Path) -> String {
-    cwd.join(file)
-        .strip_prefix(root)
+    crate::cache::relative_to(&cwd.join(file), root)
+        .as_deref()
         .unwrap_or(file)
         .to_string_lossy()
         .replace('\\', "/")

@@ -97,6 +97,14 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **Lazy collection no longer merges same-named tests across files on
+  Windows.** Run with no path arguments from a directory whose path is
+  spelled differently from its canonical form (an 8.3 short name such as
+  GitHub's `RUNNER~1` temp dir, or a symlink), workers were sent absolute
+  file paths outside pytest's rootdir. pytest then dropped the file part of
+  every nodeid, so `test_a.py::test_x` and `test_b.py::test_x` both became
+  `::test_x` and counted as one test. File paths are now made relative to
+  the working directory whichever spelling it uses.
 - **Lazy collection keeps related files together.** It handed out every file
   heaviest first, which scattered neighbouring files (often sharing imports
   and fixtures) over all the workers, so each paid their one-time setup: a

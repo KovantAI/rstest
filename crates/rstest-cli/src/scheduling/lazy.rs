@@ -1119,4 +1119,30 @@ mod tests {
         let ordered = order_files(files, &HashMap::new(), cwd, cwd, 1).0;
         assert_eq!(ordered, vec!["/other/test_x.py"]);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn order_files_strips_a_cwd_spelled_differently_from_the_walk() {
+        // Windows CI: the walk yields canonical `\\?\C:\...` paths while the
+        // cwd is GitHub's 8.3 `RUNNER~1` spelling. Unstripped, workers got
+        // absolute paths outside pytest's rootdir, every file's nodeids came
+        // back as `::test_x[i]`, and 4 files x 500 tests ran as 500. A
+        // symlinked cwd is the same split on unix.
+        let base = std::env::temp_dir().join(format!("rstest-lazy-alias-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = base.join("alias");
+        let _ = std::fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let real = real.canonicalize().unwrap();
+        for f in ["test_a.py", "test_b.py"] {
+            std::fs::write(real.join(f), "").unwrap();
+        }
+        let files = vec![real.join("test_a.py"), real.join("test_b.py")];
+        let cache = HashMap::from([("test_b.py::t".to_string(), 5.0)]);
+        let (ordered, weights) = order_files(files, &cache, &alias, &alias, 1);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(ordered, vec!["test_b.py", "test_a.py"]);
+        assert_eq!(weights.get("test_b.py"), Some(&5.0));
+    }
 }
