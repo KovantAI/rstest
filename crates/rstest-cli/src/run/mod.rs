@@ -1793,6 +1793,8 @@ fn dispatch_run(
                 // `-n 0` runs the whole suite in one process, a peak that
                 // would undersize the next parallel run.
                 peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
+                // One session collects once; nothing a lazy pool would save.
+                collect_seconds: None,
                 exiting,
             }
         } else if path == RunPath::Lazy {
@@ -2359,7 +2361,7 @@ fn collect_lazy(
                         .replace('\\', "/")
                 })
                 .collect();
-            lazy_layout_fits(cache.get(), &rel, n)
+            lazy_layout_fits(cache.get(), &rel, n, durations::load_collect())
         }),
     }
 }
@@ -2386,13 +2388,18 @@ fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
 ///
 /// Judged as if lazy never steals (stealing needs an explicit `--dist load`,
 /// and this check runs either way), so each file runs whole on one worker: a
-/// file whose cached time exceeds an even per-worker share by more than
-/// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
-/// by spreading its tests (this also covers `files < n`).
+/// file whose cached time exceeds an even per-worker share would be the long
+/// pole the eager pool avoids by spreading its tests (this also covers
+/// `files < n`). Lazy pays that excess but saves each worker most of the
+/// whole-suite collection eager repeats per worker: `collect` (cached seconds
+/// one worker spends collecting, `durations::COLLECT_FILE`) times
+/// `(1 - 1/n)`. The excess may use that saving, never less than
+/// [`LAZY_LONG_POLE_SLACK_SECS`] (the whole budget while nothing is recorded).
 fn lazy_layout_fits(
     cache: &std::collections::HashMap<String, f64>,
     files: &[String],
     n: usize,
+    collect: Option<f64>,
 ) -> bool {
     let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
     for (id, secs) in cache {
@@ -2404,7 +2411,8 @@ fn lazy_layout_fits(
     }
     let total: f64 = per_file.values().sum();
     let longest = per_file.values().copied().fold(0.0, f64::max);
-    longest - total / n as f64 <= LAZY_LONG_POLE_SLACK_SECS
+    let saved = collect.unwrap_or(0.0) * (1.0 - 1.0 / n as f64);
+    longest - total / n as f64 <= saved.max(LAZY_LONG_POLE_SLACK_SECS)
 }
 
 /// Wall time a lazy long-pole file may add over an even per-worker share
@@ -3835,7 +3843,8 @@ mod tests {
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["tests/test_a.py", "tests/test_b.py"]),
-            2
+            2,
+            None
         ));
     }
 
@@ -3844,7 +3853,12 @@ mod tests {
         // A doctest in a non-test module (or a --doctest-glob text file) was
         // collected eagerly but is not a python_files match: lazy would drop it.
         let cache = timings(&[("tests/test_a.py::t", 1.0), ("pkg/mod.py::pkg.mod.f", 1.0)]);
-        assert!(!lazy_layout_fits(&cache, &walked(&["tests/test_a.py"]), 1));
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py"]),
+            1,
+            None
+        ));
     }
 
     #[test]
@@ -3855,7 +3869,8 @@ mod tests {
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["tests/test_a.py", "tests/test_skipped_on_linux.py"]),
-            1
+            1,
+            None
         ));
     }
 
@@ -3866,14 +3881,16 @@ mod tests {
         assert!(!lazy_layout_fits(
             &cache,
             &walked(&["test_a.py", "test_b.py"]),
-            8
+            8,
+            None
         ));
         // A fast suite's noisy millisecond skew is below the slack: fine.
         let cache = timings(&[("test_a.py::t", 0.03), ("test_b.py::t", 0.001)]);
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["test_a.py", "test_b.py"]),
-            8
+            8,
+            None
         ));
         // One dominant file among many: the long pole serialises the run.
         let cache = timings(&[
@@ -3884,8 +3901,28 @@ mod tests {
         assert!(!lazy_layout_fits(
             &cache,
             &walked(&["test_big.py", "test_c.py", "test_d.py"]),
-            2
+            2,
+            None
         ));
+    }
+
+    #[test]
+    fn lazy_layout_lets_the_long_pole_use_the_collection_lazy_saves() {
+        // pandas -n 14: the heaviest file runs 7.8s past its share, yet lazy
+        // finished in 28s against 55s full, since each eager worker re-collects
+        // the whole suite. With ~10s of per-worker collection recorded, the
+        // pole fits the ~9.3s saved; without a record the 1s floor holds.
+        let mut ids = vec![("test_big.py::t".to_string(), 17.4)];
+        ids.extend((0..13).map(|i| (format!("test_{i}.py::t"), 9.0)));
+        let cache: std::collections::HashMap<String, f64> = ids.into_iter().collect();
+        let files: Vec<String> = cache
+            .keys()
+            .map(|id| id.split("::").next().unwrap().to_string())
+            .collect();
+        assert!(!lazy_layout_fits(&cache, &files, 14, None));
+        assert!(lazy_layout_fits(&cache, &files, 14, Some(10.0)));
+        // A cheap-to-collect suite saves too little to cover the same pole.
+        assert!(!lazy_layout_fits(&cache, &files, 14, Some(2.0)));
     }
 
     #[test]

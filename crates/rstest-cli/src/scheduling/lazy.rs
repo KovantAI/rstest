@@ -901,6 +901,11 @@ pub fn run_lazy_pool(
         warm: None,
         sources,
         peak_rss,
+        // Not recorded here: per-file collection timed under every worker's
+        // contention sums to far more than one eager worker's collection (2x
+        // on pandas at -n 14), and lazy runs refreshing it would ratchet the
+        // auto-lazy budget up. Only eager runs measure what lazy saves.
+        collect_seconds: None,
         exiting,
     })
 }

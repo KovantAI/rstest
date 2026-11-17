@@ -363,12 +363,33 @@ enum StoredWall {
 
 /// Record this run's total wall time for the project.
 pub fn save_wall(secs: f64) {
+    save_stamped(WALL_FILE, secs);
+}
+
+/// Seconds one full-collection worker spends collecting the whole suite: what
+/// each worker saves under lazy collection, the budget auto-lazy weighs a long
+/// pole against: the workers' median collection phase in the last full-
+/// collection pool run (under that run's contention). Lazy runs leave it as is.
+/// Same shape and TTL as [`WALL_FILE`].
+pub const COLLECT_FILE: &str = "collect.json";
+
+/// Record this run's per-worker whole-suite collection seconds.
+pub fn save_collect(secs: f64) {
+    save_stamped(COLLECT_FILE, secs);
+}
+
+/// The last recorded per-worker collection seconds, if still within the TTL.
+pub fn load_collect() -> Option<f64> {
+    load_stamped_in(&cache::dir(), COLLECT_FILE)
+}
+
+fn save_stamped(name: &str, secs: f64) {
     let w = Wall {
         secs,
         epoch: crate::time::now_epoch_secs(),
     };
     if let Ok(bytes) = serde_json::to_vec(&w) {
-        let _ = cache::write_atomic(&cache::file(WALL_FILE), &bytes);
+        let _ = cache::write_atomic(&cache::file(name), &bytes);
     }
 }
 
@@ -397,7 +418,11 @@ fn wall_expired(epoch: u64, now: u64, max_age: u64) -> bool {
 /// Last run's wall seconds from a project's cache dir, if recorded and still
 /// within the TTL.
 pub fn load_wall_in(cache_dir: &Path) -> Option<f64> {
-    let bytes = std::fs::read(cache_dir.join(WALL_FILE)).ok()?;
+    load_stamped_in(cache_dir, WALL_FILE)
+}
+
+fn load_stamped_in(cache_dir: &Path, name: &str) -> Option<f64> {
+    let bytes = std::fs::read(cache_dir.join(name)).ok()?;
     let w: Wall = match serde_json::from_slice::<StoredWall>(&bytes).ok()? {
         StoredWall::Tagged(w) => w,
         StoredWall::Bare(secs) => Wall { secs, epoch: 0 },

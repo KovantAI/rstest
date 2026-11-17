@@ -9,12 +9,25 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rstest_worker._internal import dispatch
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
     _ignored_by_recursion,
     _session_roots,
 )
+
+
+@pytest.fixture(autouse=True)
+def _frozen_collect_clock(monkeypatch):
+    # Collection timings ride the payloads only when non-zero: a frozen clock
+    # keeps the exact-payload assertions below independent of machine speed.
+    monkeypatch.setattr(dispatch, "_now", lambda: 0.0)
+
+
+def _ticking_clock(monkeypatch, step):
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr(dispatch, "_now", lambda: next(ticks) * step)
 
 
 class FakeConn:
@@ -79,6 +92,18 @@ def test_collection_finish_minimal_payload_without_send_ids(monkeypatch):
     session = SimpleNamespace(items=[FakeItem("t.py::a"), FakeItem("t.py::b")])
     ItemDispatchPlugin(conn).pytest_collection_finish(session)
     assert conn.sent == [("collection_done", {"count": 2, "hash": _digest(["t.py::a", "t.py::b"])})]
+
+
+def test_collection_finish_reports_the_collection_time(monkeypatch):
+    # The whole-suite collection each full-pool worker repeats: the saving
+    # auto-lazy weighs a long pole against.
+    monkeypatch.delenv("RSTEST_SEND_IDS", raising=False)
+    _ticking_clock(monkeypatch, 2.5)
+    conn = FakeConn()
+    plugin = ItemDispatchPlugin(conn)
+    plugin.pytest_collection(SimpleNamespace())
+    plugin.pytest_collection_finish(SimpleNamespace(items=[FakeItem("t.py::a")]))
+    assert conn.sent[0][1]["collect_seconds"] == 2.5
 
 
 def test_collection_finish_reports_deselected_items(monkeypatch):

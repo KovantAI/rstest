@@ -38,10 +38,18 @@ strategy automatically. rstest picks `lazy` when all of these hold, and
 - **File walk:** every cached test's file is found by the lazy walk; a
   missing one means lazy would lose tests.
 - **Balance:** no file's cached time exceeds an even per-worker share
-  (`total time / workers`) by more than a second. Lazy runs each file whole
-  on one worker, so such a file would hold up the run. The check assumes no
-  stealing, so it applies even under an explicit `--dist load` (which could
-  split the file; see [When it doesn't](#when-it-doesnt)).
+  (`total time / workers`) by more than lazy saves each worker. Lazy runs
+  each file whole on one worker, so such a file holds up the run; but every
+  worker under full collection collects the whole suite, and lazy spares it
+  all but its own share of that. The allowance is the per-worker collection
+  time the last full-collection parallel run recorded
+  (`.rstest_cache/collect.json`) times
+  `1 - 1/workers`, and at least one second (all of it before anything is
+  recorded). pandas at `-n 14`: its heaviest file runs 7.8s past its share,
+  inside the roughly 10s each worker saves, and lazy takes 28s against 55s.
+  The check assumes no stealing, so it applies even under an explicit
+  `--dist load` (which could split the file; see
+  [When it doesn't](#when-it-doesnt)).
 
 The test count comes from `.rstest_cache/durations.json`, so a **cold cache
 counts as zero tests** and a suite's first run stays `full`; a warm run of a
