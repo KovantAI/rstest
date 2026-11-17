@@ -251,6 +251,22 @@ killed it) and the last lines it wrote to stderr. The same `worker terminated un
 when a worker dies before it collects anything, with no crash before it; that
 case is covered next.
 
+## `rstest: version mismatch: the rstest command is X, but the rstest installed in ... is Y`
+
+```text
+rstest: version mismatch: the rstest command is 0.12.0, but the rstest installed in /path/to/.venv/bin/python's environment is 0.11.1. Install the same version in both (e.g. `pip install rstest==0.12.0` in that environment, or run that environment's own rstest).
+```
+
+The `rstest` command you ran and the rstest package installed in the
+project's environment (which provides the worker each test process runs)
+are different versions. That happens when `rstest` comes from somewhere
+else on your `PATH` (`uv tool`, `pipx`, a global install) while the
+project pins another version. The two exchange messages whose shape
+changes between releases, so rstest refuses to start rather than run
+with a mismatched worker. Install the same version in the project's
+environment, or run the project's own rstest (`uv run rstest`,
+`.venv/bin/rstest`).
+
 ## `worker terminated unexpectedly: exited during startup`
 
 The worker process died before it sent anything back, so it never collected
