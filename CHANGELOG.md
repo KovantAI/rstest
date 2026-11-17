@@ -21,22 +21,6 @@ between 0.x releases and are listed here.
   app's modules, as recorded by earlier runs in `.rstest_cache/warm/`. Bare
   `--fork-pool` is unchanged (`=core`).
 
-### Fixes
-
-- **Django suites no longer lose a worker's test database under lazy
-  collection.** With `--collect lazy` (which rstest picks on its own for large
-  suites with a warm cache), each file batch replaced pytest's list of the
-  session's tests. pytest-django chooses which test databases to create from
-  that list, so when a worker collected a file without database tests just
-  before running its first database test, it created none, and every database
-  test on that worker failed with `no such table`. It happened now and then,
-  more often on a busy machine. The list now keeps every test the worker has
-  collected.
-
-## 0.11.1 (2026-11-11)
-
-### Features
-
 - **`--order fail-fast` runs tests near your changes early.** After tests
   that recently failed, and before flaky ones, it now runs tests close to
   what changed: a test file edited in the working tree first, then test files
@@ -59,6 +43,58 @@ between 0.x releases and are listed here.
 
 - **`-v` says what `--order fail-fast` put first**: how many tests lead
   because they recently failed, are near changes, or are flaky.
+
+- **`--budget DURATION` runs what fits in a time budget.** It picks the
+  tests most worth running in that much wall time (`90s`, `5m`): tests in
+  changed test files always, then recently failed, near-change and flaky
+  tests, then the rest shortest first while they fit. A test costs its
+  recorded call time plus its median setup time, and module/class fixtures
+  are counted once. What's left out is reported as deselected, and a budget
+  run never counts as green. Implies `--order fail-fast`. See
+  [`--budget`](docs/reference/cli.md#-budget-duration).
+
+- **`--warn-on-dead-master-path` finds plugins that expect an xdist
+  controller.** Opt-in: it reads the installed plugins and loaded conftests
+  for code that only works on xdist's controller, which rstest doesn't run,
+  and warns before the run: a `workerinput["k"]` read that will `KeyError`
+  at `-n >= 2`, or controller-only work (a plugin registered, a file written)
+  that silently never happens. `rstest try` turns it on and lists the
+  findings in its summary. See
+  [`--warn-on-dead-master-path`](docs/reference/cli.md#-warn-on-dead-master-path).
+
+### Fixes
+
+- **`--collect lazy` no longer piles the heaviest files on one worker.** File
+  batches were sized by count, so with files ordered heaviest first the first
+  worker to ask took the heaviest batch (pandas, `-n 8`: one worker ran 40%
+  of the tests), and with lazy's file affinity nothing moved them later.
+  Batches are now sized by cached duration, and a worker takes new files only
+  once its queued tests run low. pandas, `-n 8`: lazy 28s against 40s for
+  full collection (lazy was about 2x slower than full before).
+- **Lazy file ordering and `--shard` now use the duration cache when pytest's
+  rootdir isn't the current directory.** Files were matched to cached tests
+  relative to the current directory, but cached test ids are relative to the
+  rootdir, so in that layout nothing matched and both fell back to path
+  order (lazy) or equal weights (`--shard`).
+- **`--collect lazy` handles a conftest that skips its directory.** A
+  `conftest.py` calling `pytest.importorskip(...)` made each file below it a
+  collection error, which aborted the run and could drop healthy tests. The
+  directory is now skipped and counted once, as with full collection.
+- **A `::` in an option value no longer turns lazy collection off.**
+  `-W default::SomeWarning` or `--deselect tests/a.py::test_x` was read as a
+  nodeid selection, so `--collect lazy` (and the auto default) fell back to
+  full collection. Only positional nodeids count now.
+- **Django suites no longer lose a worker's test database under lazy
+  collection.** With `--collect lazy` (which rstest picks on its own for large
+  suites with a warm cache), each file batch replaced pytest's list of the
+  session's tests. pytest-django chooses which test databases to create from
+  that list, so when a worker collected a file without database tests just
+  before running its first database test, it created none, and every database
+  test on that worker failed with `no such table`. It happened now and then,
+  more often on a busy machine. The list now keeps every test the worker has
+  collected.
+
+## 0.11.1 (2026-11-11)
 
 ### Fixes
 
