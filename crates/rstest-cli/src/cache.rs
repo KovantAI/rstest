@@ -513,8 +513,10 @@ mod tests {
     #[test]
     fn write_atomic_skips_full_fsync_on_macos() {
         // `F_FULLFSYNC` (std's `sync_all` on macOS) cost ~50ms per 1-test run.
-        // Compare against it on the same filesystem; if it's not slow here (VM,
-        // ramdisk) there's no signal, so skip rather than flake.
+        // Compare against it on the same filesystem; if it's no slower than plain
+        // fsync here (CI VMs, ramdisks ignore the drive-cache flush) there's no
+        // signal, so skip rather than flake.
+        use std::os::unix::io::AsRawFd;
         let base = std::env::temp_dir().join(format!("rstest-cache-fsync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -526,9 +528,22 @@ mod tests {
             std::fs::File::open(&base).unwrap().sync_all().unwrap();
         }
         let full = t.elapsed();
-        // Real disks measure ~4.5ms/iter (two F_FULLFSYNCs); CI VMs ~2ms/iter,
-        // too close to plain fsync + rename overhead to compare reliably.
-        if full < std::time::Duration::from_millis(3 * N as u64) {
+        // Baseline calls libc directly, not `fsync` above, so regressing that
+        // helper to `sync_all` can't also turn the skip on.
+        let t = std::time::Instant::now();
+        for i in 0..N {
+            let f = std::fs::File::create(base.join(format!("plain{i}"))).unwrap();
+            let d = std::fs::File::open(&base).unwrap();
+            // SAFETY: both files own valid fds for the duration of the calls.
+            unsafe {
+                assert_eq!(libc::fsync(f.as_raw_fd()), 0);
+                assert_eq!(libc::fsync(d.as_raw_fd()), 0);
+            }
+        }
+        let plain = t.elapsed();
+        // Real disks: F_FULLFSYNC ~4.5ms/iter, an order above plain fsync. CI
+        // VMs measured ~3ms/iter for both (run 43826207281), no gap to test.
+        if full < plain * 4 {
             let _ = std::fs::remove_dir_all(&base);
             return;
         }
@@ -659,6 +674,7 @@ mod tests {
         let files = [
             crate::scheduling::durations::FILE,
             crate::scheduling::durations::WALL_FILE,
+            crate::scheduling::durations::COLLECT_FILE,
             crate::reporting::flakes::FILE,
             crate::reporting::history::FILE,
             crate::since_green::FILE,

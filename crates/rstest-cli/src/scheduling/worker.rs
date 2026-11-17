@@ -11,6 +11,12 @@ use anyhow::{Context, Result};
 
 use crate::scheduling::proto;
 
+#[cfg(unix)]
+#[path = "template.rs"]
+mod template;
+#[cfg(unix)]
+pub use template::{drop_if_stale as drop_stale_template, enable as enable_template};
+
 /// Hard ceiling on the bytes a single [`proto::Event`] may consume off the
 /// pipe. The wire is bare, self-describing msgpack (no length framing), so a
 /// worker that emits a value whose length prefix claims a giant array/str/map
@@ -105,6 +111,12 @@ pub struct WorkerEnv {
     pub timeout: Option<f64>,
     /// Enable per-test thread/fd leak measurement (--doctor or --fail-on-leak).
     pub leakcheck: bool,
+    /// `--fork-pool=app`: workers record their imports; the zygote imports
+    /// the manifest's modules before forking. None = off.
+    pub warm: Option<crate::scheduling::warm::WorkerWarm>,
+    /// `--warn-on-dead-master-path`: scan plugins and conftests for code that
+    /// only runs on an xdist controller.
+    pub dead_master_scan: bool,
     /// For a lone worker: ship the full id/location payload from collection
     /// (pooled workers derive this from their index instead).
     pub send_ids: bool,
@@ -809,6 +821,10 @@ impl Worker {
         let seen = SeenStartupStderr::default();
         #[cfg(unix)]
         if Self::prewarms(fork_prewarm, n) {
+            // `--watch --fork-pool=app`: fork off the session's template server.
+            if let Some(result) = template::fork_pool(python, n, env, &seen) {
+                return result;
+            }
             ensure_fd_headroom(n);
             match Self::spawn_forked_pool(python, n, env, &seen) {
                 // The zygote holds both ends of all 3n pipes at once (~6n fds,
@@ -1121,6 +1137,10 @@ const INTERNAL_ENV: &[&str] = &[
     "RSTEST_DOCTOR",
     "RSTEST_TIMEOUT",
     "RSTEST_LEAKCHECK",
+    "RSTEST_WARM_RECORD",
+    "RSTEST_WARM_MANIFEST",
+    "RSTEST_WARM_RESULT",
+    "RSTEST_DEAD_MASTER_SCAN",
     "RSTEST_DEBUGPY_PORT",
     "RSTEST_STREAM_OUTPUT",
     "RSTEST_JUNITXML",
@@ -1222,6 +1242,12 @@ fn build_worker_command(
     }
     if env.leakcheck {
         command.env("RSTEST_LEAKCHECK", "1");
+    }
+    if env.warm.is_some() {
+        command.env("RSTEST_WARM_RECORD", "1");
+    }
+    if env.dead_master_scan {
+        command.env("RSTEST_DEAD_MASTER_SCAN", "1");
     }
     if let Some(port) = &env.debug_port {
         command.env("RSTEST_DEBUGPY_PORT", port);
@@ -1508,6 +1534,17 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     }
     if env.leakcheck {
         command.env("RSTEST_LEAKCHECK", "1");
+    }
+    if let Some(warm) = &env.warm {
+        command
+            .env("RSTEST_WARM_RECORD", "1")
+            .env("RSTEST_WARM_RESULT", &warm.result);
+        if let Some(manifest) = &warm.manifest {
+            command.env("RSTEST_WARM_MANIFEST", manifest);
+        }
+    }
+    if env.dead_master_scan {
+        command.env("RSTEST_DEAD_MASTER_SCAN", "1");
     }
     if env.stream_output {
         command.env("RSTEST_STREAM_OUTPUT", "1");
@@ -1926,7 +1963,12 @@ mod tests {
         // it from a finally), and done ends every failed startup.
         assert!(!StartupStderr::ends_startup(&proto::Event::Done {
             exitstatus: 4,
-            peak_rss: None
+            peak_rss: None,
+            imported: vec![],
+            sys_path: vec![],
+            coverage: false,
+            rewrite: vec![],
+            env: vec![],
         }));
     }
 
@@ -2094,12 +2136,14 @@ mod tests {
         );
     }
 
-    fn base_env() -> WorkerEnv {
+    pub(super) fn base_env() -> WorkerEnv {
         WorkerEnv {
             run_uid: "uid-1".into(),
             doctor: false,
             timeout: None,
             leakcheck: false,
+            warm: None,
+            dead_master_scan: false,
             send_ids: false,
             debug_port: None,
             stream_output: false,
@@ -2144,6 +2188,7 @@ mod tests {
             "RSTEST_DOCTOR",
             "RSTEST_TIMEOUT",
             "RSTEST_LEAKCHECK",
+            "RSTEST_DEAD_MASTER_SCAN",
             "RSTEST_WORKER_ID",
         ] {
             assert!(!envs.contains_key(absent), "unexpected {absent}");
@@ -2179,11 +2224,13 @@ mod tests {
         env.doctor = true;
         env.timeout = Some(1.5);
         env.leakcheck = true;
+        env.dead_master_scan = true;
         let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &env, 3, 4);
         let envs = envs_of(&cmd);
         assert_eq!(envs["RSTEST_DOCTOR"], "1");
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
+        assert_eq!(envs["RSTEST_DEAD_MASTER_SCAN"], "1");
     }
 
     #[test]
@@ -2404,7 +2451,7 @@ mod tests {
     /// [`worker_python`] and the spawn resolve python via PATH, and the spawn
     /// reads RSTEST_WORKER_PATH. Skips (returns) when no such python exists.
     #[cfg(unix)]
-    fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
+    pub(super) fn with_live_python(f: impl FnOnce(&crate::test_env::Held, &Path)) {
         let held = crate::test_env::lock();
         let found = live_python(&held);
         if let Some((python, _worker_path)) = found {
@@ -2415,7 +2462,7 @@ mod tests {
     /// A worker's pid: the child's for an owned worker, the tracked one for a
     /// forked worker (None once it has been forgotten).
     #[cfg(unix)]
-    fn pid_of(w: &Worker) -> Option<u32> {
+    pub(super) fn pid_of(w: &Worker) -> Option<u32> {
         match &w.proc {
             super::Proc::Owned(child) => Some(child.id()),
             super::Proc::Reparented(t) => t.map(|t| t.pid),
@@ -2425,7 +2472,7 @@ mod tests {
     /// Whether `pid` still exists. A zombie (killed but un-reaped) still counts
     /// as alive here — signal 0 succeeds until the parent `wait()`s it away.
     #[cfg(unix)]
-    fn alive(pid: u32) -> bool {
+    pub(super) fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 performs no action; it only probes whether `pid`
         // is a live, signalable process. Touches no memory.
         unsafe { libc::kill(pid as i32, 0) == 0 }
@@ -2445,6 +2492,8 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2491,6 +2540,8 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -2545,6 +2596,8 @@ mod tests {
                 doctor: false,
                 timeout: None,
                 leakcheck: false,
+                warm: None,
+                dead_master_scan: false,
                 send_ids: false,
                 debug_port: None,
                 stream_output: false,
@@ -3001,6 +3054,32 @@ mod tests {
         assert!(format!("{bad:#}").contains("parsing zygote pid report"));
     }
 
+    /// `--fork-pool=app`: every worker records its imports; only the zygote
+    /// gets the manifest to import and the result path.
+    #[test]
+    fn warm_env_records_everywhere_and_prewarms_only_the_zygote() {
+        let mut env = base_env();
+        env.warm = Some(crate::scheduling::warm::WorkerWarm {
+            manifest: Some("/c/warm/manifest.json".into()),
+            result: "/t/warm-result.json".into(),
+        });
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &env, 3, 4);
+        let envs = envs_of(&cmd);
+        assert_eq!(envs["RSTEST_WARM_RECORD"], "1");
+        assert!(!envs.contains_key("RSTEST_WARM_MANIFEST"));
+        #[cfg(unix)]
+        {
+            let mut cmd = Command::new("python");
+            super::apply_shared_worker_env(&mut cmd, 3, &env);
+            let envs = envs_of(&cmd);
+            assert_eq!(envs["RSTEST_WARM_RECORD"], "1");
+            assert_eq!(envs["RSTEST_WARM_MANIFEST"], "/c/warm/manifest.json");
+            assert_eq!(envs["RSTEST_WARM_RESULT"], "/t/warm-result.json");
+        }
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        assert!(!envs_of(&cmd).contains_key("RSTEST_WARM_RECORD"));
+    }
+
     /// The zygote carries every run-wide opt-in flag its children inherit.
     #[cfg(unix)]
     #[test]
@@ -3010,6 +3089,7 @@ mod tests {
         env.timeout = Some(1.5);
         env.leakcheck = true;
         env.stream_output = true;
+        env.dead_master_scan = true;
         let mut cmd = Command::new("python");
         super::apply_shared_worker_env(&mut cmd, 3, &env);
         let envs = envs_of(&cmd);
@@ -3018,6 +3098,7 @@ mod tests {
         assert_eq!(envs["RSTEST_TIMEOUT"], "1.5");
         assert_eq!(envs["RSTEST_LEAKCHECK"], "1");
         assert_eq!(envs["RSTEST_STREAM_OUTPUT"], "1");
+        assert_eq!(envs["RSTEST_DEAD_MASTER_SCAN"], "1");
         // Per-worker identity is applied post-fork, never on the shared env.
         assert!(!envs.contains_key("RSTEST_WORKER_ID"));
         assert!(!envs.contains_key("RSTEST_SEND_IDS"));

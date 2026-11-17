@@ -19,7 +19,7 @@ use crate::cli::{
 };
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
-use crate::scheduling::{durations, lazy, pool, proto, shard, worker};
+use crate::scheduling::{durations, lazy, pool, proto, shard, warm, worker};
 use crate::{
     collect, config, cov_scope, coverage_skip, discover, doctor, incremental, migrate, mono,
     remote, select,
@@ -239,8 +239,9 @@ struct PostRun<'a> {
     /// `--changed`/`--changed-strict` diff base, as resolved for selection.
     changed_base: Option<&'a str>,
     since_green: bool,
-    /// The user narrowed a `--since-green` run (`-k`/`-m`/a path/`--deselect`):
-    /// its green proves nothing about the tests left out, so no baseline.
+    /// The user narrowed a `--since-green` run (`-k`/`-m`/a path/`--deselect`/
+    /// `--budget`): its green proves nothing about the tests left out, so no
+    /// baseline.
     since_green_narrowed: bool,
     head: &'a Option<String>,
     env_fp: &'a str,
@@ -449,6 +450,8 @@ fn resolve_run_config(
         doctor: instrument,
         timeout: cli.timeout,
         leakcheck,
+        warm: None,
+        dead_master_scan: cli.warn_on_dead_master_path,
         send_ids: false,
         debug_port: cli.debug.clone(),
         // Ship captured stdout/stderr on every report (not just failures) when a
@@ -688,7 +691,9 @@ pub(crate) fn execute_inner(
     // a base that fails to resolve aborts here, before any test runs.
     let changed_base = resolve_changed_base(cli, &mut sink)?;
     // Judged on the user's args, before selection swaps in the affected paths.
-    let since_green_narrowed = since_green && crate::since_green::run_narrows_suite(&args, &scope);
+    // A --budget run leaves tests out too.
+    let since_green_narrowed = since_green
+        && (cli.budget.is_some() || crate::since_green::run_narrows_suite(&args, &scope));
     let args = match apply_selection(
         cli,
         args,
@@ -774,6 +779,13 @@ pub(crate) fn execute_inner(
                     .join("\n"),
                 max_pct: q.max_pct,
             });
+    // --budget costs each test its call time plus its median setup from the
+    // run history, which the quarantine set above may already have read.
+    let budget = inc.budget.map(|secs| pool::Budget {
+        secs: secs as f64,
+        label: cli.budget.clone().unwrap_or_default(),
+        setup: history.get().median_setup(),
+    });
     let RunStamp {
         head,
         history_commit,
@@ -781,6 +793,21 @@ pub(crate) fn execute_inner(
     } = early_stamp
         .or_else(join_stamp)
         .expect("run stamp joined once");
+    // `--fork-pool=app`: only a pool run has a zygote to warm.
+    let warm_run = (cli.fork_pool == Some(warm::ForkPool::App)
+        && !passthrough
+        && (n > 1 || single_worker_reruns))
+        .then(|| {
+            let key = warm::Key {
+                python: python.display().to_string(),
+                rstest: env!("CARGO_PKG_VERSION").to_string(),
+                env_fp: env_fp.clone(),
+                rootdir: scope.display().to_string(),
+            };
+            warm::prepare(key, &args, &mut sink)
+        })
+        .flatten();
+    cfg.worker_env.warm = warm_run.as_ref().map(|w| w.env.clone());
     let mut outcome = dispatch_run(
         &cfg,
         cli,
@@ -790,9 +817,11 @@ pub(crate) fn execute_inner(
         DispatchSelection {
             shuffle_seed: inc.shuffle_seed,
             shard: inc.shard,
+            budget: budget.as_ref(),
             lazy: inc.lazy,
             quarantine: quarantine.as_ref(),
             durations: &duration_cache,
+            env_fp: &env_fp,
         },
         pinned,
         &mut sink,
@@ -814,6 +843,10 @@ pub(crate) fn execute_inner(
         start,
         &mut sink,
     );
+    if let Some(w) = warm_run {
+        let record = std::mem::take(&mut outcome.warm_record);
+        outcome.warm = warm::finish(w, record, &mut sink);
+    }
     if !passthrough && cli.python.is_none() {
         if let Some(hint) = interpreter_hint(&outcome.run, &python, &scope) {
             sink.warn(&hint);
@@ -1262,6 +1295,8 @@ fn passthrough_n_warning(
 struct Incremental {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    /// `--budget`, in seconds ([`resolve_budget`]).
+    budget: Option<u64>,
     /// Lazy collection resolved for this run ([`collect_lazy`]), decided once
     /// here and reused by dispatch.
     lazy: bool,
@@ -1351,7 +1386,7 @@ fn resolve_incremental(
     // full-collection pool. Refusing (not ignoring) matters: a user probing for
     // order dependence must not get a silently ordered run. `is_lazy` is computed
     // once and reused by the incremental gate below.
-    let is_lazy = collect_lazy(cli, settings, dist_name, args, n, cache, sink)?;
+    let is_lazy = collect_lazy(cli, settings, dist_name, &cfg.python, args, n, cache, sink)?;
     let shuffle_seed = resolve_shuffle_seed(
         cli.shuffle.as_deref(),
         n,
@@ -1375,6 +1410,7 @@ fn resolve_incremental(
         shuffle_seed.is_some(),
         dist_name,
     )?;
+    let budget = resolve_budget(cli.budget.as_deref(), n, passthrough, is_lazy, dist_name)?;
     let active = cli.incremental
         && !since_green
         && cli.changed.is_none()
@@ -1454,6 +1490,7 @@ fn resolve_incremental(
     Ok(Incremental {
         shuffle_seed,
         shard,
+        budget,
         lazy: is_lazy,
         active,
         config,
@@ -1543,13 +1580,16 @@ fn quarantined_exit(
 /// Dispatch-time selection modifiers, bundled so [`dispatch_run`] stays within
 /// the argument budget: the resolved `--shuffle` seed, `--shard` bucket,
 /// lazy-collection choice, `--quarantine` matcher (fail-fast keeps quarantined
-/// tests out of the front), and the run's shared duration cache.
+/// tests out of the front), the run's shared duration cache, and the env
+/// fingerprint (fail-fast diffs against the last green run recorded under it).
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
+    budget: Option<&'a pool::Budget>,
     lazy: bool,
     quarantine: Option<&'a gates::Quarantine>,
     durations: &'a DurationCache,
+    env_fp: &'a str,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1566,9 +1606,11 @@ fn dispatch_run(
     let DispatchSelection {
         shuffle_seed,
         shard,
+        budget,
         lazy,
         quarantine,
         durations: duration_cache,
+        env_fp,
     } = selection;
     let RunConfig {
         n,
@@ -1619,7 +1661,7 @@ fn dispatch_run(
         worker_timeout: watchdog,
         known_flaky,
         worker_env,
-        fork_prewarm: cli.fork_pool,
+        fork_prewarm: cli.fork_pool.is_some(),
         quarantine,
     };
     let path = if passthrough {
@@ -1743,12 +1785,16 @@ fn dispatch_run(
                 // No worker pool spawned here (one passthrough worker).
                 startup_seconds: 0.0,
                 fork_prewarmed: false,
+                warm_record: Default::default(),
+                warm: None,
                 // Recorded only when `-n auto` chose this one session (as when
                 // memory capped it at 1): then it is the worker's peak, and a
                 // later run on more memory can size up from it. An explicit
                 // `-n 0` runs the whole suite in one process, a peak that
                 // would undersize the next parallel run.
                 peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
+                // One session collects once; nothing a lazy pool would save.
+                collect_seconds: None,
                 exiting,
             }
         } else if path == RunPath::Lazy {
@@ -1763,15 +1809,19 @@ fn dispatch_run(
             }
             let cwd = std::env::current_dir()?;
             let project = config::discover(&cwd, sink.err());
-            let paths: Vec<PathBuf> = crate::cli::path_args(args)
-                .into_iter()
-                .filter(|a| !a.starts_with('@'))
-                .map(PathBuf::from)
-                .collect();
+            // `collect_lazy` already resolved these (memoized), so Some.
+            let paths = lazy_roots(python, args).unwrap_or_default();
             let mut files = collect::collect_test_files(&paths, &project)?;
             if let Some((k, total)) = shard {
                 let before = files.len();
-                files = shard::shard_files(&files, duration_cache.get(), &cwd, k, total);
+                files = shard::shard_files(
+                    &files,
+                    duration_cache.get(),
+                    &cwd,
+                    &crate::cache::base_dir(),
+                    k,
+                    total,
+                );
                 sink.warn(&format!(
                     "rstest: shard {k}/{total} -> {} of {before} test file(s)",
                     files.len()
@@ -1804,6 +1854,15 @@ fn dispatch_run(
                  full suite; rerun-on-another-worker semantics do not apply)"
                 );
             }
+            // Only fail-fast load dispatch and --budget read it; the diff
+            // costs git calls and a graph walk, so every other run skips it.
+            let near = if pinned.is_none()
+                && (budget.is_some() || order == pool::Order::FailFast && dist == pool::Dist::Load)
+            {
+                near_changes(env_fp)
+            } else {
+                std::collections::HashMap::new()
+            };
             pool::run_pool(
                 &base_cfg,
                 dist,
@@ -1812,11 +1871,30 @@ fn dispatch_run(
                 shuffle_seed,
                 shard,
                 skip_ids,
+                near,
+                budget,
                 pinned,
                 sink,
             )?
         },
     )
+}
+
+/// [`select::near_changes`] for the project at the cwd, diffed against the last
+/// green commit when one is recorded under `env_fp` (so the whole branch's
+/// work counts, not just uncommitted edits), else HEAD. Same rootdir rule as
+/// `--changed`: with no config file, the cache's base dir.
+fn near_changes(env_fp: &str) -> std::collections::HashMap<String, u8> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return std::collections::HashMap::new();
+    };
+    // discover()'s config warnings were already shown by this run.
+    let mut project = config::discover(&cwd, &mut std::io::sink());
+    if project.inifile.is_none() {
+        project.rootdir = crate::cache::base_dir();
+    }
+    let base = incremental::baseline(&cwd, env_fp);
+    select::near_changes(&project.rootdir, &project, base.as_deref())
 }
 
 /// A pointer at the interpreter when a run failed on missing imports and
@@ -1959,13 +2037,13 @@ impl Drop for SingleWorkerInterrupts {
 }
 
 /// Resolve dispatch ordering (CLI > [tool.rstest] > auto). Auto picks
-/// fail-fast under `--watch` (surface a red as fast as possible on each save),
-/// throughput otherwise. Where the order has no effect is reported once, at
+/// fail-fast under `--watch` (surface a red as fast as possible on each save)
+/// and `--budget` (what it picks for risk runs first), throughput otherwise. Where the order has no effect is reported once, at
 /// dispatch, by [`order_ignored_warning`].
 fn resolve_order(cli: &Cli, settings: &config::RstestSettings) -> Result<pool::Order> {
     Ok(match cli.order.as_deref().or(settings.order.as_deref()) {
         Some(s) => s.parse::<pool::Order>().map_err(|e| anyhow::anyhow!(e))?,
-        None if cli.watch => pool::Order::FailFast,
+        None if cli.watch || cli.budget.is_some() => pool::Order::FailFast,
         None => pool::Order::Throughput,
     })
 }
@@ -1979,6 +2057,98 @@ const AUTO_LAZY_MIN_TESTS: usize = 2000;
 /// size and worker count; 2000 tests need >= 8 workers, 4000 need >= 4.
 const AUTO_LAZY_MIN_WORK: usize = 16_000;
 
+/// A nodeid positional (`tests/a.py::t`, or `pkg.mod::t` under `--pyargs`):
+/// a selection the lazy file walk can't see. Option values don't count:
+/// `-W default::X` and `--deselect a.py::t` hold `::` but select no test.
+fn selects_nodeids(args: &[String]) -> bool {
+    args.iter()
+        .zip(crate::cli::positional_mask(args))
+        .any(|(a, pos)| pos && a.contains("::"))
+}
+
+/// pytest's `search_pypath` (no namespace packages), run in the worker
+/// interpreter: one line per name, the module file or package directory, or
+/// empty when it doesn't resolve.
+const PYARGS_PROBE: &str = r#"
+import importlib.util, os, sys
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except (AttributeError, ImportError, ValueError):
+        spec = None
+    path = ""
+    if spec is not None:
+        if not spec.submodule_search_locations:
+            path = spec.origin or ""
+        elif spec.origin:
+            path = os.path.dirname(spec.origin)
+    print(path)
+"#;
+
+/// Where the lazy file walk starts: the positional paths, or under `--pyargs`
+/// each positional resolved as pytest does (a dotted name to its module or
+/// package, else the arg as a path). `None` when a `--pyargs` arg resolves to
+/// nothing pytest could collect: lazy can't reproduce that run.
+fn lazy_roots(python: &Path, args: &[String]) -> Option<Vec<PathBuf>> {
+    let positional = || {
+        args.iter()
+            .zip(crate::cli::positional_mask(args))
+            .filter(|(a, pos)| *pos && !a.starts_with('@'))
+            .map(|(a, _)| a.clone())
+    };
+    if !args.iter().any(|a| a == "--pyargs") {
+        return Some(
+            crate::cli::path_args(args)
+                .into_iter()
+                .filter(|a| !a.starts_with('@'))
+                .map(PathBuf::from)
+                .collect(),
+        );
+    }
+    let names: Vec<String> = positional().collect();
+    if names.is_empty() {
+        return Some(Vec::new());
+    }
+    // Resolved once per process: the lazy decision and the dispatch walk
+    // both ask. ponytail: sys.path is the bare interpreter's plus the cwd,
+    // so an ini `pythonpath` entry pytest adds is not seen; such a name
+    // stays unresolved and the run keeps full collection.
+    type Memo = std::collections::HashMap<(PathBuf, Vec<String>), Option<Vec<PathBuf>>>;
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    let key = (python.to_path_buf(), names.clone());
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return hit;
+    }
+    let resolved = (|| {
+        let mut cmd = std::process::Command::new(python);
+        cmd.args(["-c", PYARGS_PROBE])
+            .args(&names)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::scheduling::worker::scrub_secrets(&mut cmd);
+        let out = cmd.output().ok().filter(|o| o.status.success())?;
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (lines.len() == names.len()).then_some(())?;
+        names
+            .iter()
+            .zip(lines)
+            .map(|(name, found)| {
+                // Unresolved: pytest falls back to the arg as a path.
+                let p = PathBuf::from(if found.is_empty() { name } else { &found });
+                p.exists().then_some(p)
+            })
+            .collect::<Option<Vec<_>>>()
+    })();
+    if let Ok(mut m) = memo.lock() {
+        m.insert(key, resolved.clone());
+    }
+    resolved
+}
+
 /// Auto-default heuristic (only reached when neither `--collect` nor
 /// `[tool.rstest] collect` was set): pick lazy for a big-enough suite on a
 /// file-affine dist, so a large parallel run stops re-collecting the whole
@@ -1991,7 +2161,7 @@ fn auto_lazy(dist_name: &str, args: &[String], n: usize, tests: usize) -> bool {
         && matches!(dist_name, "load" | "loadfile")
         // nodeid / --pyargs selection can't ride the file walk (same reason
         // explicit lazy falls back), so never auto-pick lazy for those.
-        && !args.iter().any(|a| a.contains("::") || a == "--pyargs")
+        && !selects_nodeids(args)
         // `tests` counts the whole cached suite, not the selection. A path
         // selection (explicit, or --changed/--since-green narrowing) can be a
         // handful of files, and auto-lazy's strict file affinity would cap
@@ -2088,10 +2258,12 @@ fn check_order_shuffle(order: pool::Order, explicit: bool, shuffled: bool) -> Re
 /// Resolve the collection strategy (CLI > [tool.rstest] > auto) and validate
 /// lazy-mode constraints. When neither the flag nor the setting is present,
 /// [`auto_lazy`] decides from suite size and worker count.
+#[allow(clippy::too_many_arguments)]
 fn collect_lazy(
     cli: &Cli,
     settings: &config::RstestSettings,
     dist_name: &str,
+    python: &Path,
     args: &[String],
     n: usize,
     cache: &DurationCache,
@@ -2109,12 +2281,19 @@ fn collect_lazy(
                 );
             }
             // Single-test selection by nodeid wants exact-item dispatch;
-            // --pyargs selects by import path, which the file walk can't
-            // see. Both fall back to full collection.
-            if args.iter().any(|a| a.contains("::") || a == "--pyargs") {
+            // a --pyargs name that doesn't resolve leaves the file walk
+            // nothing to start from. Both fall back to full collection.
+            if selects_nodeids(args) {
                 sink.warn(
-                    "rstest: nodeid/--pyargs arguments given; --collect lazy falls back \
+                    "rstest: nodeid arguments given; --collect lazy falls back \
                      to full collection",
+                );
+                return Ok(false);
+            }
+            if lazy_roots(python, args).is_none() {
+                sink.warn(
+                    "rstest: a --pyargs argument did not resolve to a module or \
+                     package path; --collect lazy falls back to full collection",
                 );
                 return Ok(false);
             }
@@ -2137,6 +2316,7 @@ fn collect_lazy(
         None if cli.shuffle.is_some()
             || cli.incremental
             || cli.shard.is_some()
+            || cli.budget.is_some()
             || matches!(resolve_order(cli, settings), Ok(pool::Order::FailFast)) =>
         {
             Ok(false)
@@ -2162,9 +2342,14 @@ fn collect_lazy(
                 return Ok(false);
             }
             // A walk error (a glob or missing `testpaths` entry, an unreadable
-            // dir) only means auto can't vouch for lazy: stay full, never fail
-            // a run that didn't ask for lazy.
-            let Ok(files) = collect::collect_test_files(&[], &project) else {
+            // dir) or an unresolved --pyargs name only means auto can't vouch
+            // for lazy: stay full, never fail a run that didn't ask for lazy.
+            // Under --pyargs the walk starts at the resolved packages; the
+            // cache then vouches that they are the whole suite it timed.
+            let Some(roots) = lazy_roots(python, args) else {
+                return Ok(false);
+            };
+            let Ok(files) = collect::collect_test_files(&roots, &project) else {
                 return Ok(false);
             };
             let rel: Vec<String> = files
@@ -2176,7 +2361,7 @@ fn collect_lazy(
                         .replace('\\', "/")
                 })
                 .collect();
-            lazy_layout_fits(cache.get(), &rel, n)
+            lazy_layout_fits(cache.get(), &rel, n, durations::load_collect())
         }),
     }
 }
@@ -2203,13 +2388,18 @@ fn requests_doctests<'a>(mut opts: impl Iterator<Item = &'a str>) -> bool {
 ///
 /// Judged as if lazy never steals (stealing needs an explicit `--dist load`,
 /// and this check runs either way), so each file runs whole on one worker: a
-/// file whose cached time exceeds an even per-worker share by more than
-/// [`LAZY_LONG_POLE_SLACK_SECS`] would be the long pole the eager pool avoids
-/// by spreading its tests (this also covers `files < n`).
+/// file whose cached time exceeds an even per-worker share would be the long
+/// pole the eager pool avoids by spreading its tests (this also covers
+/// `files < n`). Lazy pays that excess but saves each worker most of the
+/// whole-suite collection eager repeats per worker: `collect` (cached seconds
+/// one worker spends collecting, `durations::COLLECT_FILE`) times
+/// `(1 - 1/n)`. The excess may use that saving, never less than
+/// [`LAZY_LONG_POLE_SLACK_SECS`] (the whole budget while nothing is recorded).
 fn lazy_layout_fits(
     cache: &std::collections::HashMap<String, f64>,
     files: &[String],
     n: usize,
+    collect: Option<f64>,
 ) -> bool {
     let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
     for (id, secs) in cache {
@@ -2221,7 +2411,8 @@ fn lazy_layout_fits(
     }
     let total: f64 = per_file.values().sum();
     let longest = per_file.values().copied().fold(0.0, f64::max);
-    longest - total / n as f64 <= LAZY_LONG_POLE_SLACK_SECS
+    let saved = collect.unwrap_or(0.0) * (1.0 - 1.0 / n as f64);
+    longest - total / n as f64 <= saved.max(LAZY_LONG_POLE_SLACK_SECS)
 }
 
 /// Wall time a lazy long-pole file may add over an even per-worker share
@@ -2706,6 +2897,39 @@ fn resolve_shuffle_seed(
     Ok(Some(seed))
 }
 
+/// Resolve `--budget DURATION` into seconds. It picks from the id list the
+/// pool dispatches, so it needs the parallel pool and full collection, and a
+/// dist mode that dispatches tests (`--dist each` runs all of them everywhere).
+fn resolve_budget(
+    budget: Option<&str>,
+    n: usize,
+    passthrough: bool,
+    is_lazy: bool,
+    dist_name: &str,
+) -> Result<Option<u64>> {
+    let Some(spec) = budget else { return Ok(None) };
+    let secs = parse_duration_secs(spec).map_err(|e| anyhow::anyhow!("--budget: {e}"))?;
+    if secs == 0 {
+        anyhow::bail!("--budget must be more than 0s");
+    }
+    if n <= 1 || passthrough {
+        anyhow::bail!(
+            "--budget needs the parallel pool (-n >= 2, no -s/--pdb/--co); the \
+             single-worker path runs the session's own full suite with no dispatch filter"
+        );
+    }
+    if is_lazy {
+        anyhow::bail!(
+            "--budget is not supported with --collect lazy: it picks from the full \
+             collection (use --collect full)"
+        );
+    }
+    if dist_name == "each" {
+        anyhow::bail!("--budget is not supported with --dist each (every worker runs every test)");
+    }
+    Ok(Some(secs))
+}
+
 /// Resolve `--shard K/N` into an optional `(k, total)` dispatch filter. `1/1` is
 /// the whole suite (no-op). Otherwise it needs the parallel pool, can't combine
 /// with `--shuffle` (shards must partition identically on every machine), and is
@@ -2927,7 +3151,7 @@ mod tests {
         fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
         mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
         parse_duration_secs, parse_numprocesses, print_run_banner, quarantined_exit,
-        reject_looponfail, requests_doctests, resolve_changed_base, resolve_order,
+        reject_looponfail, requests_doctests, resolve_budget, resolve_changed_base, resolve_order,
         resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
         silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
         warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
@@ -3183,6 +3407,7 @@ mod tests {
             &cli(),
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3198,6 +3423,7 @@ mod tests {
             &cli(),
             &s,
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3208,6 +3434,7 @@ mod tests {
             &cli(),
             &s,
             "loadfile",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3224,6 +3451,7 @@ mod tests {
             &cli(),
             &s,
             "loadscope",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3234,6 +3462,7 @@ mod tests {
             &cli(),
             &s,
             "loadgroup",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3245,6 +3474,7 @@ mod tests {
             &cli(),
             &s,
             "each",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3265,18 +3495,20 @@ mod tests {
             &cli(),
             &s,
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &["test_x.py::test_a".to_string()],
             8,
             &DurationCache::default(),
             &mut Sink::captured().0
         )
         .unwrap());
-        // --pyargs selects by import path => full.
+        // A --pyargs name the interpreter can't resolve => full.
         assert!(!collect_lazy(
             &cli(),
             &s,
             "load",
-            &["--pyargs".to_string()],
+            std::path::Path::new("/nonexistent/python"),
+            &["--pyargs".to_string(), "no_such_pkg_xyz".to_string()],
             8,
             &DurationCache::default(),
             &mut Sink::captured().0
@@ -3290,6 +3522,7 @@ mod tests {
             &cli(),
             &settings_collect(Some("sometimes")),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             8,
             &DurationCache::default(),
@@ -3334,6 +3567,41 @@ mod tests {
             resolve_order(&cli(), &settings_order(Some("fail-fast"))).unwrap(),
             pool::Order::FailFast
         );
+    }
+
+    #[test]
+    fn resolve_order_budget_auto_failfast_explicit_wins() {
+        let mut b = cli();
+        b.budget = Some("90s".into());
+        assert_eq!(
+            resolve_order(&b, &settings_order(None)).unwrap(),
+            pool::Order::FailFast
+        );
+        b.order = Some("throughput".into());
+        assert_eq!(
+            resolve_order(&b, &settings_order(None)).unwrap(),
+            pool::Order::Throughput
+        );
+    }
+
+    #[test]
+    fn resolve_budget_parses_and_refuses_what_it_cannot_pick_from() {
+        let ok = |spec| resolve_budget(Some(spec), 4, false, false, "load");
+        assert_eq!(resolve_budget(None, 0, true, true, "each").unwrap(), None);
+        assert_eq!(ok("90s").unwrap(), Some(90));
+        assert_eq!(ok("5m").unwrap(), Some(300));
+        assert_eq!(ok("45").unwrap(), Some(45));
+        let err = |r: anyhow::Result<Option<u64>>| r.unwrap_err().to_string();
+        assert!(err(ok("soon")).starts_with("--budget: invalid duration"));
+        assert!(err(ok("0s")).contains("more than 0s"));
+        for (n, passthrough) in [(1, false), (0, false), (4, true)] {
+            let r = resolve_budget(Some("90s"), n, passthrough, false, "load");
+            assert!(err(r).contains("needs the parallel pool"));
+        }
+        assert!(err(resolve_budget(Some("90s"), 4, false, true, "load")).contains("--collect lazy"));
+        assert!(err(resolve_budget(Some("90s"), 4, false, false, "each")).contains("--dist each"));
+        // Affinity modes still dispatch tests: allowed.
+        assert!(resolve_budget(Some("90s"), 4, false, false, "loadfile").is_ok());
     }
 
     #[test]
@@ -3475,6 +3743,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3487,6 +3756,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3499,6 +3769,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3511,6 +3782,7 @@ mod tests {
             &c,
             &settings_collect(None),
             "load",
+            std::path::Path::new("/nonexistent/python"),
             &[],
             64,
             &DurationCache::default(),
@@ -3524,9 +3796,33 @@ mod tests {
         // Big suite, but nodeid/--pyargs selection and non-file-affine dists
         // can't ride the file walk => stay full.
         assert!(!auto_lazy("load", &["a.py::t".to_string()], 8, 100_000));
-        assert!(!auto_lazy("load", &["--pyargs".to_string()], 8, 100_000));
+        assert!(!auto_lazy(
+            "load",
+            &["pkg.mod::t".to_string(), "--pyargs".to_string()],
+            8,
+            100_000
+        ));
         assert!(!auto_lazy("loadscope", &[], 8, 100_000));
         assert!(!auto_lazy("loadgroup", &[], 8, 100_000));
+    }
+
+    #[test]
+    fn auto_lazy_ignores_double_colons_in_option_values() {
+        // R54: a `-W` filter or a `--deselect` nodeid is not a selection.
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for a in [
+            args(&["-W", "default::pytest.PytestRemovedIn10Warning"]),
+            args(&["--pythonwarnings", "error::DeprecationWarning"]),
+            args(&["--deselect", "tests/a.py::t"]),
+        ] {
+            assert!(auto_lazy("load", &a, 8, 100_000), "{a:?}");
+        }
+        assert!(!auto_lazy(
+            "load",
+            &args(&["-W", "x::Y", "tests/a.py::t"]),
+            8,
+            100_000
+        ));
     }
 
     fn timings(entries: &[(&str, f64)]) -> std::collections::HashMap<String, f64> {
@@ -3547,7 +3843,8 @@ mod tests {
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["tests/test_a.py", "tests/test_b.py"]),
-            2
+            2,
+            None
         ));
     }
 
@@ -3556,7 +3853,12 @@ mod tests {
         // A doctest in a non-test module (or a --doctest-glob text file) was
         // collected eagerly but is not a python_files match: lazy would drop it.
         let cache = timings(&[("tests/test_a.py::t", 1.0), ("pkg/mod.py::pkg.mod.f", 1.0)]);
-        assert!(!lazy_layout_fits(&cache, &walked(&["tests/test_a.py"]), 1));
+        assert!(!lazy_layout_fits(
+            &cache,
+            &walked(&["tests/test_a.py"]),
+            1,
+            None
+        ));
     }
 
     #[test]
@@ -3567,7 +3869,8 @@ mod tests {
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["tests/test_a.py", "tests/test_skipped_on_linux.py"]),
-            1
+            1,
+            None
         ));
     }
 
@@ -3578,14 +3881,16 @@ mod tests {
         assert!(!lazy_layout_fits(
             &cache,
             &walked(&["test_a.py", "test_b.py"]),
-            8
+            8,
+            None
         ));
         // A fast suite's noisy millisecond skew is below the slack: fine.
         let cache = timings(&[("test_a.py::t", 0.03), ("test_b.py::t", 0.001)]);
         assert!(lazy_layout_fits(
             &cache,
             &walked(&["test_a.py", "test_b.py"]),
-            8
+            8,
+            None
         ));
         // One dominant file among many: the long pole serialises the run.
         let cache = timings(&[
@@ -3596,8 +3901,28 @@ mod tests {
         assert!(!lazy_layout_fits(
             &cache,
             &walked(&["test_big.py", "test_c.py", "test_d.py"]),
-            2
+            2,
+            None
         ));
+    }
+
+    #[test]
+    fn lazy_layout_lets_the_long_pole_use_the_collection_lazy_saves() {
+        // pandas -n 14: the heaviest file runs 7.8s past its share, yet lazy
+        // finished in 28s against 55s full, since each eager worker re-collects
+        // the whole suite. With ~10s of per-worker collection recorded, the
+        // pole fits the ~9.3s saved; without a record the 1s floor holds.
+        let mut ids = vec![("test_big.py::t".to_string(), 17.4)];
+        ids.extend((0..13).map(|i| (format!("test_{i}.py::t"), 9.0)));
+        let cache: std::collections::HashMap<String, f64> = ids.into_iter().collect();
+        let files: Vec<String> = cache
+            .keys()
+            .map(|id| id.split("::").next().unwrap().to_string())
+            .collect();
+        assert!(!lazy_layout_fits(&cache, &files, 14, None));
+        assert!(lazy_layout_fits(&cache, &files, 14, Some(10.0)));
+        // A cheap-to-collect suite saves too little to cover the same pole.
+        assert!(!lazy_layout_fits(&cache, &files, 14, Some(2.0)));
     }
 
     #[test]
@@ -4257,7 +4582,12 @@ mod tests {
         assert_eq!(
             fold(proto::Event::Done {
                 exitstatus: 1,
-                peak_rss: None
+                peak_rss: None,
+                imported: vec![],
+                sys_path: vec![],
+                coverage: false,
+                rewrite: vec![],
+                env: vec![],
             }),
             Some(1)
         );

@@ -163,6 +163,8 @@ pub struct RunMeta {
     pub argv: Vec<String>,
     /// Present only for a `--shard K/N` run; drives `shard-verify`.
     pub shard: Option<ShardMeta>,
+    /// What the `--fork-pool=app` template imported, when one ran.
+    pub warm: Option<crate::scheduling::warm::Stats>,
 }
 
 /// The `--report-json` document (schema 5). Fields are declared alphabetically
@@ -214,8 +216,24 @@ pub struct SnapshotMeta<'a> {
     pub shard: Option<ShardJson<'a>>,
     /// Unix epoch (seconds) the run started.
     pub started_at_epoch: u64,
+    /// The `--fork-pool=app` warm template this run's workers were forked
+    /// from; present only when one imported the app this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_template: Option<WarmTemplateJson>,
     /// Worker count for the run (`-n`).
     pub workers: usize,
+}
+
+/// `meta.warm_template`: what the `--fork-pool=app` template imported.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct WarmTemplateJson {
+    /// Modules on the warm manifest's deny list: imported per worker instead.
+    pub denied: usize,
+    /// Wall time of the template's imports, in seconds (two decimals).
+    pub import_seconds: f64,
+    /// Modules the template imported before forking the workers.
+    pub modules: usize,
 }
 
 /// Failures with one cause: the same exception type, message (numbers and
@@ -260,6 +278,10 @@ pub struct ShardJson<'a> {
     pub k: usize,
     /// Total shard count.
     pub n: usize,
+    /// Tests in this shard's bucket that `--budget` left out, so
+    /// `shard-verify` counts them as covered rather than dropped.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub budget_skipped: &'a [String],
 }
 
 /// One failed phase report, in arrival order.
@@ -395,6 +417,9 @@ pub struct Run {
     /// Items pytest deselected (`-k`/`-m`, `pytest_deselected` hooks); shown
     /// in the summary line only, as pytest does.
     pub deselected: u64,
+    /// Collected tests `--budget` left out, in collection order. Counted as
+    /// deselected in the summary line.
+    pub budget_skipped: Vec<String>,
     /// Passed/skipped/xfailed subtests pytest shows (`verbosity_subtests`,
     /// -v), by pytest's category: `subtests passed`, `skipped`, `xfailed`.
     /// Summary line only, as the categories exist only at that verbosity.
@@ -481,7 +506,8 @@ impl Interruption {
 }
 
 impl Run {
-    /// One setup's mean seconds per module/class scope this run set up.
+    /// One setup's mean seconds per session/package/module/class scope this run
+    /// set up.
     pub fn scope_cost_means(&self) -> impl Iterator<Item = (&String, f64)> {
         self.scope_costs
             .iter()
@@ -489,7 +515,8 @@ impl Run {
             .map(|(k, &(secs, setups))| (k, secs / setups as f64))
     }
 
-    /// Fold one worker session's module/class fixture setup costs in.
+    /// Fold one worker session's session/package/module/class fixture setup
+    /// costs in.
     pub fn add_scope_costs(&mut self, costs: Vec<proto::ScopeCost>) {
         for c in costs {
             let e = self.scope_costs.entry(c.key).or_default();
@@ -899,7 +926,11 @@ impl Run {
             (n("failed"), "failed", "failed"),
             (n("passed"), "passed", "passed"),
             (n("skipped"), "skipped", "skipped"),
-            (self.deselected, "deselected", "deselected"),
+            (
+                self.deselected + self.budget_skipped.len() as u64,
+                "deselected",
+                "deselected",
+            ),
             (n("xfailed"), "xfailed", "xfailed"),
             (n("xpassed"), "xpassed", "xpassed"),
             (warnings, "warning", "warnings"),
@@ -991,8 +1022,14 @@ impl Run {
                     collection_size: s.collection_size,
                     k: s.k,
                     n: s.n,
+                    budget_skipped: &self.budget_skipped,
                 }),
                 started_at_epoch: run_meta.started_at_epoch,
+                warm_template: run_meta.warm.as_ref().map(|w| WarmTemplateJson {
+                    denied: w.denied,
+                    import_seconds: (w.seconds * 100.0).round() / 100.0,
+                    modules: w.modules,
+                }),
                 workers: run_meta.workers,
             },
             tests: &self.tests,
@@ -1286,6 +1323,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: Vec::new(),
+            warm: None,
             shard: None,
         };
         let v = run.snapshot_value(&meta);
@@ -1297,6 +1335,33 @@ mod tests {
         let mut quiet = Run::default();
         full(&mut quiet, "t/a.py::x", "failed");
         assert!(quiet.snapshot_value(&meta).get("failure_groups").is_none());
+    }
+
+    #[test]
+    fn report_json_carries_the_warm_template_only_when_one_ran() {
+        let mut run = Run::default();
+        full(&mut run, "t/a.py::x", "passed");
+        let mut meta = RunMeta {
+            exitstatus: 0,
+            duration_seconds: 1.0,
+            started_at_epoch: 0,
+            workers: 4,
+            argv: Vec::new(),
+            warm: None,
+            shard: None,
+        };
+        assert!(run.snapshot_value(&meta)["meta"]
+            .get("warm_template")
+            .is_none());
+        meta.warm = Some(crate::scheduling::warm::Stats {
+            modules: 312,
+            denied: 4,
+            seconds: 1.8349,
+        });
+        let w = &run.snapshot_value(&meta)["meta"]["warm_template"];
+        assert_eq!(w["modules"], 312);
+        assert_eq!(w["denied"], 4);
+        assert_eq!(w["import_seconds"], 1.83);
     }
 
     #[test]
@@ -1473,6 +1538,9 @@ mod tests {
             "2 failed, 1 passed, 3 deselected, 1 warning, 2 errors"
         );
         assert!(run.summary_line_with(2).contains("2 warnings, 2 errors"));
+        // Tests --budget left out count as deselected, as pytest would say.
+        run.budget_skipped = vec!["c.py::x".into(), "c.py::y".into()];
+        assert!(run.summary_line().contains("1 passed, 5 deselected"));
     }
 
     #[test]
@@ -1611,6 +1679,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         let mut run = Run::default();
@@ -1729,6 +1798,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 1,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // Measured (doctor / stream run): cpu rides the call report and lands in
@@ -1757,12 +1827,14 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: vec![],
+            warm: None,
             shard: None,
         };
         // Absent on a non-shard run: document shape unchanged.
         assert!(run.snapshot_value(&base)["meta"].get("shard").is_none());
         // Present and correctly shaped under --shard.
         let meta = RunMeta {
+            warm: None,
             shard: Some(ShardMeta {
                 k: 2,
                 n: 4,
@@ -1777,6 +1849,17 @@ mod tests {
         assert_eq!(s["n"], 4);
         assert_eq!(s["collection_hash"], "deadbeef");
         assert_eq!(s["collection_size"], 42);
+        // No --budget: no list.
+        assert!(s.get("budget_skipped").is_none());
+        let run = Run {
+            budget_skipped: vec!["t.py::slow".into()],
+            ..Default::default()
+        };
+        let s = run.snapshot_value(&meta);
+        assert_eq!(
+            s["meta"]["shard"]["budget_skipped"],
+            serde_json::json!(["t.py::slow"])
+        );
     }
 
     #[test]

@@ -1,0 +1,402 @@
+{
+ "environment": {
+  "date": "2026-11-11",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "machine": "M4 Max, 14 cores",
+  "rstest": "rstest 0.11.1",
+  "rstest_commit": "e4f3cad",
+  "dirty": false,
+  "method": "corpus/watch_cycle.py variant with --prelude: the edited test file starts with the prelude imports, so each rerun pays them. Worker python: the scikit-learn corpus venv.",
+  "prelude": "import sklearn.ensemble; import sklearn.linear_model; import sklearn.model_selection"
+ },
+ "baseline": {
+  "environment": {
+   "date": "2026-11-11",
+   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+   "rstest": "rstest 0.11.1",
+   "rstest_commit": "e4f3cad",
+   "worker_python": "3.13.13",
+   "pytest": "9.2.0",
+   "cycles": 8,
+   "settle_s": 1.0,
+   "prelude": ""
+  },
+  "points": [
+   {
+    "workers": 0,
+    "cycles": [
+     {
+      "detect_ms": 316.1,
+      "run_ms": 117.4,
+      "total_ms": 433.5
+     },
+     {
+      "detect_ms": 313.4,
+      "run_ms": 140.2,
+      "total_ms": 453.6
+     },
+     {
+      "detect_ms": 313.6,
+      "run_ms": 144.7,
+      "total_ms": 458.3
+     },
+     {
+      "detect_ms": 315.6,
+      "run_ms": 130.5,
+      "total_ms": 446.0
+     },
+     {
+      "detect_ms": 311.7,
+      "run_ms": 125.1,
+      "total_ms": 436.8
+     },
+     {
+      "detect_ms": 316.3,
+      "run_ms": 124.9,
+      "total_ms": 441.2
+     },
+     {
+      "detect_ms": 315.5,
+      "run_ms": 118.8,
+      "total_ms": 434.3
+     },
+     {
+      "detect_ms": 314.2,
+      "run_ms": 124.5,
+      "total_ms": 438.8
+     }
+    ],
+    "detect_ms": {
+     "median": 314.9,
+     "min": 311.7,
+     "max": 316.3
+    },
+    "run_ms": {
+     "median": 125.0,
+     "min": 117.4,
+     "max": 144.7
+    },
+    "total_ms": {
+     "median": 440.0,
+     "min": 433.5,
+     "max": 458.3
+    }
+   },
+   {
+    "workers": 2,
+    "cycles": [
+     {
+      "detect_ms": 314.8,
+      "run_ms": 119.7,
+      "total_ms": 434.5
+     },
+     {
+      "detect_ms": 314.8,
+      "run_ms": 115.2,
+      "total_ms": 430.1
+     },
+     {
+      "detect_ms": 314.8,
+      "run_ms": 112.4,
+      "total_ms": 427.2
+     },
+     {
+      "detect_ms": 315.5,
+      "run_ms": 117.9,
+      "total_ms": 433.4
+     },
+     {
+      "detect_ms": 315.0,
+      "run_ms": 116.8,
+      "total_ms": 431.8
+     },
+     {
+      "detect_ms": 313.1,
+      "run_ms": 124.9,
+      "total_ms": 437.9
+     },
+     {
+      "detect_ms": 316.2,
+      "run_ms": 114.3,
+      "total_ms": 430.5
+     },
+     {
+      "detect_ms": 304.3,
+      "run_ms": 143.9,
+      "total_ms": 448.2
+     }
+    ],
+    "detect_ms": {
+     "median": 314.8,
+     "min": 304.3,
+     "max": 316.2
+    },
+    "run_ms": {
+     "median": 117.3,
+     "min": 112.4,
+     "max": 143.9
+    },
+    "total_ms": {
+     "median": 432.6,
+     "min": 427.2,
+     "max": 448.2
+    }
+   },
+   {
+    "workers": 4,
+    "cycles": [
+     {
+      "detect_ms": 316.5,
+      "run_ms": 130.7,
+      "total_ms": 447.2
+     },
+     {
+      "detect_ms": 314.1,
+      "run_ms": 126.9,
+      "total_ms": 440.9
+     },
+     {
+      "detect_ms": 313.0,
+      "run_ms": 118.6,
+      "total_ms": 431.6
+     },
+     {
+      "detect_ms": 316.1,
+      "run_ms": 136.3,
+      "total_ms": 452.5
+     },
+     {
+      "detect_ms": 313.7,
+      "run_ms": 119.0,
+      "total_ms": 432.7
+     },
+     {
+      "detect_ms": 304.2,
+      "run_ms": 134.3,
+      "total_ms": 438.5
+     },
+     {
+      "detect_ms": 315.1,
+      "run_ms": 133.8,
+      "total_ms": 448.9
+     },
+     {
+      "detect_ms": 316.0,
+      "run_ms": 129.9,
+      "total_ms": 445.9
+     }
+    ],
+    "detect_ms": {
+     "median": 314.6,
+     "min": 304.2,
+     "max": 316.5
+    },
+    "run_ms": {
+     "median": 130.3,
+     "min": 118.6,
+     "max": 136.3
+    },
+    "total_ms": {
+     "median": 443.4,
+     "min": 431.6,
+     "max": 452.5
+    }
+   }
+  ]
+ },
+ "sklearn": {
+  "environment": {
+   "date": "2026-11-11",
+   "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+   "rstest": "rstest 0.11.1",
+   "rstest_commit": "e4f3cad",
+   "worker_python": "3.13.13",
+   "pytest": "9.2.0",
+   "cycles": 8,
+   "settle_s": 1.0,
+   "prelude": "import sklearn.ensemble;import sklearn.linear_model;import sklearn.model_selection"
+  },
+  "points": [
+   {
+    "workers": 0,
+    "cycles": [
+     {
+      "detect_ms": 317.0,
+      "run_ms": 676.5,
+      "total_ms": 993.5
+     },
+     {
+      "detect_ms": 313.7,
+      "run_ms": 666.1,
+      "total_ms": 979.7
+     },
+     {
+      "detect_ms": 307.8,
+      "run_ms": 661.5,
+      "total_ms": 969.3
+     },
+     {
+      "detect_ms": 316.3,
+      "run_ms": 704.7,
+      "total_ms": 1021.1
+     },
+     {
+      "detect_ms": 311.7,
+      "run_ms": 693.4,
+      "total_ms": 1005.1
+     },
+     {
+      "detect_ms": 310.9,
+      "run_ms": 701.6,
+      "total_ms": 1012.5
+     },
+     {
+      "detect_ms": 315.7,
+      "run_ms": 695.5,
+      "total_ms": 1011.2
+     },
+     {
+      "detect_ms": 315.3,
+      "run_ms": 669.9,
+      "total_ms": 985.2
+     }
+    ],
+    "detect_ms": {
+     "median": 314.5,
+     "min": 307.8,
+     "max": 317.0
+    },
+    "run_ms": {
+     "median": 685.0,
+     "min": 661.5,
+     "max": 704.7
+    },
+    "total_ms": {
+     "median": 999.3,
+     "min": 969.3,
+     "max": 1021.1
+    }
+   },
+   {
+    "workers": 2,
+    "cycles": [
+     {
+      "detect_ms": 315.5,
+      "run_ms": 745.3,
+      "total_ms": 1060.8
+     },
+     {
+      "detect_ms": 307.3,
+      "run_ms": 692.7,
+      "total_ms": 1000.0
+     },
+     {
+      "detect_ms": 313.2,
+      "run_ms": 711.0,
+      "total_ms": 1024.1
+     },
+     {
+      "detect_ms": 314.0,
+      "run_ms": 710.8,
+      "total_ms": 1024.8
+     },
+     {
+      "detect_ms": 314.2,
+      "run_ms": 695.3,
+      "total_ms": 1009.5
+     },
+     {
+      "detect_ms": 316.1,
+      "run_ms": 668.9,
+      "total_ms": 984.9
+     },
+     {
+      "detect_ms": 316.1,
+      "run_ms": 669.3,
+      "total_ms": 985.4
+     },
+     {
+      "detect_ms": 315.4,
+      "run_ms": 677.9,
+      "total_ms": 993.3
+     }
+    ],
+    "detect_ms": {
+     "median": 314.8,
+     "min": 307.3,
+     "max": 316.1
+    },
+    "run_ms": {
+     "median": 694.0,
+     "min": 668.9,
+     "max": 745.3
+    },
+    "total_ms": {
+     "median": 1004.8,
+     "min": 984.9,
+     "max": 1060.8
+    }
+   },
+   {
+    "workers": 4,
+    "cycles": [
+     {
+      "detect_ms": 314.1,
+      "run_ms": 702.7,
+      "total_ms": 1016.9
+     },
+     {
+      "detect_ms": 316.2,
+      "run_ms": 703.6,
+      "total_ms": 1019.8
+     },
+     {
+      "detect_ms": 312.5,
+      "run_ms": 703.8,
+      "total_ms": 1016.3
+     },
+     {
+      "detect_ms": 315.9,
+      "run_ms": 697.8,
+      "total_ms": 1013.7
+     },
+     {
+      "detect_ms": 316.7,
+      "run_ms": 697.2,
+      "total_ms": 1013.9
+     },
+     {
+      "detect_ms": 317.0,
+      "run_ms": 694.2,
+      "total_ms": 1011.2
+     },
+     {
+      "detect_ms": 315.2,
+      "run_ms": 683.0,
+      "total_ms": 998.1
+     },
+     {
+      "detect_ms": 313.2,
+      "run_ms": 722.2,
+      "total_ms": 1035.3
+     }
+    ],
+    "detect_ms": {
+     "median": 315.5,
+     "min": 312.5,
+     "max": 317.0
+    },
+    "run_ms": {
+     "median": 700.2,
+     "min": 683.0,
+     "max": 722.2
+    },
+    "total_ms": {
+     "median": 1015.1,
+     "min": 998.1,
+     "max": 1035.3
+    }
+   }
+  ]
+ }
+}

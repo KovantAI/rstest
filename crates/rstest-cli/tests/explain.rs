@@ -23,6 +23,19 @@ fn fresh_dir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("rstest-explain-test-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join(".rstest_cache")).unwrap();
+    // The test files the cached ids name: a duration whose file is gone is
+    // dropped on load, as for a deleted test.
+    for f in [
+        "tests/test_x.py",
+        "t/test_q.py",
+        "t/unrelated.py",
+        "t/a.py",
+        "test_q.py",
+    ] {
+        let p = d.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "").unwrap();
+    }
     d
 }
 

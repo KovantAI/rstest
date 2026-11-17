@@ -207,12 +207,20 @@ pub struct Cli {
     #[arg(short = 'n', long = "numprocesses", value_parser = numprocesses_arg)]
     pub(crate) numprocesses: Option<String>,
 
-    /// Fork-prewarm the worker pool (Unix only): import the vendored pytest core
-    /// once in a zygote, then fork the workers off it instead of paying that
-    /// import in every freshly spawned worker. Cuts pool startup at high `-n`;
-    /// no effect on Windows or single-worker runs. [default: off]
-    #[arg(long = "fork-pool")]
-    pub(crate) fork_pool: bool,
+    /// Fork-prewarm the worker pool (Unix only): import once in a template
+    /// process, then fork the workers off it instead of paying that import in
+    /// every freshly spawned worker. `core` (bare `--fork-pool`) imports the
+    /// vendored pytest core; `app` also imports your app's modules, and
+    /// under `--watch` keeps the template for the session. No effect on
+    /// Windows or single-worker runs. [default: off; `app` under `--watch`]
+    #[arg(
+        long = "fork-pool",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "core",
+        value_enum
+    )]
+    pub(crate) fork_pool: Option<crate::scheduling::warm::ForkPool>,
 
     /// Python interpreter to run workers with: a path, or a version request
     /// (`3.12`, `>=3.12,<3.13`, `pypy@3.10`, `3.13t`). Defaults to the active
@@ -252,6 +260,13 @@ pub struct Cli {
     /// the leak-check instrumentation on its own (no --doctor needed).
     #[arg(long = "fail-on-leak")]
     pub(crate) fail_on_leak: bool,
+
+    /// Opt-in: scan installed plugins and loaded conftests for code that only
+    /// works on an xdist controller (rstest has none) and warn about the ones
+    /// that will crash or silently do nothing at `-n >= 2`. `rstest try` turns
+    /// it on for its rstest run.
+    #[arg(long = "warn-on-dead-master-path")]
+    pub(crate) warn_on_dead_master_path: bool,
 
     /// Internal: turn on the workers' cpu/fixture instrumentation without the
     /// doctor report. Passed only by a parent rstest (migrate-check's
@@ -308,8 +323,8 @@ pub struct Cli {
 
     /// Dispatch ordering under `--dist load`: "throughput" (slow tests first,
     /// to pack workers — the default) or "fail-fast" (recently-failed, then
-    /// flaky tests first, then the throughput order for the rest, for the
-    /// earliest possible red signal). Pairs with `--maxfail`/`-x` for true
+    /// tests near changed code, then flaky tests first, then the throughput
+    /// order for the rest, for the earliest possible red signal). Pairs with `--maxfail`/`-x` for true
     /// early exit. Auto-selects fail-fast under `--watch`. Config
     /// `[tool.rstest] order`.
     #[arg(long, value_name = "MODE")]
@@ -481,6 +496,15 @@ pub struct Cli {
     /// `rstest shard-verify` proves it after the fact. Needs `-n 2` or more.
     #[arg(long, value_name = "K/N")]
     pub(crate) shard: Option<String>,
+
+    /// Run the tests most worth running in this much wall time (`90s`, `5m`),
+    /// from recorded durations: test files changed since the last green run
+    /// always, then recently failed, near-change and flaky tests, then the
+    /// shortest of the rest. An estimate that picks tests, not a timeout. A
+    /// budget run is never a green baseline. Under `--shard` each shard gets
+    /// the whole budget. Needs `-n 2` or more; implies `--order fail-fast`.
+    #[arg(long, value_name = "DURATION")]
+    pub(crate) budget: Option<String>,
 
     /// Shared-cache remote: a directory / `file://` path (local, an NFS/EFS
     /// mount, or a dir a CI step materializes), an `s3://` / `gs://` bucket
@@ -837,9 +861,9 @@ pub(crate) fn split_argv() -> (Vec<String>, Vec<String>) {
 const BOOL_FLAGS: &[&str] = &[
     "--doctor",
     "--xdist-trial",
-    "--fork-pool",
     "--watch",
     "--fail-on-leak",
+    "--warn-on-dead-master-path",
     "--instrument-workers",
     "--reruns-only-known-flaky",
     "--since-green",
@@ -939,7 +963,13 @@ pub(crate) const AUTO_QUARANTINE_MAX: u32 = 5;
 /// Optional-value flags (`num_args = 0..=1`): a bare `--changed` consumes
 /// nothing, an attached `--changed=REV` carries its value inline. Never eats
 /// the following argv item (that item is a path / pytest flag).
-const OPT_FLAGS: &[&str] = &["--changed", "--shuffle", "--debug", "--auto-quarantine"];
+const OPT_FLAGS: &[&str] = &[
+    "--changed",
+    "--shuffle",
+    "--debug",
+    "--auto-quarantine",
+    "--fork-pool",
+];
 
 /// Flags that take a value: either the following argv item (`--dist load`) or
 /// `=`-joined (`--dist=load`). `-n` also accepts the attached short forms
@@ -974,6 +1004,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--html",
     "--dist",
     "--shard",
+    "--budget",
     "--collect",
     "--order",
     "--keep-last",
@@ -1958,6 +1989,38 @@ mod tests {
                 max_age: Some(ref d),
             }) if d == "30d"
         ));
+    }
+
+    #[test]
+    fn fork_pool_takes_an_optional_mode() {
+        use crate::scheduling::warm::ForkPool;
+        let parse = |args: &[&str]| {
+            let (own, session) = split_args(v(args));
+            (Cli::try_parse_from(own).map(|c| c.fork_pool), session)
+        };
+        assert_eq!(
+            parse(&["--fork-pool", "tests/"]).0.unwrap(),
+            Some(ForkPool::Core)
+        );
+        // The next token is a path, never the mode.
+        assert_eq!(parse(&["--fork-pool", "tests/"]).1, v(&["tests/"]));
+        assert_eq!(
+            parse(&["--fork-pool=core"]).0.unwrap(),
+            Some(ForkPool::Core)
+        );
+        assert_eq!(parse(&["--fork-pool=app"]).0.unwrap(), Some(ForkPool::App));
+        assert_eq!(parse(&[]).0.unwrap(), None);
+        assert!(parse(&["--fork-pool=bogus"]).0.is_err());
+    }
+
+    #[test]
+    fn warn_on_dead_master_path_is_an_owned_flag() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (own, session) = split_args(v(&["--warn-on-dead-master-path", "tests/"]));
+        assert_eq!(own, v(&["rstest", "--warn-on-dead-master-path"]));
+        assert_eq!(session, v(&["tests/"]));
+        assert!(Cli::parse_from(&own).warn_on_dead_master_path);
+        assert!(!Cli::parse_from(["rstest"]).warn_on_dead_master_path);
     }
 
     #[test]

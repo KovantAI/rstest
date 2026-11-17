@@ -9,12 +9,25 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rstest_worker._internal import dispatch
 from rstest_worker._internal.dispatch import (
     ItemDispatchPlugin,
     LazyDispatchPlugin,
     _ignored_by_recursion,
     _session_roots,
 )
+
+
+@pytest.fixture(autouse=True)
+def _frozen_collect_clock(monkeypatch):
+    # Collection timings ride the payloads only when non-zero: a frozen clock
+    # keeps the exact-payload assertions below independent of machine speed.
+    monkeypatch.setattr(dispatch, "_now", lambda: 0.0)
+
+
+def _ticking_clock(monkeypatch, step):
+    ticks = iter(range(0, 1000))
+    monkeypatch.setattr(dispatch, "_now", lambda: next(ticks) * step)
 
 
 class FakeConn:
@@ -79,6 +92,18 @@ def test_collection_finish_minimal_payload_without_send_ids(monkeypatch):
     session = SimpleNamespace(items=[FakeItem("t.py::a"), FakeItem("t.py::b")])
     ItemDispatchPlugin(conn).pytest_collection_finish(session)
     assert conn.sent == [("collection_done", {"count": 2, "hash": _digest(["t.py::a", "t.py::b"])})]
+
+
+def test_collection_finish_reports_the_collection_time(monkeypatch):
+    # The whole-suite collection each full-pool worker repeats: the saving
+    # auto-lazy weighs a long pole against.
+    monkeypatch.delenv("RSTEST_SEND_IDS", raising=False)
+    _ticking_clock(monkeypatch, 2.5)
+    conn = FakeConn()
+    plugin = ItemDispatchPlugin(conn)
+    plugin.pytest_collection(SimpleNamespace())
+    plugin.pytest_collection_finish(SimpleNamespace(items=[FakeItem("t.py::a")]))
+    assert conn.sent[0][1]["collect_seconds"] == 2.5
 
 
 def test_collection_finish_reports_deselected_items(monkeypatch):
@@ -704,6 +729,26 @@ def test_lazy_collect_file_reports_its_own_deselected_items(tmp_path):
     session.perform_collect = collect
     assert plugin._collect_files(session, ["t.py"], {}) == 1
     assert conn.sent == [("file_collected", {"path": "t.py", "ids": ["t.py::a"], "deselected": 2})]
+
+
+def test_lazy_session_items_keep_every_collected_batch():
+    # Corpus regression (django-allauth, -n 8 on 4 cores): pytest's
+    # perform_collect REPLACES session.items with its own batch. A worker that
+    # collected a DB-free file after the first DB test's file but before
+    # running it left pytest-django's django_db_setup (which picks the test
+    # databases from session.items) with no DB test in view: it created no test
+    # database and every DB test on that worker failed with "no such table".
+    batches = iter([[FakeItem("a.py::uses_db")], [FakeItem("b.py::no_db")]])
+
+    def perform_collect(paths, genitems):
+        session.items = next(batches)  # what pytest's Session does
+        return session.items
+
+    session = SimpleNamespace(config=_CWD_CONFIG, items=[], perform_collect=perform_collect)
+    plugin, by_id = LazyDispatchPlugin(FakeConn()), {}
+    plugin._collect_files(session, ["a.py"], by_id)
+    plugin._collect_files(session, ["b.py"], by_id)
+    assert [it.nodeid for it in session.items] == ["a.py::uses_db", "b.py::no_db"]
 
 
 def _lazy_session(perform_collect, *, collectonly=False):

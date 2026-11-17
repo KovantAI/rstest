@@ -34,6 +34,7 @@ from _harness import (
     WINDOWS,
     check,
     clear_e2e_log,
+    git_init_commit,
     read_e2e_rows,
 )
 
@@ -120,6 +121,70 @@ def gate_lazy_collection(g, args, binary):
     r = g.run("crash", "-n", "2", "--collect", "lazy")
     check("lazy: crash completes", "1 failed, 5 passed" in r.stdout, r.stdout[-200:])
     check("lazy: crash attributed", "crashed while running" in r.stdout, r.stdout[-300:])
+    # R52: a conftest that skips its directory skips it, as directory
+    # collection does; it used to abort the run as a collection error. Two
+    # files below it: the directory skip still counts once.
+    g.write(
+        "dirskip/skipped/conftest.py",
+        'import pytest\npytest.importorskip("no_such_module_xyz")\n',
+    )
+    g.write("dirskip/skipped/test_s1.py", "def test_s(): pass\n")
+    g.write("dirskip/skipped/test_s2.py", "def test_s(): pass\n")
+    g.write("dirskip/test_a.py", "def test_a(): pass\n")
+    g.write("dirskip/test_b.py", "def test_b(): pass\n")
+    r = g.run("dirskip", "-n", "2", "--collect", "lazy")
+    check(
+        "lazy: conftest skipping its directory skips it",
+        r.returncode == 0 and "2 passed, 1 skipped" in r.stdout and "error" not in r.stdout,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+    # R54: `::` in an option value is no nodeid selection; lazy stays on and
+    # honors the deselect.
+    r = g.run("dirskip", "-n", "2", "--collect", "lazy", "--deselect", "dirskip/test_a.py::test_a")
+    check(
+        "lazy: a --deselect nodeid keeps lazy collection",
+        r.returncode == 0
+        and "1 passed, 1 skipped, 1 deselected" in r.stdout
+        and "falls back" not in r.stdout + r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+    # --pyargs: each name resolves to its package (or module) path, which the
+    # lazy file walk starts from; same tests as full collection. A name that
+    # doesn't resolve keeps full collection.
+    g.write("pyargs_proj/pytest.ini", "")
+    g.write("pyargs_proj/pkgx/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/test_a.py", "def test_a(): pass\ndef test_b(): pass\n")
+    g.write("pyargs_proj/pkgx/tests/test_c.py", "def test_c(): pass\n")
+    pcwd = g.tmp / "pyargs_proj"
+    ids = {}
+    for mode in ("full", "lazy"):
+        rp = pcwd / f"{mode}.json"
+        r = g.run(
+            "--pyargs", "pkgx", "-n", "2", "--collect", mode, "--report-json", str(rp), cwd=pcwd
+        )
+        ids[mode] = set(json.loads(rp.read_text())["tests"]) if rp.exists() else set()
+    check(
+        "lazy: --pyargs package runs lazy, same tests as full",
+        r.returncode == 0
+        and "falls back" not in r.stdout + r.stderr
+        and len(ids["full"]) == 3
+        and ids["lazy"] == ids["full"],
+        f"rc={r.returncode} full={sorted(ids['full'])} lazy={sorted(ids['lazy'])} "
+        + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "pkgx.tests.test_c", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: --pyargs module runs lazy",
+        r.returncode == 0 and "1 passed" in r.stdout and "falls back" not in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "no_such_pkg_xyz", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: unresolved --pyargs falls back to full collection",
+        "did not resolve" in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
     # R32: a send to a dead worker is not fatal; its ids are requeued and
     # run on the respawned worker.
     if not WINDOWS:
@@ -257,6 +322,102 @@ def gate_lazy_collection(g, args, binary):
     check(
         "lazy: serial exclusive",
         not overlap and len({s["worker"] for s in lser}) == 1,
+    )
+
+
+def gate_rootdir_matches_pytest(g, args, binary):
+    print("== rootdir matches pytest ==")
+    # rstest anchors .rstest_cache at its own reading of pytest's rootdir and
+    # keys file lookups on it; cached test ids hang off pytest's real one. If
+    # they differ nothing matches, scheduling silently falls back to path
+    # order, and rstest warns. pytest reads PYTEST_ADDOPTS before it settles
+    # the rootdir, so a `--rootdir` there moves it, and rstest must follow.
+    g.write("rootmm/pytest.ini", "")
+    g.write("rootmm/tests/test_a.py", "def test_a(): pass\n")
+    g.write("rootmm/tests/test_b.py", "def test_b(): pass\n")
+    cwd = g.tmp / "rootmm"
+    for mode in ("full", "lazy"):
+        r = g.run("tests", "-n", "2", "--collect", mode, cwd=cwd)
+        check(
+            f"rootdir: no warning when pytest agrees ({mode})",
+            r.returncode == 0 and "rootdir" not in r.stderr,
+            r.stderr[-300:],
+        )
+        r = g.run(
+            "tests",
+            "-n",
+            "2",
+            "--collect",
+            mode,
+            cwd=cwd,
+            env_extra={"PYTEST_ADDOPTS": "--rootdir=tests"},
+        )
+        check(
+            f"rootdir: a PYTEST_ADDOPTS --rootdir anchors the cache there ({mode})",
+            r.returncode == 0
+            and "differs from the one rstest resolved" not in r.stderr
+            and (cwd / "tests" / ".rstest_cache" / "durations.json").exists(),
+            r.stderr[-300:],
+        )
+
+
+def gate_auto_lazy_long_pole_budget(g, args, binary):
+    print("== auto-lazy long-pole budget ==")
+    # Auto-lazy keeps full collection when one file would run long past its
+    # per-worker share, unless lazy saves more than that: every eager worker
+    # re-collects the whole suite, which collect.json records. 2,000 tests x
+    # 8 workers clears the size gate; the seeded timings put test_big.py ~31s
+    # past its share. Every run rewrites both caches, so each check re-seeds.
+    proj = g.tmp / "autolazy"
+    shutil.rmtree(proj, ignore_errors=True)
+    g.write("autolazy/pytest.ini", "")
+    body = "import pytest\n@pytest.mark.parametrize('i', range(500))\ndef test_x(i): pass\n"
+    files = ["test_big.py", "test_a.py", "test_b.py", "test_c.py"]
+    for f in files:
+        g.write(f"autolazy/{f}", body)
+    cache = proj / ".rstest_cache"
+
+    def seed(collect):
+        cache.mkdir(parents=True, exist_ok=True)
+        timings = {
+            f"{f}::test_x[{i}]": (40.0 if f == "test_big.py" else 10.0) / 500
+            for f in files
+            for i in range(500)
+        }
+        (cache / "durations.json").write_text(json.dumps(timings), encoding="utf-8")
+        (cache / "collect.json").unlink(missing_ok=True)
+        if collect is not None:
+            (cache / "collect.json").write_text(
+                json.dumps({"secs": collect, "epoch": 0}), encoding="utf-8"
+            )
+
+    def picked_lazy():
+        r = g.run("-n", "8", cwd=proj)
+        return r.returncode == 0 and "auto-selected lazy" in r.stderr, r
+
+    for collect, want, label in [
+        (None, False, "no collection recorded: the 1s floor keeps full"),
+        (40.0, True, "collection lazy saves covers the long pole: lazy"),
+        (5.0, False, "too little collection saved: full"),
+    ]:
+        seed(collect)
+        lazy, r = picked_lazy()
+        check(
+            f"auto-lazy: {label}",
+            lazy == want and r.returncode == 0,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )
+    seed(None)
+    r = g.run("-n", "8", "--collect", "full", cwd=proj)
+    recorded = (
+        json.loads((cache / "collect.json").read_text())
+        if (cache / "collect.json").exists()
+        else {}
+    )
+    check(
+        "auto-lazy: a full-collection run records collect.json",
+        r.returncode == 0 and recorded.get("secs", 0) > 0,
+        f"rc={r.returncode} collect.json={recorded}",
     )
 
 
@@ -1193,6 +1354,58 @@ def gate_order_fail_fast(g, args, binary):
         "ignored under --collect lazy" in r.stderr,
         r.stderr[-300:],
     )
+    # A test file edited in the working tree leads even on a cold cache (no
+    # flake history): its red surfaces first, not after the 40 clean tests
+    # collected before it.
+    near = g.tmp / "ffnear"
+    shutil.rmtree(near, ignore_errors=True)
+    g.write("ffnear/pytest.ini", "[pytest]\n")
+    for f in "abcdefgh":
+        g.write(
+            f"ffnear/test_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.05)\n" for i in range(5)),
+        )
+    g.write("ffnear/test_z.py", "def test_edited(): assert True\n")
+    git_init_commit(near)
+    g.write("ffnear/test_z.py", "def test_edited(): assert False\n")
+    r = g.run("-n", "2", "-x", "-v", "--order", "fail-fast", cwd=str(near))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "fail-fast: test file edited in the working tree runs first",
+        r.returncode == 1 and "test_edited" in r.stdout and (m is None or int(m.group(1)) < 10),
+        r.stdout[-300:] + r.stderr[-200:],
+    )
+    check(
+        "fail-fast: -v says what leads the queue",
+        "fail-fast: leading with 0 recent failures, 1 near changes, 0 flaky" in r.stderr,
+        r.stderr[-300:],
+    )
+    # Co-failure: a and b failed together in two runs. With no flake record
+    # pulling b forward (flakes.json gone, history kept), a's failure must pull
+    # b, collected last, ahead of the 40 clean tests, so --maxfail 2 stops early.
+    co = g.tmp / "ffco"
+    shutil.rmtree(co, ignore_errors=True)
+    g.write("ffco/pytest.ini", "[pytest]\n")
+    g.write("ffco/test_a.py", "def test_a(): assert False\n")
+    for f in "cdefghij":
+        g.write(
+            f"ffco/test_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.05)\n" for i in range(5)),
+        )
+    g.write("ffco/test_z.py", "def test_b(): assert False\n")
+    for _ in range(2):
+        g.run("-n", "2", cwd=str(co))
+    (co / ".rstest_cache" / "flakes.json").unlink()
+    r = g.run("-n", "2", "--maxfail", "2", "--order", "fail-fast", cwd=str(co))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "fail-fast: a failure pulls its co-failure partner forward",
+        r.returncode == 1
+        and "test_a" in r.stdout
+        and "test_b" in r.stdout
+        and (m is None or int(m.group(1)) < 15),
+        r.stdout[-300:] + r.stderr[-200:],
+    )
     # Monorepo root validates --order once, before fanning out.
     mono = g.tmp / "ffmono"
     shutil.rmtree(mono, ignore_errors=True)
@@ -1213,6 +1426,124 @@ def gate_order_fail_fast(g, args, binary):
         "fail-fast: monorepo forwards a valid --order",
         r.returncode == 0 and "monorepo: 2 projects" in r.stdout,
         f"rc={r.returncode} " + r.stdout[-300:],
+    )
+
+
+def gate_budget(g, args, binary):
+    print("== --budget ==")
+    suite = g.tmp / "bgsuite"
+    shutil.rmtree(suite, ignore_errors=True)
+    g.write("bgsuite/pytest.ini", "[pytest]\n")
+    for f in "abcdef":
+        g.write(
+            f"bgsuite/test_slow_{f}.py",
+            "import time\n" + "".join(f"def test_{i}(): time.sleep(0.2)\n" for i in range(4)),
+        )
+    g.write("bgsuite/test_fast.py", "".join(f"def test_{i}(): pass\n" for i in range(10)))
+    g.write("bgsuite/test_red.py", "def test_red(): assert False\n")
+    g.write("bgsuite/test_edit.py", "def test_e(): pass\n")
+    git_init_commit(suite)
+    # Cold: no durations to estimate from, so everything runs (and is timed).
+    r = g.run("-n", "2", "--budget", "2s", cwd=str(suite))
+    check(
+        "budget: a cold cache runs everything and says so",
+        r.returncode == 1
+        and "no recorded durations yet, running all 36" in r.stderr
+        and "35 passed" in r.stdout
+        and "deselected" not in r.stdout,
+        r.stdout[-300:] + r.stderr[-300:],
+    )
+    # Warm, with a test file edited: the edit and the recorded failure run,
+    # the fast tests fill, and most of the 4.8s of slow tests are left out.
+    g.write("bgsuite/test_edit.py", "def test_e(): assert True\n")
+    r = g.run("-n", "2", "--budget", "2s", "-v", cwd=str(suite))
+    m = re.search(r"(\d+) passed", r.stdout)
+    check(
+        "budget: changed file and last failure run, the rest is cut to fit",
+        r.returncode == 1
+        and re.search(r"--budget 2s -> \d+ of 36 test\(s\)", r.stderr) is not None
+        and "1 changed-file, 1 failed" in r.stderr
+        and "test_edit.py::test_e PASSED" in r.stdout
+        and "test_red.py::test_red FAILED" in r.stdout
+        and "deselected" in r.stdout
+        and m is not None
+        and 11 <= int(m.group(1)) < 35,
+        r.stdout[-600:] + r.stderr[-300:],
+    )
+    # Under --shard each shard spends the budget on its own bucket, and
+    # shard-verify counts what a budget left out as covered, not dropped.
+    snap = g.tmp / "bgsuite_cache"
+    shutil.rmtree(snap, ignore_errors=True)
+    shutil.copytree(suite / ".rstest_cache", snap)
+    reports, lines = [], []
+    for k in (1, 2):
+        # One cache snapshot for every shard, as CI restores it per job.
+        shutil.rmtree(suite / ".rstest_cache", ignore_errors=True)
+        shutil.copytree(snap, suite / ".rstest_cache")
+        rp = g.tmp / f"bg.shard{k}.json"
+        r = g.run(
+            "-n",
+            "2",
+            "--shard",
+            f"{k}/2",
+            "--budget",
+            "1s",
+            "--report-json",
+            str(rp),
+            cwd=str(suite),
+        )
+        reports.append(rp)
+        lines += [ln for ln in r.stderr.splitlines() if "--budget 1s ->" in ln]
+    skipped = sum(
+        len(json.loads(rp.read_text())["meta"]["shard"].get("budget_skipped", [])) for rp in reports
+    )
+    r = g.run("shard-verify", *map(str, reports))
+    check(
+        "budget: each shard picks from its bucket and shard-verify accepts the cut",
+        len(lines) == 2
+        and all(" of 36 " not in ln for ln in lines)
+        and skipped > 0
+        and r.returncode == 0
+        and f"{skipped} left out by --budget" in r.stdout,
+        f"rc={r.returncode} skipped={skipped} {lines} " + r.stdout[-200:] + r.stderr[-300:],
+    )
+    # A budget run is never green: it leaves out tests, so a pass proves
+    # nothing about them. Neither the environment snapshot nor the
+    # --since-green baseline may move; the plain runs after show they would.
+    green = g.tmp / "bggreen"
+    shutil.rmtree(green, ignore_errors=True)
+    g.write("bggreen/pytest.ini", "[pytest]\n")
+    g.write("bggreen/.gitignore", ".rstest_cache/\n")
+    g.write("bggreen/test_g.py", "".join(f"def test_{i}(): pass\n" for i in range(4)))
+    git_init_commit(green)
+    cache = green / ".rstest_cache"
+    r = g.run("-n", "2", "--budget", "30s", cwd=str(green))
+    check(
+        "budget: a green budget run records no green environment",
+        r.returncode == 0 and not (cache / "green_env.json").exists(),
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run("-n", "2", "--since-green", "--budget", "30s", cwd=str(green))
+    check(
+        "budget: a green --since-green budget run leaves the baseline alone",
+        r.returncode == 0
+        and not (cache / "last_green.json").exists()
+        and "baseline not advanced" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    r = g.run("-n", "2", "--since-green", cwd=str(green))
+    g.run("-n", "2", cwd=str(green))
+    check(
+        "budget: the same runs without --budget record both",
+        (cache / "last_green.json").exists() and (cache / "green_env.json").exists(),
+        f"rc={r.returncode} " + r.stderr[-300:],
+    )
+    # It picks from the pool's dispatch list: refused where there is none.
+    r = g.run("-n", "0", "--budget", "2s", cwd=str(suite))
+    check(
+        "budget: refused without the parallel pool",
+        r.returncode != 0 and "--budget needs the parallel pool" in r.stderr,
+        f"rc={r.returncode} " + r.stderr[-300:],
     )
 
 

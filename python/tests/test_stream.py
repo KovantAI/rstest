@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from rstest_worker._internal import stream
+from rstest_worker._internal.plugincompat import PROVISIONED_KEYS
 from rstest_worker._internal.stream import StreamPlugin
 
 
@@ -520,42 +521,22 @@ class _WiConfig:
         return None
 
 
-# Every `workerinput[<key>]` a master-gated third-party plugin reads *by direct
-# subscript* on its worker branch — the dead-master-path crash class. With
-# pytest-xdist uninstalled (the adopted state) no master ever stages these, so a
-# pool worker KeyErrors at collection unless _build_workerinput seeds it. Audited
-# against the installed gate-venv plugins (2026-09-17); grouped by who provisions
-# the key. If a plugin adds a new key, extend the audit AND the seed together —
-# this guard fails first so the gap can't ship silently.
-_BUILD_SEEDED_KEYS = frozenset(
-    {
-        "randomly_seed",  # pytest-randomly
-        "random_order_seed",  # pytest-random-order
-        "workerid",  # pytest-cov + generic "am I a worker?" sniffers
-        "workercount",  # pytest-cov, xdist-compat sniffers
-        "mainargv",  # xdist-compat prog-name reconstruction
-        "testrun_uid",  # shared run id (xdist testrun_uid contract)
-        "testrunuid",  # same id, the spelling xdist's own `testrun_uid` fixture reads
-        "cov_master_host",  # pytest-cov worker mode
-        "cov_master_topdir",  # pytest-cov worker mode
-    }
+# Keys in PROVISIONED_KEYS that another mechanism owns, not _build_workerinput.
+_OTHER_MECHANISM_KEYS = frozenset(
+    {"server_port", "mypy_config_stash_serialized", "follower_ident", "sock_port", "statusdb_token"}
 )
-# Crash-class keys NOT seeded here because another mechanism owns them — listed
-# so the audit is exhaustive, not to assert on:
-#   server_port      -> _seed_pytest_retry (stands up pytest-retry's server)
-#   follower_ident   -> _XdistNodeShim configure_node emulation (sqlalchemy)
-#   sock_port,       -> pytest-rerunfailures, unregistered wholesale
-#   statusdb_token       (_neutralize_rerunfailures)
 
 
-def test_build_workerinput_seeds_every_direct_seed_crash_key(monkeypatch):
+def test_build_workerinput_seeds_exactly_the_provisioned_keys(monkeypatch):
+    # Two-way guard on the dead-master-path key list: every key the detector
+    # treats as provisioned really is seeded (no-xdist KeyError otherwise), and
+    # every seeded key is known to the detector (else it flags a safe read).
     monkeypatch.setenv("RSTEST_WORKER_COUNT", "4")
     monkeypatch.setenv("RSTEST_RUN_UID", "abc123")
     config = _WiConfig()
     StreamPlugin._build_workerinput(config, "gw0")
     assert config.workerinput is not None
-    missing = _BUILD_SEEDED_KEYS - set(config.workerinput)
-    assert not missing, f"unseeded dead-master-path keys (no-xdist KeyError risk): {missing}"
+    assert set(config.workerinput) == PROVISIONED_KEYS - _OTHER_MECHANISM_KEYS
     # workeroutput must exist too — plugins (pytest-cov) write into it.
     assert config.workeroutput == {}
 
@@ -629,6 +610,24 @@ def test_sessionfinish_emits_warnings():
             "text": "f.py:3: msg\n",
         }
     ]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_sessionfinish_records_the_warm_manifest(monkeypatch, fails):
+    # Best-effort: a record() that raises leaves no manifest, never a failure.
+    from rstest_worker._internal import warm
+
+    monkeypatch.setenv("RSTEST_WARM_RECORD", "1")
+    monkeypatch.setattr(warm, "recorded", "stale")
+
+    def record(session):
+        if fails:
+            raise RuntimeError("boom")
+        return ["app"]
+
+    monkeypatch.setattr(warm, "record", record)
+    _plugin().pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
+    assert warm.recorded == (None if fails else ["app"])
 
 
 def test_sessionfinish_emits_doctor_fixtures(monkeypatch):
@@ -1423,8 +1422,13 @@ import socket
 import pytest
 
 
+@pytest.fixture(scope="session")
+def everywhere():
+    return 1
+
+
 @pytest.fixture(scope="module")
-def shared():
+def shared(everywhere):
     return 1
 
 
@@ -1494,7 +1498,7 @@ def test_session_failure_payload_carries_crash_and_cause(tmp_path, monkeypatch):
     assert failed["cause"]["exc"] == "ValueError"
     assert failed["cause"]["message"] == "no good"
     # The raise inside the test module, not pytest's frames.
-    assert failed["cause"]["at"].endswith(".py:16")
+    assert failed["cause"]["at"].endswith(".py:21")
     xfailed = reports[("test_xfails", "call")]
     assert xfailed["outcome"] == "skipped"
     assert xfailed["xfail_reason"] == "known bug"
@@ -1502,13 +1506,15 @@ def test_session_failure_payload_carries_crash_and_cause(tmp_path, monkeypatch):
     assert "crash" not in reports[("test_uses_module_fixture", "call")]
 
 
-def test_session_ships_module_scope_setup_costs(tmp_path, monkeypatch):
+def test_session_ships_session_and_module_scope_setup_costs(tmp_path, monkeypatch):
     plugin, _, _ = _real_session(tmp_path, monkeypatch)
     (costs,) = [p["costs"] for k, p in plugin._conn.sent if k == "scope_costs"]
-    assert len(costs) == 1
-    assert costs[0]["key"].endswith(".py")
-    assert costs[0]["count"] == 1
-    assert costs[0]["total"] >= 0
+    by_key = {c["key"]: c for c in costs}
+    # The session's nodeid is "": its fixtures are charged once per worker.
+    assert by_key[""]["count"] == 1
+    (module,) = [c for k, c in by_key.items() if k.endswith(".py")]
+    assert module["count"] == 1
+    assert module["total"] >= 0
 
 
 def test_session_installs_network_recorder_and_leak_tracker_from_env(tmp_path, monkeypatch):
@@ -1590,22 +1596,39 @@ def _drive_fixture_setup(p, fd, request):
         gen.send("value")
 
 
-def test_module_and_class_fixture_setups_are_costed_per_scope_node(monkeypatch):
-    clock = iter([10.0, 10.5, 20.0, 20.25, 30.0, 31.0])
+def test_wider_scope_fixture_setups_are_costed_per_scope_node(monkeypatch):
+    clock = iter([10.0, 10.5, 20.0, 20.25, 30.0, 31.0, 40.0, 42.0, 50.0, 53.0])
     monkeypatch.setattr("time.perf_counter", lambda: next(clock))
     p = _plugin()  # doctor off: only wider scopes are timed
     mod = SimpleNamespace(node=SimpleNamespace(nodeid="t.py"))
     _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
     _drive_fixture_setup(p, SimpleNamespace(argname="db", scope="module"), mod)
     _drive_fixture_setup(p, SimpleNamespace(argname="cfg", scope="class"), mod)
+    sess = SimpleNamespace(node=SimpleNamespace(nodeid=""))
+    _drive_fixture_setup(p, SimpleNamespace(argname="env", scope="session"), sess)
+    pkg = SimpleNamespace(node=SimpleNamespace(nodeid="tests/pkg"))
+    _drive_fixture_setup(p, SimpleNamespace(argname="srv", scope="package"), pkg)
     # Not timed at all: function scope, and a scope with no node to charge.
     _drive_fixture_setup(p, SimpleNamespace(argname="f", scope="function"), mod)
     p._add_scope_cost(SimpleNamespace(argname="x", scope="module"), SimpleNamespace(), 1.0)
-    assert p._scope_costs == {"t.py": {"db": [2, 0.75], "cfg": [1, 1.0]}}
+    assert p._scope_costs == {
+        "t.py": {"db": [2, 0.75], "cfg": [1, 1.0]},
+        "": {"env": [1, 2.0]},
+        "tests/pkg": {"srv": [1, 3.0]},
+    }
     p.pytest_sessionfinish(session=SimpleNamespace(config=SimpleNamespace()), exitstatus=0)
     # Two fixtures on one scope: setups counted by the most-set-up one.
     assert p._conn.sent == [
-        ("scope_costs", {"costs": [{"key": "t.py", "total": 1.75, "count": 2}]})
+        (
+            "scope_costs",
+            {
+                "costs": [
+                    {"key": "t.py", "total": 1.75, "count": 2},
+                    {"key": "", "total": 2.0, "count": 1},
+                    {"key": "tests/pkg", "total": 3.0, "count": 1},
+                ]
+            },
+        )
     ]
 
 

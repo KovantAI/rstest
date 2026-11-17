@@ -57,6 +57,11 @@ The speed line names the worker count `-n auto` resolved to for this suite
 saved at least one second. In a git checkout it also projects the saving over
 the last 30 days, counting each commit in that window as one CI run.
 
+The rstest run has
+[`--warn-on-dead-master-path`](cli.md#-warn-on-dead-master-path) on. When an
+installed plugin or a conftest expects an xdist controller, the summary lists
+it under `⚠ plugins that expect an xdist controller:` with what to do.
+
 Both runs cover the whole suite: `-x`/`--maxfail` from your args or `addopts`
 is lifted on each side, since pytest would stop at the first failure while
 rstest's other workers run on. The rstest run also has reruns off
@@ -582,6 +587,15 @@ ok shard-verify: 4 shards cover all 4200 collected tests (no drops, no overlap)
 It exits `0` only when the shards agree on one collection (same
 `collection_hash`, `n`, and size), the shard set is exactly `1..=N` once each,
 and the union of what they ran equals the collection with no test on two shards.
+Under [`--budget`](cli.md#-budget-duration) a shard's tests are what it ran plus
+what its budget left out (`meta.shard.budget_skipped`), and the line says how
+many were left out:
+
+```console
+$ rstest shard-verify shard.*.json
+ok shard-verify: 4 shards cover all 4200 collected tests (no drops, no overlap); 3100 left out by --budget
+```
+
 It exits `1` on any drop, overlap, missing or duplicate shard, or a divergent
 collection, printing a line that names the problem. It reads only the JSON
 files, needs no interpreter, and runs no tests. Full-collection runs only: a

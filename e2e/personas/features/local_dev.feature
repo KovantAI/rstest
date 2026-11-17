@@ -701,3 +701,110 @@ Feature: Daily local developer
       When I run "rstest -n 2 --cov=. --cov-context=test --cov-report= --incremental --report-json r.json" after clearing stale .coverage files
       Then stdout contains "(2 cached)"
       And every cached test in the report "r.json" carries its lineno
+
+  Rule: --fork-pool=app forks workers from a template that already imported the app (dev-notes/warm-template-plan.md)
+
+    Background:
+      Given a file "slowapp.py" containing:
+        """
+        import os
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imports.log"), "a") as f:
+            f.write(f"{os.getpid()}\n")
+        VALUE = 1
+        """
+      And a file "envapp.py" containing:
+        """
+        import os
+        WID = os.environ.get("PYTEST_XDIST_WORKER")
+        """
+      And 8 files "test_m{i}.py" each containing:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        """
+
+    @posix_only
+    Scenario: DV-19 the second warm run imports the app once, in the template
+      Given I have run "rstest -n 4 --fork-pool=app"
+      And I have run "rstest -n 4 --fork-pool=app"
+      When I note the lines in "imports.log"
+      And I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And "imports.log" gained 1 line
+
+    @posix_only
+    Scenario: DV-19 a module that reads the worker id at import is imported per worker
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And stderr contains "envapp reads PYTEST_XDIST_WORKER at import"
+      When I run "rstest -n 4 --fork-pool=app"
+      Then the run succeeds
+      And stderr does not contain "--fork-pool=app:"
+
+    @posix_only
+    Scenario: DV-19 coverage turns the template off
+      When I run "rstest -n 4 --fork-pool=app --cov=slowapp --cov-report="
+      Then the run succeeds
+      And stderr contains "--fork-pool=app does not support coverage yet"
+
+    @posix_only
+    Scenario: DV-19 under --watch the template outlives a cycle and rebuilds on a source edit
+      When I start "rstest --watch -n 4 --fork-pool=app" and wait up to 60 seconds for its idle prompt
+      Then the watcher printed its idle prompt
+      # The first rerun builds the template from what the first run recorded.
+      When I save "test_m0.py" while watching:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        """
+      Then the watcher printed its idle prompt
+      # A test-only edit: the template is reused, nothing imports the app.
+      When I note the lines in "imports.log"
+      And I save "test_m0.py" while watching:
+        """
+        import os, envapp, slowapp
+
+        def test_value():
+            assert slowapp.VALUE == 1
+
+        def test_worker_id():
+            assert envapp.WID == os.environ["PYTEST_XDIST_WORKER"]
+        # edited
+        """
+      Then the watcher printed its idle prompt
+      And the output contains "2 passed"
+      And "imports.log" gained 0 lines
+      # A source edit: the template is rebuilt (one import) and the workers
+      # see the new code.
+      When I note the lines in "imports.log"
+      And I save "slowapp.py" while watching:
+        """
+        import os
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "imports.log"), "a") as f:
+            f.write(f"{os.getpid()}\n")
+        VALUE = 1
+        EXTRA = "fresh"
+        """
+      Then the watcher printed its idle prompt
+      And "imports.log" gained 1 line
+      When I save "test_extra.py" while watching:
+        """
+        import slowapp
+
+        def test_extra():
+            assert slowapp.EXTRA == "fresh"
+        """
+      Then the watcher printed its idle prompt
+      And the output contains "1 passed"

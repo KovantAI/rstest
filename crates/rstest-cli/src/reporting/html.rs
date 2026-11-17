@@ -460,6 +460,7 @@ mod tests {
             started_at_epoch: 0,
             workers: 2,
             argv: vec!["rstest".into()],
+            warm: None,
             shard: None,
         }
     }

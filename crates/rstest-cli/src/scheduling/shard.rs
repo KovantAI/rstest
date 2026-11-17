@@ -161,13 +161,14 @@ pub fn shard_files(
     files: &[PathBuf],
     cache: &HashMap<String, f64>,
     cwd: &Path,
+    root: &Path,
     k: usize,
     n: usize,
 ) -> Vec<PathBuf> {
     if n <= 1 {
         return files.to_vec();
     }
-    // Cache keys are nodeids relative to the invocation dir; sum per file.
+    // Cache keys are nodeids relative to the rootdir; sum per file.
     // Sum in sorted-id order: HashMap iteration order is random per process
     // and float addition is not associative, so an unordered sum can differ
     // in the last bit between CI jobs and flip a near-tie in LPT, putting a
@@ -179,7 +180,7 @@ pub fn shard_files(
         let file = id.split("::").next().unwrap_or(id);
         *totals.entry(file.to_string()).or_insert(0.0) += floored(secs);
     }
-    let rel = |f: &Path| crate::scheduling::durations::file_key(f, cwd);
+    let rel = |f: &Path| crate::scheduling::durations::file_key(f, cwd, root);
     let weights: Vec<f64> = {
         // Untimed files get the average known file weight.
         let known: Vec<f64> = files
@@ -327,7 +328,29 @@ mod tests {
             ("tests/b.py::t".to_string(), 1.0),
         ]);
         let shards: Vec<_> = (1..=2)
-            .map(|k| shard_files(&files, &cache, &cwd, k, 2))
+            .map(|k| shard_files(&files, &cache, &cwd, &cwd, k, 2))
+            .collect();
+        assert!(shards.contains(&vec![files[0].clone()]), "got {shards:?}");
+    }
+
+    #[test]
+    fn shard_files_weighs_by_cache_keyed_on_a_rootdir_below_cwd() {
+        // Cached nodeids hang off the rootdir (`/p/pkg`), not the cwd: a
+        // lookup miss would weigh every file the same and pair the long file
+        // with a short one.
+        let cwd = PathBuf::from("/p");
+        let files: Vec<PathBuf> = ["big", "a", "b"]
+            .iter()
+            .map(|f| PathBuf::from(format!("pkg/tests/{f}.py")))
+            .collect();
+        let cache = HashMap::from([
+            ("tests/big.py::t".to_string(), 10.0),
+            ("tests/a.py::t".to_string(), 1.0),
+            ("tests/b.py::t".to_string(), 1.0),
+        ]);
+        let root = cwd.join("pkg");
+        let shards: Vec<_> = (1..=2)
+            .map(|k| shard_files(&files, &cache, &cwd, &root, k, 2))
             .collect();
         assert!(shards.contains(&vec![files[0].clone()]), "got {shards:?}");
     }
@@ -345,7 +368,7 @@ mod tests {
         let n = 4;
         let mut seen = Vec::new();
         for k in 1..=n {
-            let got = shard_files(&files, &cache, &cwd, k, n);
+            let got = shard_files(&files, &cache, &cwd, &cwd, k, n);
             assert_eq!(got.len(), 2);
             seen.extend(got);
         }
@@ -365,12 +388,12 @@ mod tests {
         cache.insert("a.py::y".to_string(), 0.2);
         cache.insert("a.py::z".to_string(), 0.3);
         let first: Vec<Vec<PathBuf>> = (1..=2)
-            .map(|k| shard_files(&files, &cache, &cwd, k, 2))
+            .map(|k| shard_files(&files, &cache, &cwd, &cwd, k, 2))
             .collect();
         for _ in 0..50 {
             let c2: HashMap<String, f64> = cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
             for k in 1..=2 {
-                assert_eq!(shard_files(&files, &c2, &cwd, k, 2), first[k - 1]);
+                assert_eq!(shard_files(&files, &c2, &cwd, &cwd, k, 2), first[k - 1]);
             }
         }
         assert_eq!(first[0].len() + first[1].len(), 2);

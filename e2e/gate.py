@@ -26,7 +26,9 @@ from gates.coverage import (
     gate_smart_selection,
 )
 from gates.dispatch import (
+    gate_auto_lazy_long_pole_budget,
     gate_auto_worker_capping,
+    gate_budget,
     gate_crash_after_restart_budget,
     gate_crash_restart_exhaustion,
     gate_dist_each,
@@ -43,6 +45,7 @@ from gates.dispatch import (
     gate_maxfail_bound,
     gate_native_timeout,
     gate_order_fail_fast,
+    gate_rootdir_matches_pytest,
     gate_serial_after_crash,
     gate_serial_fixture_scope,
     gate_serial_mark,
@@ -87,6 +90,7 @@ from gates.monorepo import (
 from gates.personas import gate_personas
 from gates.plugins import (
     gate_crash_handling,
+    gate_dead_master_path_warning,
     gate_doctest_modules,
     gate_interpreter_probe_cache_heals_after_deps,
     gate_looponfail_with_xdist,
@@ -247,6 +251,7 @@ def main():
         gate_pytest_mypy,
         gate_report_aggregators_silent,
         gate_silent_master_warning,
+        gate_dead_master_path_warning,
         gate_pytest_random_order,
         gate_pytest_httpserver,
         gate_pytest_bdd,
@@ -264,6 +269,8 @@ def main():
         gate_pytest_homeassistant,
         gate_interpreter_probe_cache_heals_after_deps,
         gate_lazy_collection,
+        gate_auto_lazy_long_pole_budget,
+        gate_rootdir_matches_pytest,
         gate_serial_mark,
         gate_serial_after_crash,
         gate_serial_fixture_scope,
@@ -322,6 +329,7 @@ def main():
         gate_coverage_selection_under_autocrlf_crlf_w,
         gate_shuffle,
         gate_order_fail_fast,
+        gate_budget,
         gate_duration_regression_gate,
         gate_shared_cache_backend,
         gate_tool_rstest_config,

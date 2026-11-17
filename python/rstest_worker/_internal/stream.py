@@ -47,6 +47,11 @@ _IDENTITY_FIXTURES = ("worker_id", "testrun_uid")
 # Sentinel for "no value fingerprinted yet" in the scope-promotion tracker.
 _UNSET = object()
 
+# Fixture scopes whose setup is costed per scope node (`scope_costs`). The
+# session's nodeid is "" (a rootdir package's too), so its cost is what each
+# worker pays once.
+_COSTED_SCOPES = ("session", "package", "module", "class")
+
 # Scope-promotion fingerprinting only accepts immutable builtin values:
 # exact scalar types, and tuples/frozensets of them. Anything else (a fresh
 # `[]`, a mock, a DataFrame, a lazy QuerySet, a user object) can't be proven
@@ -335,6 +340,7 @@ class StreamPlugin:
         self._node_configured: set[int] = set()  # plugin ids already given configure_node
         self._config: Any = None  # set at pytest_configure
         self._deselected = 0  # items pytest deselected (-k/-m, hooks)
+        self._collect_skips = 0  # skipped collectors seen (lazy: conftest skips)
         self._lastfailed: dict[str, bool] | None = None  # cache as of session start
 
     # Native worker-identity fixtures. pytest-xdist ships `worker_id` /
@@ -467,6 +473,10 @@ class StreamPlugin:
         self._neutralize_xdist(config)
         self._register_markers(config)
         _warn_pytest_pins(config)
+        if os.environ.get("RSTEST_DEAD_MASTER_SCAN"):
+            from rstest_worker._internal.deadmaster import warn_dead_master
+
+            warn_dead_master(config)
         # junit (xml.etree) and netguard (socket, ipaddress) cost ~6ms to
         # import; load them only when the orchestrator turned them on.
         if os.environ.get("RSTEST_JUNITXML"):
@@ -824,7 +834,7 @@ class StreamPlugin:
         import time
 
         if not self._doctor:
-            if fixturedef.scope not in ("module", "class"):
+            if fixturedef.scope not in _COSTED_SCOPES:
                 return (yield)
             t0 = time.perf_counter()
             try:
@@ -868,7 +878,7 @@ class StreamPlugin:
                     entry[2] = False
 
     def _add_scope_cost(self, fixturedef, request, secs: float) -> None:
-        if fixturedef.scope not in ("module", "class"):
+        if fixturedef.scope not in _COSTED_SCOPES:
             return
         node = getattr(request, "node", None)
         if node is None:
@@ -912,6 +922,14 @@ class StreamPlugin:
         # drops its follower DB here). Caveat: a crashed worker never reaches
         # this, and rstest has no master to fire it in its place.
         self._call_node_hooks(session.config, "pytest_testnodedown", error=None)
+        if os.environ.get("RSTEST_WARM_RECORD"):
+            from rstest_worker._internal import warm
+
+            # Best-effort: a manifest is an optimization, never a failure.
+            try:
+                warm.recorded = warm.record(session)
+            except Exception:
+                warm.recorded = None
         if self._warnings:
             entries: list[m.WarningEntry] = [
                 {
@@ -1085,6 +1103,7 @@ class StreamPlugin:
                 {"path": report.nodeid, "longrepr": report.longreprtext},
             )
         elif report.skipped:
+            self._collect_skips += 1
             self._conn.send("collect_skip", {"path": report.nodeid})
         # pytest's LFPlugin swaps a once-failing collector's lastfailed key for
         # the nodeids it yields now; the orchestrator writes the merged cache,

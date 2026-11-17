@@ -54,6 +54,11 @@ A clean run here means none of the removed APIs below apply to you. Still
 check the [behavioral changes the probe won't catch](#behavioral-changes-the-w-probe-wont-catch),
 then go to step 3.
 
+On pytest older than 9.1 the probe can't see the deprecations 9.1 and 9.2
+added: your pytest doesn't raise them, rstest's 9.2.0 core does. Run it once
+more under rstest to list those too:
+`rstest -n 0 -W error::pytest.PytestDeprecationWarning`.
+
 !!! tip "No config change needed"
     `-W` is a command-line flag; it overrides your `filterwarnings` ini for
     this one run. Don't commit it yet: it's a probe, not the fix.
@@ -131,6 +136,7 @@ pytest 9.2 adds a few more, also without a warning:
 | **Long string parameters get short ids.** A `str` or `bytes` parameter value over 100 characters no longer becomes the test id: `test_s[xxxx…]` is now `test_s[s0]` (argname plus index). | Anything keyed by those nodeids: `--deselect` lists, `--lf` and quarantine files, and rstest's caches (durations, run history), which start that test's history afresh. | Set `parametrize_long_str_id_strategy = "legacy"` in your pytest config to keep the old ids, or give the parameters explicit `ids=`. |
 | **`-c` / `--config-file` must name a readable config file.** A path that is missing, a directory, or a format pytest can't load is now a usage error (exit 4). | CI scripts that pass a `-c` path that doesn't exist on some runners. | Pass an existing file, or drop the flag where there is none. |
 | **Plugin import failures have their own exit codes.** A plugin that can't be found (`-p`, `pytest_plugins`, `PYTEST_PLUGINS`) exits 4; one that is found but fails to import exits 3. Both used to exit 1, like failing tests. | CI steps that treat exit 1 as "tests failed" and anything else as infrastructure. | Nothing to fix in the suite; check scripts that branch on the exit code. |
+| **`monkeypatch.setattr` takes the value to restore from the object's own `__dict__`.** Unless the class defines the name as a data descriptor, an attribute the object only exposes through `__getattr__` counts as absent, so the undo at teardown **deletes** it instead of putting the old value back. | Tests that patch an attribute on a proxy object that forwards to a wrapped one, such as dynaconf's `settings` (`monkeypatch.setattr(settings, "feature_mode", "on")`): the delete reaches the real setting, and every later test in that process fails with `AttributeError: ... has no attribute 'feature_mode'`. Plain pytest 9.2 fails the same way. | Set and restore through the object's own API in a fixture (dynaconf: read the old value with `settings.get(...)`, `settings.set(...)` the new one, and set the old one back on teardown), so monkeypatch never deletes it. |
 
 ### 3. Verify
 
@@ -148,7 +154,7 @@ parallel. That's a *different* migration
 
 ## Already on pytest 9.0.x or 9.1.x?
 
-Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is three items:
+Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is four items:
 
 1. `importorskip` catches only `ModuleNotFoundError` by default (pass
    `exc_type=ImportError` to restore the old catch-all).
@@ -156,6 +162,12 @@ Then you're nearly done. From 9.0, the 9.0 → 9.1 delta is three items:
 3. `PytestRemovedIn9Warning` no longer exists: delete any
    `ignore::pytest.PytestRemovedIn9Warning` entry from `filterwarnings`, or
    9.1 aborts the run with a usage error (see the warning in step 1).
+4. Passing an iterable that isn't a list or tuple (a generator,
+   `itertools.chain`, `zip`, `map`) as `parametrize`'s values warns
+   `PytestRemovedIn10Warning: Passing a non-Collection iterable to parametrize
+   is deprecated`. It keeps working, but under `filterwarnings = error` it is
+   a collection error. Wrap the values in `list(...)`. See
+   [Troubleshooting](../reference/troubleshooting.md#passing-a-non-collection-iterable-to-parametrize-is-deprecated-collection-error).
 
 The 9.1 → 9.2 delta:
 
@@ -166,12 +178,17 @@ The 9.1 → 9.2 delta:
 3. A `-c` path that doesn't exist is a usage error, and plugin import
    failures exit 4 or 3 instead of 1 (see the
    [behavioral changes](#behavioral-changes-the-w-probe-wont-catch)).
-4. Plugins that reach into pytest internals need a 9.2-ready release:
+4. `monkeypatch.setattr` on a proxy object (dynaconf's `settings`, or any
+   object that serves the attribute from `__getattr__`) deletes the real
+   attribute at teardown, and later tests fail with `AttributeError` (see the
+   [behavioral changes](#behavioral-changes-the-w-probe-wont-catch)).
+5. Plugins that reach into pytest internals need a 9.2-ready release:
    pytest-bdd 9.0.1 and pytest-benchmark 5.3.1 or newer. pytest-forked
    1.7.5 fails every forked test on 9.2; its fix is
    [pending upstream](https://github.com/pytest-dev/pytest-forked/pull/112).
 
-9.2 also starts the `PytestRemovedIn10Warning` cycle for module-, package-
+The `PytestRemovedIn10Warning` cycle started in 9.1 with non-list
+iterables passed to `parametrize` (item 4 above). 9.2 adds module-, package-
 and session-scoped fixtures defined as instance methods on a test class,
 non-string values for string-typed ini options, and `yield_fixture`. They
 warn today and keep working. Your current pytest doesn't know them yet, so

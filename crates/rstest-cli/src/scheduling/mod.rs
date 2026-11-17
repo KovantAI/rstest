@@ -13,4 +13,5 @@ pub(crate) mod orchestrator;
 pub mod pool;
 pub mod proto;
 pub mod shard;
+pub mod warm;
 pub mod worker;

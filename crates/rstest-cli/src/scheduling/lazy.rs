@@ -103,10 +103,16 @@ impl WorkerState {
 }
 
 /// Order files by cached duration totals, biggest first (long-pole files
-/// must start early); files with no cache data follow in path order.
-fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) -> Vec<String> {
-    // The duration cache keys on nodeids relative to the invocation dir;
-    // group totals by the file prefix.
+/// must start early); files with no cache data follow in path order. Returns
+/// cwd-relative paths (what workers are sent) and the known totals by path.
+fn order_files(
+    files: Vec<PathBuf>,
+    cache: &HashMap<String, f64>,
+    cwd: &Path,
+    root: &Path,
+) -> (Vec<String>, HashMap<String, f64>) {
+    // The duration cache keys on nodeids relative to the rootdir; group
+    // totals by the file prefix.
     let mut totals: HashMap<String, f64> = HashMap::new();
     for (id, secs) in cache {
         let file = id.split("::").next().unwrap_or(id);
@@ -115,22 +121,47 @@ fn order_files(files: Vec<PathBuf>, cache: &HashMap<String, f64>, cwd: &Path) ->
     let mut known: Vec<(String, f64)> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for f in files {
-        let rel = crate::scheduling::durations::file_key(&f, cwd);
-        match totals.get(&rel) {
+        let rel = crate::scheduling::durations::file_key(&f, cwd, cwd);
+        match totals.get(&crate::scheduling::durations::file_key(&f, cwd, root)) {
             Some(&t) => known.push((rel, t)),
             None => unknown.push(rel),
         }
     }
     known.sort_by(|a, b| b.1.total_cmp(&a.1));
-    known.into_iter().map(|(f, _)| f).chain(unknown).collect()
+    let weights = known.iter().cloned().collect();
+    let order = known.into_iter().map(|(f, _)| f).chain(unknown).collect();
+    (order, weights)
 }
 
-/// Files per RunFiles: a quarter of a fair share of what's left. The worker
-/// collects a batch in one `perform_collect`, which lists every directory on
-/// the way, so one file per call is quadratic in files per directory; the
-/// shrinking batches keep the tail balanced.
-fn file_batch(remaining: usize, workers: usize) -> usize {
-    remaining.div_ceil(workers.max(1) * 4).min(remaining)
+/// Files per RunFiles: a quarter of a fair share of what's left, by cached
+/// seconds where known, else by count (the cap either way). By count alone,
+/// heaviest-first order gave the first worker to ask the heaviest files in
+/// one batch (pandas: 28 files, 40% of the tests). The worker collects a
+/// batch in one `perform_collect`, which lists every directory on the way,
+/// so one file per call is quadratic in files per directory; the shrinking
+/// batches keep the tail balanced.
+fn file_batch(queue: &VecDeque<String>, weights: &HashMap<String, f64>, workers: usize) -> usize {
+    let parts = workers.max(1) * 4;
+    let share = queue.iter().filter_map(|f| weights.get(f)).sum::<f64>() / parts as f64;
+    let mut take = 0;
+    let mut acc = 0.0;
+    for f in queue.iter().take(queue.len().div_ceil(parts)) {
+        if take > 0 && share > 0.0 && acc >= share {
+            break;
+        }
+        acc += weights.get(f).copied().unwrap_or(0.0);
+        take += 1;
+    }
+    take
+}
+
+/// Whether a worker takes another file batch: nothing left to collect and
+/// little left to run, counting its collected-but-undispatched ids. A busy
+/// worker must not hoard files an idle one could collect: lazy keeps file
+/// affinity by default, so nothing moves them later (pandas: one worker sat
+/// on 78k queued ids and kept taking files).
+fn wants_files(uncollected: usize, own_queue: usize, outstanding: usize, chunk: usize) -> bool {
+    uncollected == 0 && own_queue <= chunk && outstanding <= chunk
 }
 
 pub fn run_lazy_pool(
@@ -190,7 +221,9 @@ pub fn run_lazy_pool(
     let mut startup_seconds = 0.0f64;
 
     let cwd = std::env::current_dir()?;
-    let mut file_queue: VecDeque<String> = order_files(files, duration_cache, &cwd).into();
+    let (file_order, file_weights) =
+        order_files(files, duration_cache, &cwd, &crate::cache::base_dir());
+    let mut file_queue: VecDeque<String> = file_order.into();
 
     let continue_on_collect_errors = args.iter().any(|a| a == "--continue-on-collection-errors");
 
@@ -206,6 +239,7 @@ pub fn run_lazy_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut peak_rss: Option<u64> = None;
+    let mut warm_record = crate::scheduling::warm::Record::default();
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
@@ -238,6 +272,7 @@ pub fn run_lazy_pool(
     // Keep only the FIRST attempt of a rerun/redistributed id: replay runs
     // with reruns off, so a duplicate entry would run the test twice.
     let mut journaled: HashSet<String> = HashSet::new();
+    let mut collect_skipped: HashSet<String> = HashSet::new();
 
     // SIGINT/SIGTERM: stop the workers and fall through to the wind-down, as
     // in run_pool.
@@ -328,9 +363,13 @@ pub fn run_lazy_pool(
                         .filter(|e| idx == 0 || e.when != "config"),
                 );
             }
-            Ok(Event::CollectSkip { .. }) => {
-                // Each skipped collector is seen by exactly one worker.
-                run.collect_skips += 1;
+            Ok(Event::CollectSkip { path }) => {
+                // A skipped directory (conftest `importorskip`) is reported
+                // again for every file below it, on whichever worker collects
+                // it: count each collector once, as directory collection does.
+                if collect_skipped.insert(path) {
+                    run.collect_skips += 1;
+                }
             }
             Ok(Event::LfRecollected { path, ids }) => {
                 run.lf_recollected.insert(path, ids);
@@ -480,9 +519,17 @@ pub fn run_lazy_pool(
             Ok(Event::Done {
                 exitstatus,
                 peak_rss: peak,
+                imported,
+                sys_path,
+                coverage,
+                rewrite,
+                env,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
+                warm_record.merge(imported, sys_path, coverage);
+                warm_record.rewrite.extend(rewrite);
+                warm_record.env.extend(env);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own never ran what reached it
@@ -606,14 +653,17 @@ pub fn run_lazy_pool(
         let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
 
         // File assignment: a worker takes a batch of files (see
-        // `file_batch`), picked up when it has nothing left to collect and
-        // little left to run (a busy worker must not hoard files an idle one
-        // could collect).
+        // `file_batch`) when `wants_files`.
         if !stopping {
             let workers = states.len();
             for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
-                if s.uncollected_files.is_empty() && s.outstanding.len() <= chunk {
-                    let take = file_batch(file_queue.len(), workers);
+                if wants_files(
+                    s.uncollected_files.len(),
+                    s.own_queue.len(),
+                    s.outstanding.len(),
+                    chunk,
+                ) {
+                    let take = file_batch(&file_queue, &file_weights, workers);
                     let paths: Vec<String> = file_queue.drain(..take).collect();
                     if !paths.is_empty() {
                         s.uncollected_files.extend(paths.iter().cloned());
@@ -847,8 +897,15 @@ pub fn run_lazy_pool(
         collection_size: 0,
         startup_seconds,
         fork_prewarmed,
+        warm_record,
+        warm: None,
         sources,
         peak_rss,
+        // Not recorded here: per-file collection timed under every worker's
+        // contention sums to far more than one eager worker's collection (2x
+        // on pandas at -n 14), and lazy runs refreshing it would ratchet the
+        // auto-lazy budget up. Only eager runs measure what lazy saves.
+        collect_seconds: None,
         exiting,
     })
 }
@@ -892,16 +949,48 @@ fn start_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_batch, order_files};
-    use std::collections::HashMap;
+    use super::{file_batch, order_files, wants_files};
+    use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
 
+    fn queue(n: usize) -> VecDeque<String> {
+        (0..n).map(|i| format!("t{i}.py")).collect()
+    }
+
     #[test]
-    fn file_batch_takes_a_quarter_share_and_at_least_one() {
-        assert_eq!(file_batch(1000, 8), 32);
-        assert_eq!(file_batch(1000, 1), 250);
-        assert_eq!(file_batch(3, 8), 1);
-        assert_eq!(file_batch(0, 8), 0);
+    fn file_batch_without_timings_takes_a_quarter_share_and_at_least_one() {
+        let none = HashMap::new();
+        assert_eq!(file_batch(&queue(1000), &none, 8), 32);
+        assert_eq!(file_batch(&queue(1000), &none, 1), 250);
+        assert_eq!(file_batch(&queue(3), &none, 8), 1);
+        assert_eq!(file_batch(&queue(0), &none, 8), 0);
+    }
+
+    #[test]
+    fn file_batch_deals_heavy_files_one_per_batch() {
+        // Heaviest first, as `order_files` leaves it: 8 files hold 90% of the
+        // seconds. Counting files, the first worker to ask took all 8.
+        let q = queue(1000);
+        let weights: HashMap<String, f64> = q
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.clone(), if i < 8 { 100.0 } else { 0.1 }))
+            .collect();
+        assert_eq!(file_batch(&q, &weights, 8), 1);
+        // The light tail goes back to the count cap.
+        let tail: VecDeque<String> = q.into_iter().skip(8).collect();
+        assert_eq!(file_batch(&tail, &weights, 8), 31);
+    }
+
+    #[test]
+    fn wants_files_only_when_idle_enough() {
+        assert!(wants_files(0, 0, 0, 64));
+        assert!(wants_files(0, 64, 64, 64)); // at the limit
+        assert!(!wants_files(1, 0, 0, 64)); // still collecting
+        assert!(!wants_files(0, 0, 65, 64)); // enough in flight
+                                             // Plenty queued but little in flight: took files before, piling the
+                                             // heaviest files on one worker.
+        assert!(!wants_files(0, 78_000, 10, 64));
     }
 
     #[test]
@@ -919,7 +1008,7 @@ mod tests {
             ("test_b.py::t".to_string(), 5.0),
             // test_c.py absent => unknown, ordered last in input order.
         ]);
-        let ordered = order_files(files, &cache, cwd);
+        let ordered = order_files(files, &cache, cwd, cwd).0;
         assert_eq!(ordered, vec!["test_b.py", "test_a.py", "test_c.py"]);
     }
 
@@ -935,15 +1024,33 @@ mod tests {
             ("tests/test_a.py::t".to_string(), 1.0),
             ("tests/test_b.py::t".to_string(), 5.0),
         ]);
-        let ordered = order_files(files, &cache, cwd);
+        let ordered = order_files(files, &cache, cwd, cwd).0;
         assert_eq!(ordered, vec!["tests/test_b.py", "tests/test_a.py"]);
+    }
+
+    #[test]
+    fn order_files_matches_cache_keyed_on_a_rootdir_below_cwd() {
+        // pandas from the corpus: cwd is the venv's parent, pytest's rootdir
+        // the installed package, so cached nodeids read `tests/...` while the
+        // walked files read `pkg/tests/...`. Workers still get cwd paths.
+        let cwd = Path::new("/proj");
+        let files = vec![
+            PathBuf::from("pkg/tests/test_a.py"),
+            PathBuf::from("pkg/tests/test_b.py"),
+        ];
+        let cache = HashMap::from([
+            ("tests/test_a.py::t".to_string(), 1.0),
+            ("tests/test_b.py::t".to_string(), 5.0),
+        ]);
+        let ordered = order_files(files, &cache, cwd, Path::new("/proj/pkg")).0;
+        assert_eq!(ordered, vec!["pkg/tests/test_b.py", "pkg/tests/test_a.py"]);
     }
 
     #[test]
     fn order_files_all_unknown_keeps_input_order() {
         let cwd = Path::new("/proj");
         let files = vec![PathBuf::from("/proj/z.py"), PathBuf::from("/proj/a.py")];
-        let ordered = order_files(files, &HashMap::new(), cwd);
+        let ordered = order_files(files, &HashMap::new(), cwd, cwd).0;
         assert_eq!(ordered, vec!["z.py", "a.py"]); // no cache => unchanged
     }
 
@@ -953,7 +1060,7 @@ mod tests {
         // unmatched by the cwd-relative cache keys, lands in the unknown tail.
         let cwd = Path::new("/proj");
         let files = vec![PathBuf::from("/other/test_x.py")];
-        let ordered = order_files(files, &HashMap::new(), cwd);
+        let ordered = order_files(files, &HashMap::new(), cwd, cwd).0;
         assert_eq!(ordered, vec!["/other/test_x.py"]);
     }
 }

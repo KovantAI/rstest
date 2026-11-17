@@ -54,6 +54,9 @@ pub struct DoctorReport {
     /// Whether this run already used `--fork-pool` (Unix fork-prewarm). Gates
     /// the "try --fork-pool" hint so it isn't suggested when already on.
     fork_prewarm: bool,
+    /// `--fork-pool=app`: what the warm template imported. Text report only.
+    #[serde(skip)]
+    warm: Option<crate::scheduling::warm::Stats>,
     /// Tests with a recorded call duration (tests skipped before their call
     /// phase drop out): the population every time figure is computed over.
     tests: usize,
@@ -440,6 +443,12 @@ impl DoctorReport {
         self
     }
 
+    /// Add what the `--fork-pool=app` template imported.
+    pub fn with_warm(mut self, warm: Option<crate::scheduling::warm::Stats>) -> Self {
+        self.warm = warm;
+        self
+    }
+
     /// Add what fixture-cost-aware dispatch grouped ([`FixtureGrouping`]).
     pub fn with_fixture_groups(mut self, run: &Run, groups: &[FixtureGroup]) -> Self {
         self.fixture_grouping = fixture_grouping(run, groups);
@@ -793,6 +802,7 @@ pub fn analyze(
         wall_seconds: wall,
         startup_seconds: startup,
         fork_prewarm,
+        warm: None,
         tests: durations.len(),
         test_time_seconds: test_time,
         cpu_time_seconds: cpu_time,
@@ -1194,6 +1204,7 @@ pub(crate) mod testutil {
             wall_seconds: 9.0,
             startup_seconds: 0.3,
             fork_prewarm: false,
+            warm: None,
             tests,
             test_time_seconds: 30.0,
             cpu_time_seconds: 6.0,

@@ -3,6 +3,97 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Features
+
+- **`--watch` no longer re-imports your app on every save** (macOS and
+  Linux). A watch
+  session keeps a template process that has imported your app's modules and
+  forks each cycle's workers from it (`--fork-pool=app`, now the `--watch`
+  default). On a test file importing scikit-learn, a save went from
+  ~900ms to ~520ms at `-n 2`. The template is rebuilt when a module it
+  imported, an installed package or the pytest config changes, and modules
+  whose import isn't safe to share across workers are imported per worker.
+  Opt out with `--fork-pool` or `--fork-pool=core`. See
+  [Watch mode](docs/guides/watch-mode.md#warm-template).
+- **`--fork-pool=app`** (Unix): the per-run fork pool can also import your
+  app's modules, as recorded by earlier runs in `.rstest_cache/warm/`. Bare
+  `--fork-pool` is unchanged (`=core`).
+
+- **`--order fail-fast` runs tests near your changes early.** After tests
+  that recently failed, and before flaky ones, it now runs tests close to
+  what changed: a test file edited in the working tree first, then test files
+  changed since the last green run, then tests that reach a changed source
+  file (coverage map when warm, else the import graph). The diff is against
+  the last green run's commit, or `HEAD` when none is recorded, so a cold
+  cache still gets a useful order. A change that reaches more than a quarter
+  of the run (a core module) doesn't reorder anything. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
+- **`--order fail-fast` learns which tests fail together.** From the run
+  history it pairs tests that hard-failed in the same runs. When a test fails,
+  its partners that haven't run yet jump the queue, so with `--maxfail N` or
+  under `--watch` the next red from the same cause surfaces next. Before the
+  run, a leading test that nearly always fails with one ahead of it moves
+  back, so the first tests out cover distinct failures. Flaky reruns, worker
+  crashes and mass failures are ignored. The history loads in the background
+  while workers start. See
+  [Fail-fast ordering](docs/concepts/scheduling.md#fail-fast-ordering-order-fail-fast).
+
+- **`-v` says what `--order fail-fast` put first**: how many tests lead
+  because they recently failed, are near changes, or are flaky.
+
+- **`--budget DURATION` runs what fits in a time budget.** It picks the
+  tests most worth running in that much wall time (`90s`, `5m`): tests in
+  changed test files always, then recently failed, near-change and flaky
+  tests, then the rest shortest first while they fit. A test costs its
+  recorded call time plus its median setup time, and module/class fixtures
+  are counted once. What's left out is reported as deselected, and a budget
+  run never counts as green. Implies `--order fail-fast`. See
+  [`--budget`](docs/reference/cli.md#-budget-duration).
+
+- **`--warn-on-dead-master-path` finds plugins that expect an xdist
+  controller.** Opt-in: it reads the installed plugins and loaded conftests
+  for code that only works on xdist's controller, which rstest doesn't run,
+  and warns before the run: a `workerinput["k"]` read that will `KeyError`
+  at `-n >= 2`, or controller-only work (a plugin registered, a file written)
+  that silently never happens. `rstest try` turns it on and lists the
+  findings in its summary. See
+  [`--warn-on-dead-master-path`](docs/reference/cli.md#-warn-on-dead-master-path).
+
+### Fixes
+
+- **`--collect lazy` no longer piles the heaviest files on one worker.** File
+  batches were sized by count, so with files ordered heaviest first the first
+  worker to ask took the heaviest batch (pandas, `-n 8`: one worker ran 40%
+  of the tests), and with lazy's file affinity nothing moved them later.
+  Batches are now sized by cached duration, and a worker takes new files only
+  once its queued tests run low. pandas, `-n 8`: lazy 28s against 40s for
+  full collection (lazy was about 2x slower than full before).
+- **Lazy file ordering and `--shard` now use the duration cache when pytest's
+  rootdir isn't the current directory.** Files were matched to cached tests
+  relative to the current directory, but cached test ids are relative to the
+  rootdir, so in that layout nothing matched and both fell back to path
+  order (lazy) or equal weights (`--shard`).
+- **`--collect lazy` handles a conftest that skips its directory.** A
+  `conftest.py` calling `pytest.importorskip(...)` made each file below it a
+  collection error, which aborted the run and could drop healthy tests. The
+  directory is now skipped and counted once, as with full collection.
+- **A `::` in an option value no longer turns lazy collection off.**
+  `-W default::SomeWarning` or `--deselect tests/a.py::test_x` was read as a
+  nodeid selection, so `--collect lazy` (and the auto default) fell back to
+  full collection. Only positional nodeids count now.
+- **Django suites no longer lose a worker's test database under lazy
+  collection.** With `--collect lazy` (which rstest picks on its own for large
+  suites with a warm cache), each file batch replaced pytest's list of the
+  session's tests. pytest-django chooses which test databases to create from
+  that list, so when a worker collected a file without database tests just
+  before running its first database test, it created none, and every database
+  test on that worker failed with `no such table`. It happened now and then,
+  more often on a busy machine. The list now keeps every test the worker has
+  collected.
+
 ## 0.11.1 (2026-11-11)
 
 ### Fixes

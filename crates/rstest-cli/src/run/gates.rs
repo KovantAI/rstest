@@ -33,6 +33,7 @@ pub(super) fn build_run_meta(
         started_at_epoch,
         workers,
         argv: std::env::args().collect(),
+        warm: None,
         shard: None,
     }
 }
@@ -624,7 +625,8 @@ pub(super) fn run_post_gates(
             coverage_index.as_ref().zip(project.as_ref()),
         )
         .with_history(&outcome.run, history.get())
-        .with_fixture_groups(&outcome.run, &outcome.fixture_groups);
+        .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
+        .with_warm(outcome.warm.clone());
         // In json mode stdout is a pure NDJSON stream, so the doctor's human
         // report would corrupt it; --doctor-json still writes to its file.
         if cli.doctor && mode != progress::Mode::Json {
@@ -813,6 +815,17 @@ pub(super) fn run_post_gates(
     // Each-mode ids carry the [gwN] suffix and every test ran N times, so
     // they would poison the duration cache used for LPT scheduling.
     if dist_name != "each" && !replay {
+        if let Some(anchored) = crate::cache::rootdir() {
+            if let Some(real) = outcome.sources.rootdir_mismatch(anchored) {
+                sink.warn(&format!(
+                    "rstest: pytest's rootdir ({}) differs from the one rstest resolved \
+                     ({}); cached durations won't match its tests, so scheduling ignores \
+                     them. Pass --rootdir to pin it",
+                    real.display(),
+                    anchored.display()
+                ));
+            }
+        }
         durations::save(&outcome.run, &outcome.sources);
         durations::save_scope_costs(&outcome.run);
         // Whole-suite wall (fixtures included) for the monorepo planner: a
@@ -820,6 +833,10 @@ pub(super) fn run_post_gates(
         // real elapsed cost here, so weighting by call time alone starves it
         // to one worker on the warm run. See `mono::project_cost`.
         durations::save_wall(start.elapsed().as_secs_f64());
+        // Per-worker whole-suite collection, auto-lazy's long-pole budget.
+        if let Some(secs) = outcome.collect_seconds {
+            durations::save_collect(secs);
+        }
         // The workers' peak RSS, for the next memory-aware `-n auto`.
         if let Some(peak) = outcome.peak_rss {
             crate::scheduling::memory::record(peak);
@@ -894,6 +911,7 @@ pub(super) fn run_post_gates(
         }
     }
     let mut run_meta = build_run_meta(start, outcome.exitstatus, started_epoch, n);
+    run_meta.warm = outcome.warm.clone();
     // Stamp the sharding identity so `rstest shard-verify` can reconcile the
     // per-shard reports. Only when we have a full-collection hash (parallel
     // full-collect path); the lazy path carries none.
@@ -913,7 +931,7 @@ pub(super) fn run_post_gates(
     // tree says nothing about HEAD itself.
     if since_green && exitstatus == 0 && since_green_narrowed {
         sink.warn(
-            "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect); \
+            "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect/--budget); \
              baseline not advanced",
         );
     } else if since_green && exitstatus == 0 {
@@ -966,12 +984,14 @@ pub(super) fn run_post_gates(
     // one says what differs from the last green. On the final exit code, so
     // a gate that turned the run red counts. Not on `replay`: a diagnostic
     // re-run of an old schedule is no baseline. Only a whole-suite run may
-    // record one: a passing `-k`/shard/cached/--changed subset proves nothing.
+    // record one: a passing `-k`/shard/cached/--changed/--budget subset proves
+    // nothing.
     if !replay {
         let full_suite = !passthrough
             && shard.is_none()
             && !since_green
             && changed_base.is_none()
+            && cli.budget.is_none()
             && !cli.watch
             && outcome.run.cached_nodeids().is_empty()
             && !crate::since_green::run_narrows_suite(args, scope);
@@ -2418,8 +2438,11 @@ mod tests {
             collection_size: 0,
             startup_seconds: 0.0,
             fork_prewarmed: false,
+            warm_record: Default::default(),
+            warm: None,
             peak_rss: None,
             sources: Default::default(),
+            collect_seconds: None,
             exiting: Vec::new(),
         };
         let (mut sink, _cap) = Sink::captured();

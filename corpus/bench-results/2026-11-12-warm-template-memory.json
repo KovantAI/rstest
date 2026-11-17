@@ -1,0 +1,631 @@
+{
+  "date": "2026-11-12",
+  "logical_cpus": 14,
+  "load_1m_at_end": 16.69140625,
+  "arms": [
+    "core",
+    "app"
+  ],
+  "repeat": 5,
+  "memory": true,
+  "rows": [
+    {
+      "suite": "scikit-learn",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          6.582017540989909,
+          6.613860292010941,
+          6.5664338330389,
+          6.886996583023574,
+          6.747906750009861
+        ],
+        "app": [
+          6.143979875021614,
+          6.206286582979374,
+          6.306382375012618,
+          6.1593982499907725,
+          6.758688749978319
+        ]
+      },
+      "medians": {
+        "core": 6.614,
+        "app": 6.206
+      },
+      "saved_pct": {
+        "app": 6.2
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3941,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 2131.2,
+        "app": 1738.9
+      },
+      "mems_mib": {
+        "core": [
+          2091.1,
+          2142.6,
+          2114.7,
+          2136.9,
+          2131.2
+        ],
+        "app": [
+          1678.6,
+          1738.9,
+          1913.7,
+          1667.8,
+          1904.7
+        ]
+      }
+    },
+    {
+      "suite": "langchain",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          7.854489708959591,
+          7.694184541993309,
+          9.034707291983068,
+          7.795820583996829,
+          8.620047125034034
+        ],
+        "app": [
+          7.393134541984182,
+          7.158588208025321,
+          7.486679249966983,
+          7.498764874995686,
+          7.437804042012431
+        ]
+      },
+      "medians": {
+        "core": 7.854,
+        "app": 7.438
+      },
+      "saved_pct": {
+        "app": 5.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3612,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 2106.4,
+        "app": 2077.8
+      },
+      "mems_mib": {
+        "core": [
+          2106.4,
+          2134.4,
+          2007.2,
+          2116.7,
+          2020.0
+        ],
+        "app": [
+          2081.0,
+          2077.8,
+          2043.8,
+          2061.9,
+          2092.7
+        ]
+      }
+    },
+    {
+      "suite": "langgraph",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          25.83635083399713,
+          23.946772791969124,
+          23.431408374977764,
+          26.41118508396903,
+          26.703903625020757
+        ],
+        "app": [
+          27.223869790963363,
+          32.220591707970016,
+          23.51597829099046,
+          27.282663999998476,
+          23.797272333002184
+        ]
+      },
+      "medians": {
+        "core": 25.836,
+        "app": 27.224
+      },
+      "saved_pct": {
+        "app": -5.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 838,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 1227.0,
+        "app": 1131.1
+      },
+      "mems_mib": {
+        "core": [
+          1205.7,
+          1229.9,
+          1227.0,
+          1232.1,
+          1203.6
+        ],
+        "app": [
+          1131.1,
+          1071.8,
+          1134.4,
+          1110.2,
+          1136.9
+        ]
+      }
+    },
+    {
+      "suite": "pandas",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          78.75219675002154,
+          80.76916366704972,
+          82.94912991701858,
+          74.8101340419962,
+          73.73187783401227
+        ],
+        "app": [
+          85.4551281669992,
+          78.86347008298617,
+          79.4276450839825,
+          82.15520479204133,
+          73.30918525002198
+        ]
+      },
+      "medians": {
+        "core": 78.752,
+        "app": 79.428
+      },
+      "saved_pct": {
+        "app": -0.9
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 193843,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 16784.8,
+        "app": 15265.8
+      },
+      "mems_mib": {
+        "core": [
+          13101.8,
+          16784.8,
+          16939.4,
+          16896.7,
+          14994.2
+        ],
+        "app": [
+          15086.4,
+          15611.7,
+          15138.1,
+          16304.4,
+          15265.8
+        ]
+      }
+    },
+    {
+      "suite": "django-allauth",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          5.45927745901281,
+          5.2981114169815555,
+          5.22393362497678,
+          5.373673541995231,
+          5.284520665998571
+        ],
+        "app": [
+          4.993337583029643,
+          5.067311041988432,
+          5.180563625006471,
+          5.157055457995739,
+          5.512407208036166
+        ]
+      },
+      "medians": {
+        "core": 5.298,
+        "app": 5.157
+      },
+      "saved_pct": {
+        "app": 2.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.46,
+          "tests": 2050,
+          "differ": 11,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.95,
+            "tests": 2050,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.46,
+            "tests": 2050,
+            "differ": 11,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.71,
+            "tests": 2050,
+            "differ": 6,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 1750.9,
+        "app": 1693.7
+      },
+      "mems_mib": {
+        "core": [
+          1750.1,
+          1753.8,
+          1744.9,
+          1757.4,
+          1750.9
+        ],
+        "app": [
+          1693.7,
+          1717.2,
+          1708.0,
+          1682.9,
+          1665.2
+        ]
+      }
+    },
+    {
+      "suite": "sympy",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          12.23600420897128,
+          12.739486459002364,
+          12.050984708010219,
+          12.619379375013523,
+          12.63535925000906
+        ],
+        "app": [
+          12.201573042024393,
+          11.191114332992584,
+          11.835413791995961,
+          12.202968875004444,
+          12.069635415973607
+        ]
+      },
+      "medians": {
+        "core": 12.619,
+        "app": 12.07
+      },
+      "saved_pct": {
+        "app": 4.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3061,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 1,
+        "unsettled_notes": []
+      },
+      "mem_peak_mib": {
+        "core": 2218.9,
+        "app": 2245.0
+      },
+      "mems_mib": {
+        "core": [
+          2218.9,
+          2216.0,
+          2241.3,
+          2236.3,
+          2210.4
+        ],
+        "app": [
+          2237.0,
+          2243.9,
+          2249.0,
+          2249.7,
+          2245.0
+        ]
+      }
+    }
+  ]
+}
