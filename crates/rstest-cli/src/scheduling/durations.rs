@@ -153,9 +153,15 @@ fn slash_joined(rel: &Path) -> String {
 /// with `/` separators, so it matches the file part of the cached nodeids on
 /// Windows too. Cached nodeids hang off pytest's rootdir, which need not be
 /// the cwd: pass [`cache::base_dir`] as `root` for a cache lookup.
+///
+/// The walk yields canonical paths (it starts at the canonical rootdir) while
+/// the cwd may be another spelling of the same dir: on Windows a `\\?\` long
+/// path against GitHub's 8.3 `RUNNER~1` temp cwd. A plain prefix strip then
+/// fails and lazy workers get an absolute path outside pytest's rootdir, whose
+/// nodeids lose their file part (`::test_x[0]`) and collide across files.
 pub(crate) fn file_key(file: &Path, cwd: &Path, root: &Path) -> String {
-    cwd.join(file)
-        .strip_prefix(root)
+    crate::cache::relative_to(&cwd.join(file), root)
+        .as_deref()
         .unwrap_or(file)
         .to_string_lossy()
         .replace('\\', "/")
@@ -381,6 +387,72 @@ pub fn save_collect(secs: f64) {
 /// The last recorded per-worker collection seconds, if still within the TTL.
 pub fn load_collect() -> Option<f64> {
     load_stamped_in(&cache::dir(), COLLECT_FILE)
+}
+
+/// The last parallel run's wall time per collection mode, so the automatic
+/// lazy choice can see where lazy collection measured slower than full and
+/// stop picking it. Same TTL as [`WALL_FILE`]: an aged-out record lets auto
+/// try lazy again.
+pub const MODE_WALL_FILE: &str = "mode_wall.json";
+
+/// One mode's last recorded run.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModeWall {
+    pub secs: f64,
+    pub workers: usize,
+    /// Tests the run reported: a narrowed run (paths, `-k`, a shard) is not
+    /// comparable with a whole-suite one.
+    pub tests: usize,
+    #[serde(default)]
+    pub epoch: u64,
+}
+
+/// The last full- and lazy-collection runs, each `None` until recorded (or
+/// once aged out).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct ModeWalls {
+    pub full: Option<ModeWall>,
+    pub lazy: Option<ModeWall>,
+}
+
+/// Record a parallel run's wall time under its collection mode.
+pub fn save_mode_wall(lazy: bool, secs: f64, workers: usize, tests: usize) {
+    let path = cache::file(MODE_WALL_FILE);
+    cache::with_lock(|| {
+        let mut walls: ModeWalls = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let w = Some(ModeWall {
+            secs,
+            workers,
+            tests,
+            epoch: crate::time::now_epoch_secs(),
+        });
+        if lazy {
+            walls.lazy = w;
+        } else {
+            walls.full = w;
+        }
+        if let Ok(bytes) = serde_json::to_vec(&walls) {
+            let _ = cache::write_atomic(&path, &bytes);
+        }
+    });
+}
+
+/// The recorded per-mode walls, aged-out ones dropped.
+pub fn load_mode_walls() -> ModeWalls {
+    let mut walls: ModeWalls = std::fs::read(cache::file(MODE_WALL_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let (now, ttl) = (crate::time::now_epoch_secs(), wall_ttl_secs());
+    for w in [&mut walls.full, &mut walls.lazy] {
+        if w.is_some_and(|m| wall_expired(m.epoch, now, ttl)) {
+            *w = None;
+        }
+    }
+    walls
 }
 
 fn save_stamped(name: &str, secs: f64) {

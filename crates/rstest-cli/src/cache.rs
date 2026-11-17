@@ -675,6 +675,7 @@ mod tests {
             crate::scheduling::durations::FILE,
             crate::scheduling::durations::WALL_FILE,
             crate::scheduling::durations::COLLECT_FILE,
+            crate::scheduling::durations::MODE_WALL_FILE,
             crate::reporting::flakes::FILE,
             crate::reporting::history::FILE,
             crate::since_green::FILE,

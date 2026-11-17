@@ -9,7 +9,7 @@ streams back the nodeids.
 
 ## Auto-default
 
-![Eight checks in order (workers, size, dist, selection, features, doctests, file walk, balance); any failure keeps full collection, and passing all of them picks lazy.](../assets/lazy-auto.svg)
+![Nine checks in order (workers, size, dist, selection, features, doctests, file walk, balance, outcome); any failure keeps full collection, and passing all of them picks lazy.](../assets/lazy-auto.svg)
 
 Setting neither `--collect` nor `[tool.rstest] collect` selects the
 strategy automatically. rstest picks `lazy` when all of these hold, and
@@ -50,6 +50,14 @@ strategy automatically. rstest picks `lazy` when all of these hold, and
   The check assumes no stealing, so it applies even under an explicit
   `--dist load` (which could split the file; see
   [When it doesn't](#when-it-doesnt)).
+- **Outcome:** the last lazy run here wasn't more than 5% slower than the
+  last full one. rstest records each parallel run's wall time per mode
+  (`.rstest_cache/mode_wall.json`), and once both modes have run at this
+  worker count on about the same suite (test counts within 5%), a slower
+  lazy run keeps auto on full. The checks above can't see every cost: a
+  suite whose files share one-time setup can pass them all and still run
+  slower lazy (52s against 47s full on a 360-file flat test directory).
+  Records age out like `wall.json`, and auto then tries lazy again.
 
 The test count comes from `.rstest_cache/durations.json`, so a **cold cache
 counts as zero tests** and a suite's first run stays `full`; a warm run of a
@@ -113,6 +121,15 @@ in file order. A `load` from either source turns stealing on, so a
 command-line `--dist loadfile` does not switch off a `dist = "load"` in
 `[tool.rstest]`; remove it from the config for strict affinity.
 
+Files go out in path order, so neighbouring files, which tend to share
+imports and fixtures, reach the same worker and pay that setup once. Only
+the long poles jump the queue, heaviest first: files whose cached time is at
+least a sixteenth of one worker's share (cached total / (16 × workers)), so
+none of them starts late and ends the run late. Sorting every file by time
+instead scattered related files over the workers: a 360-file suite in one
+flat `tests/` directory took 65s that way against 53s with this order, and
+pandas stayed at 35-36s.
+
 ## The compatibility trade
 
 Full collection imports **every** test module in every worker before
@@ -129,7 +146,7 @@ anything runs. Some suites depend on that, usually without knowing:
 - Cross-file run-order pollution: rich's `test_table.py` mutates the
   `box.ASCII` singleton and never restores it; any scheduler that runs
   it before `test_box.py` (including plain pytest with the files
-  reordered) sees the breakage. Lazy's duration-ordered file queue and
+  reordered) sees the breakage. Lazy's long-poles-first file queue and
   (with `--dist load`) stealing produce orders the default scheduler
   doesn't.
 

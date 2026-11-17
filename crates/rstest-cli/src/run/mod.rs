@@ -1824,6 +1824,7 @@ fn dispatch_run(
                 peak_rss: session_peak.filter(|_| cfg.numprocesses == "auto"),
                 // One session collects once; nothing a lazy pool would save.
                 collect_seconds: None,
+                lazy: false,
                 exiting,
             }
         } else if path == RunPath::Lazy {
@@ -2391,6 +2392,7 @@ fn collect_lazy(
                 })
                 .collect();
             lazy_layout_fits(cache.get(), &rel, n, durations::load_collect())
+                && !lazy_measured_slower(&durations::load_mode_walls(), n)
         }),
     }
 }
@@ -2446,6 +2448,30 @@ fn lazy_layout_fits(
     let longest = per_file.values().copied().fold(0.0, f64::max);
     let saved = collect.unwrap_or(0.0) * (1.0 - 1.0 / n as f64);
     longest - total / n as f64 <= saved.max(LAZY_LONG_POLE_SLACK_SECS)
+}
+
+/// How much slower than full collection a recorded lazy run may be before
+/// auto-lazy stops picking lazy: run-to-run noise on a busy machine is a few
+/// percent.
+const LAZY_SLOWER_MARGIN: f64 = 1.05;
+
+/// Whether the recorded runs say lazy collection loses here: the last lazy and
+/// the last full run both used `n` workers on about the same suite (within 5%
+/// of each other's test count, so a narrowed run never decides), and lazy took
+/// more than [`LAZY_SLOWER_MARGIN`] times as long. The layout checks above can't
+/// see every cost: agent-platform-backend passes them all yet ran 52s lazy
+/// against 47s full (its files share one-time setup that full collection
+/// pays once per worker). An aged-out record (`RSTEST_WALL_TTL_DAYS`) lets
+/// auto try lazy again.
+fn lazy_measured_slower(walls: &durations::ModeWalls, n: usize) -> bool {
+    let (Some(full), Some(lazy)) = (walls.full, walls.lazy) else {
+        return false;
+    };
+    let similar = |a: usize, b: usize| a.abs_diff(b) as f64 <= 0.05 * a.max(b) as f64;
+    full.workers == n
+        && lazy.workers == n
+        && similar(full.tests, lazy.tests)
+        && lazy.secs > full.secs * LAZY_SLOWER_MARGIN
 }
 
 /// Wall time a lazy long-pole file may add over an even per-worker share
@@ -3181,14 +3207,14 @@ mod tests {
     use super::{
         attach_stream_json, auto_lazy, cap_workers_by_files, cap_workers_by_time,
         check_order_shuffle, check_require_baseline, collect_lazy, dispatch_command,
-        fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_should_steal,
-        mark_session_flaky, names_a_selection, names_existing_path, order_ignored_warning,
-        parse_duration_secs, parse_numprocesses, print_run_banner, quarantined_exit,
-        reject_looponfail, requests_doctests, resolve_budget, resolve_changed_base, resolve_order,
-        resolve_retention_policy, resolve_shard, resolve_shuffle_seed, run_cache_compact,
-        silent_master_plugin_warnings, validate_cache_flags, warn_incremental_conflicts,
-        warn_quarantine_passthrough, warn_windows_timeout, DurationCache, RunPath,
-        AUTO_LAZY_MIN_TESTS,
+        fold_run_event, head_to_none, incremental_config, lazy_layout_fits, lazy_measured_slower,
+        lazy_should_steal, mark_session_flaky, names_a_selection, names_existing_path,
+        order_ignored_warning, parse_duration_secs, parse_numprocesses, print_run_banner,
+        quarantined_exit, reject_looponfail, requests_doctests, resolve_budget,
+        resolve_changed_base, resolve_order, resolve_retention_policy, resolve_shard,
+        resolve_shuffle_seed, run_cache_compact, silent_master_plugin_warnings,
+        validate_cache_flags, warn_incremental_conflicts, warn_quarantine_passthrough,
+        warn_windows_timeout, DurationCache, RunPath, AUTO_LAZY_MIN_TESTS,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -3937,6 +3963,50 @@ mod tests {
             2,
             None
         ));
+    }
+
+    #[test]
+    fn lazy_measured_slower_only_on_a_comparable_slower_lazy_run() {
+        use crate::scheduling::durations::{ModeWall, ModeWalls};
+        let w = |secs: f64, workers: usize, tests: usize| ModeWall {
+            secs,
+            workers,
+            tests,
+            epoch: 0,
+        };
+        let walls = |full, lazy| ModeWalls {
+            full: Some(full),
+            lazy: Some(lazy),
+        };
+        // agent-platform-backend at 14 workers: lazy 52s against full 47s.
+        assert!(lazy_measured_slower(
+            &walls(w(47.0, 14, 10_133), w(52.0, 14, 10_133)),
+            14
+        ));
+        // Within the noise margin, or lazy faster: keep picking lazy.
+        assert!(!lazy_measured_slower(
+            &walls(w(47.0, 14, 10_133), w(49.0, 14, 10_133)),
+            14
+        ));
+        assert!(!lazy_measured_slower(
+            &walls(w(44.0, 8, 193_843), w(34.0, 8, 193_841)),
+            8
+        ));
+        // Another worker count, or a narrowed run: not comparable.
+        assert!(!lazy_measured_slower(
+            &walls(w(47.0, 14, 10_133), w(52.0, 14, 10_133)),
+            8
+        ));
+        assert!(!lazy_measured_slower(
+            &walls(w(47.0, 14, 10_133), w(52.0, 14, 412)),
+            14
+        ));
+        // Nothing recorded for one mode yet: no verdict.
+        let only_full = ModeWalls {
+            full: Some(w(47.0, 14, 10_133)),
+            lazy: None,
+        };
+        assert!(!lazy_measured_slower(&only_full, 14));
     }
 
     #[test]
