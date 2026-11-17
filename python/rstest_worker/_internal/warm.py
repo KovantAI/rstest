@@ -389,6 +389,24 @@ def _guarded_find_and_load(orig):
     return find_and_load
 
 
+def _left_behind(before: set[str]) -> str | None:
+    """Why a failed manifest import leaves this process unfit to fork from, or
+    None. Python drops the failing module from `sys.modules`, not what its code
+    already did: sqlmesh's `__init__` patches sqlglot's parser (through
+    `sqlmesh.core.dialect`, which stays imported) and then fails on a denied
+    import, so every forked worker inherited a patched sqlglot without sqlmesh,
+    imported sqlmesh again, patched it twice and recursed forever. A module
+    that stayed imported is the sign its code ran; the denial is kept, so the
+    next template never tries it. ponytail: a module that mutates an already
+    imported one and then fails without importing anything new still slips
+    through; snapshot module dicts if one shows up."""
+    new = sorted(set(sys.modules) - before)
+    if not new:
+        return None
+    more = f" and {len(new) - 1} more" if len(new) > 1 else ""
+    return f"fails partway, leaving {new[0]}{more} imported"
+
+
 def prewarm(manifest_path: str, result_path: str | None) -> bool:
     """Import the manifest's modules. Returns False when this process is no
     longer fit to fork from (a guard fired, or an error after imports began):
@@ -434,6 +452,7 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
             if name in sys.modules:
                 continue
             _env_hazards.clear()
+            loaded = set(sys.modules)
             try:
                 importlib.import_module(name)
             except Hazard as h:
@@ -442,6 +461,9 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
                     if h.name != name:
                         why = f"imports {h.name}, which {h.reason}"
                         result["denied"][name] = f"import error ({why})"
+                    if partial := _left_behind(loaded):
+                        result["hazard"] = result["hazard"] or partial
+                        clean = False
                     continue
                 # This process will be discarded (restarted cold), so keep
                 # going and find every hazard in this one run: stopping here
@@ -452,6 +474,9 @@ def prewarm(manifest_path: str, result_path: str | None) -> bool:
             except (Exception, SystemExit) as e:
                 reason = f"{type(e).__name__}: {e}".splitlines()[0][:200]
                 result["denied"][name] = f"import error ({reason})"
+                if partial := _left_behind(loaded):
+                    result["hazard"] = result["hazard"] or f"{name}: {partial}"
+                    clean = False
                 continue
             if _env_hazards:
                 h = _env_hazards[0]

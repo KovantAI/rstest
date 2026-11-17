@@ -184,6 +184,17 @@ checked, and coverage is not supported yet (`--cov` turns `app` off; under
 no fork, `app` falls back to plain spawns with a note (see
 [Running on Windows](../guides/windows.md#worker-startup)).
 
+**When the template breaks the run.** A module that fails partway through
+its import is denied, and if it left other modules imported (its code ran
+far enough to change them, as sqlmesh patching sqlglot's parser) that run's
+workers start without the template; the next run leaves the module out.
+If every worker forked from the template still dies before any test runs
+(on macOS, a library thread can hit the Objective-C runtime's fork-safety
+abort), rstest runs the suite again without the template in the same run,
+with a note, and records the template afresh next time. Once a test has
+run, it doesn't rerun, so its side effects are never repeated; that run
+fails and the template is reset.
+
 Per run, `app` saves little wall time, because workers already import in
 parallel; its value is under `--watch`. The `--doctor` `startup:` line shows
 the spawn cost, and with `app` how much the template imported.
