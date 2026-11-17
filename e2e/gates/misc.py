@@ -1,8 +1,10 @@
 """e2e gate sections: misc."""
 
 import json
+import re
+import shutil
 
-from _harness import BASIC, check
+from _harness import BASIC, REPO, check
 
 
 def gate_basics(g, args, binary):
@@ -71,6 +73,37 @@ def gate_worker_identity_fixtures(g, args, binary):
     # single-worker mode, so still "master".
     r = g.run("widfix/test_master.py", "-n", "0", "--reruns", "1")
     check("worker_id is 'master' at -n 0 --reruns", "1 passed" in r.stdout, r.stdout[-300:])
+
+
+def gate_worker_version_mismatch(g, args, binary):
+    print("== worker version mismatch ==")
+    # The `rstest` command and the worker installed in the project's
+    # environment exchange messages that change between releases; a worker of
+    # another version refuses to run instead of silently misbehaving (an old
+    # worker under a newer orchestrator could hang a lazy run).
+    pkg = g.tmp / "mismatch_pkg"
+    shutil.rmtree(pkg, ignore_errors=True)
+    shutil.copytree(REPO / "python" / "rstest_worker", pkg / "rstest_worker")
+    version = pkg / "rstest_worker" / "_version.py"
+    version.write_text(
+        re.sub(r'__version__ = ".*"', '__version__ = "0.0.0"', version.read_text()),
+        encoding="utf-8",
+    )
+    g.write("mismatch_proj/pytest.ini", "")
+    g.write("mismatch_proj/test_x.py", "def test_a(): pass\n")
+    for n in ("2", "0"):
+        r = g.run(
+            "-n",
+            n,
+            cwd=g.tmp / "mismatch_proj",
+            env_extra={"RSTEST_WORKER_PATH": str(pkg)},
+        )
+        out = r.stdout + r.stderr
+        check(
+            f"version mismatch: worker refuses a different rstest (-n {n})",
+            r.returncode != 0 and "version mismatch" in out and "0.0.0" in out,
+            f"rc={r.returncode} " + out[-300:],
+        )
 
 
 def gate_lone_surrogate_in_report(g, args, binary):
