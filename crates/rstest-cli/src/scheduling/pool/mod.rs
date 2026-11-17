@@ -237,9 +237,17 @@ pub struct PoolOutcome {
     /// merely requested: `--fork-pool` is a no-op off Unix and on paths that
     /// don't spawn a pool). Feeds the `--doctor` report.
     pub fork_prewarmed: bool,
+    /// `--fork-pool=app`: the modules the workers imported, for the manifest.
+    pub warm_record: crate::scheduling::warm::Record,
+    /// `--fork-pool=app`: what the template imported (set after the run).
+    pub warm: Option<crate::scheduling::warm::Stats>,
     /// pytest's rootdir and the collected test files' fingerprints, which the
     /// duration cache tags this run's timings with.
     pub sources: crate::scheduling::durations::Collected,
+    /// Seconds one worker spends collecting the whole suite, for auto-lazy's
+    /// long-pole budget (see `durations::COLLECT_FILE`). `None` when no worker
+    /// reported it (single session, lazy pool).
+    pub collect_seconds: Option<f64>,
     /// Workers already sent `Shutdown` but not yet reaped, so their teardown
     /// (atexit handlers, coverage data files) overlaps the post-run saves.
     /// Reap with [`PoolOutcome::reap_workers`] before reading anything they
@@ -421,6 +429,8 @@ pub fn run_pool(
     // overstates the other.
     let mut ready_workers: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut startup_seconds = 0.0f64;
+    // Each worker's collection phase (seconds), for `PoolOutcome::collect_seconds`.
+    let mut collect_times: Vec<f64> = Vec::new();
     // NOTE: `tx` stays alive for respawns; the event loop exits via the
     // explicit done_workers break, not channel disconnect.
 
@@ -457,6 +467,7 @@ pub fn run_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut peak_rss: Option<u64> = None;
+    let mut warm_record = crate::scheduling::warm::Record::default();
     // Reference collection: (count, hash) from whichever worker reports first.
     let mut reference: Option<(u64, String)> = None;
     // Designate's id list, retained for crash-report nodeids.
@@ -700,7 +711,9 @@ pub fn run_pool(
                 confcutdir: _,
                 maxfail: reported_maxfail,
                 deselected,
+                collect_seconds,
             }) => {
+                collect_times.extend(collect_seconds);
                 run.deselected = run.deselected.max(deselected);
                 // pytest's own resolution (argv + addopts, last wins) is
                 // authoritative; it arrives before any item is dispatched.
@@ -1075,9 +1088,17 @@ pub fn run_pool(
             Ok(Event::Done {
                 exitstatus,
                 peak_rss: peak,
+                imported,
+                sys_path,
+                coverage,
+                rewrite,
+                env,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
+                warm_record.merge(imported, sys_path, coverage);
+                warm_record.rewrite.extend(rewrite);
+                warm_record.env.extend(env);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own (see Stopped) never ran what
@@ -1678,8 +1699,14 @@ pub fn run_pool(
         collection_size,
         startup_seconds,
         fork_prewarmed,
+        warm_record,
+        warm: None,
         sources,
         peak_rss,
+        collect_seconds: {
+            collect_times.sort_by(f64::total_cmp);
+            crate::explain::median(&collect_times)
+        },
         exiting,
     })
 }

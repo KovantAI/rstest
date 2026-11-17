@@ -32,6 +32,13 @@ rstest keeps two caches in your project, its own `.rstest_cache/` and pytest's `
   a fixture-bound project by its real cost. It carries no per-test source to
   fingerprint, so it ages out on time instead: entries older than
   `RSTEST_WALL_TTL_DAYS` (default 30, `0` disables) are ignored on read.
+- `collect.json`: how long one worker spends collecting the whole suite, from
+  the last parallel run with full collection (lazy runs leave it as is).
+  Under full collection every worker repeats that, and
+  lazy collection saves it, so the automatic collection choice lets the
+  heaviest test file run that much past its per-worker share before it keeps
+  full collection ([Lazy collection](lazy-collection.md)). Same TTL as
+  `wall.json`. Safe to delete; the choice then allows one second.
 - `flakes.json`: sparse record of tests that flaked (passed only on rerun,
   via [`--reruns`](../guides/flaky-tests.md) / `@pytest.mark.flaky`) or
   hard-failed, quarantined failures included. Used to surface repeat

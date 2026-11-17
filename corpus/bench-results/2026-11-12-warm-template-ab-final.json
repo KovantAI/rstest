@@ -1,0 +1,5833 @@
+{
+  "date": "2026-11-13",
+  "logical_cpus": 14,
+  "load_1m_at_end": 6.9638671875,
+  "arms": [
+    "core",
+    "app"
+  ],
+  "repeat": 5,
+  "memory": false,
+  "rows": [
+    {
+      "suite": "rich",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          2.5186469999607652,
+          2.5248617089819163,
+          2.493035542021971,
+          2.513249874988105,
+          2.4980234999675304
+        ],
+        "app": [
+          2.4751115410472266,
+          2.497639250010252,
+          2.4973005420179106,
+          2.4895253750146367,
+          2.4825599170289934
+        ]
+      },
+      "medians": {
+        "core": 2.513,
+        "app": 2.49
+      },
+      "saved_pct": {
+        "app": 0.9
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 981,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "rich",
+      "workers": "8",
+      "walls": {
+        "core": [
+          2.4376433750148863,
+          2.4444804579834454,
+          2.422103041957598,
+          2.4482438749982975,
+          2.4426095000235364
+        ],
+        "app": [
+          2.4271735830116086,
+          2.4242815829929896,
+          2.4235823329654522,
+          2.4186965419794433,
+          2.423299500020221
+        ]
+      },
+      "medians": {
+        "core": 2.443,
+        "app": 2.424
+      },
+      "saved_pct": {
+        "app": 0.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 981,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 981,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "django-allauth",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          5.272199292026926,
+          5.267864457971882,
+          5.180472499981988,
+          5.4579374580061994,
+          5.278672250045929
+        ],
+        "app": [
+          5.016596541972831,
+          5.183104458032176,
+          4.9917625420494005,
+          4.91977262502769,
+          5.048101458000019
+        ]
+      },
+      "medians": {
+        "core": 5.272,
+        "app": 5.017
+      },
+      "saved_pct": {
+        "app": 4.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.8,
+          "tests": 2050,
+          "differ": 4,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2050,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.8,
+            "tests": 2050,
+            "differ": 4,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "django-allauth",
+      "workers": "8",
+      "walls": {
+        "core": [
+          5.3731888749753125,
+          5.690404332999606,
+          5.671737500000745,
+          5.3873188750003465,
+          5.959824459045194
+        ],
+        "app": [
+          5.176568708033301,
+          5.175120125000831,
+          5.533145915949717,
+          5.238986334006768,
+          5.223609125008807
+        ]
+      },
+      "medians": {
+        "core": 5.672,
+        "app": 5.224
+      },
+      "saved_pct": {
+        "app": 7.9
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 2050,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2050,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "aiohttp",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          57.22780370799592,
+          57.208924083039165,
+          56.993522291013505,
+          57.24086495797383,
+          56.99963408400072
+        ],
+        "app": [
+          56.81565758300712,
+          56.93877775000874,
+          56.77531708299648,
+          56.993820999981835,
+          56.83861841697944
+        ]
+      },
+      "medians": {
+        "core": 57.209,
+        "app": 56.839
+      },
+      "saved_pct": {
+        "app": 0.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.98,
+          "tests": 4469,
+          "differ": 1,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.98,
+            "tests": 4469,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.98,
+            "tests": 4469,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.98,
+            "tests": 4469,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 4469,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 4469,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 5,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "aiohttp",
+      "workers": "8",
+      "walls": {
+        "core": [
+          67.19203687499976,
+          67.14118000003509,
+          67.02003829198657,
+          67.16816404100973,
+          66.99338345800061
+        ],
+        "app": [
+          66.81439020799007,
+          66.99778587499168,
+          66.82291020901175,
+          66.97700025001541,
+          66.8480325830169
+        ]
+      },
+      "medians": {
+        "core": 67.141,
+        "app": 66.848
+      },
+      "saved_pct": {
+        "app": 0.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.98,
+          "tests": 4469,
+          "differ": 1,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.98,
+            "tests": 4469,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 4469,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 4469,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.98,
+            "tests": 4469,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 4469,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pandas",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          71.89091779099545,
+          72.31183666700963,
+          71.3252437079791,
+          72.08908041601535,
+          72.46797674999107
+        ],
+        "app": [
+          71.73491154098883,
+          72.74348025000654,
+          71.29141620796872,
+          70.99595279200003,
+          72.97570004197769
+        ]
+      },
+      "medians": {
+        "core": 72.089,
+        "app": 71.735
+      },
+      "saved_pct": {
+        "app": 0.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 193843,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 4,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pandas",
+      "workers": "8",
+      "walls": {
+        "core": [
+          73.76581279200036,
+          77.42198450001888,
+          72.918851000024,
+          73.59674454096239,
+          73.14736616698792
+        ],
+        "app": [
+          72.76437854103278,
+          73.3363215830177,
+          73.72871749999467,
+          73.09730083303293,
+          73.30112504202407
+        ]
+      },
+      "medians": {
+        "core": 73.597,
+        "app": 73.301
+      },
+      "saved_pct": {
+        "app": 0.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 193843,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 193843,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "flask",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.507566999993287,
+          0.5056149999727495,
+          0.504976500000339,
+          0.5052194580202922,
+          0.5037480000173673
+        ],
+        "app": [
+          0.4794203750207089,
+          0.482186583976727,
+          0.48159266595030203,
+          0.4796293749823235,
+          0.480389499978628
+        ]
+      },
+      "medians": {
+        "core": 0.505,
+        "app": 0.48
+      },
+      "saved_pct": {
+        "app": 4.9
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 491,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "flask",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.3846220840350725,
+          0.37688229203922674,
+          0.38145250000525266,
+          0.4394779170397669,
+          0.42732858401723206
+        ],
+        "app": [
+          0.34445866697933525,
+          0.34436762501718476,
+          0.3429391250247136,
+          0.35337804100709036,
+          0.35665966698434204
+        ]
+      },
+      "medians": {
+        "core": 0.385,
+        "app": 0.344
+      },
+      "saved_pct": {
+        "app": 10.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 491,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 491,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "click",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.6549195409752429,
+          1.638088624982629,
+          1.6584640420041978,
+          1.641761165985372,
+          1.660978583036922
+        ],
+        "app": [
+          1.668619750009384,
+          1.6129661250161007,
+          1.6340135840000585,
+          1.646340333041735,
+          1.6511378749855794
+        ]
+      },
+      "medians": {
+        "core": 1.655,
+        "app": 1.646
+      },
+      "saved_pct": {
+        "app": 0.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1697,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "click",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.6615244169952348,
+          1.6348434999817982,
+          1.681784707994666,
+          1.9007685410324484,
+          1.6141343750059605
+        ],
+        "app": [
+          1.5637177919852547,
+          1.5485285830218345,
+          1.5410885830060579,
+          1.5466786660254002,
+          1.5602710410021245
+        ]
+      },
+      "medians": {
+        "core": 1.662,
+        "app": 1.549
+      },
+      "saved_pct": {
+        "app": 6.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1697,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1697,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "jinja2",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.5421028750133701,
+          0.5403294580173679,
+          0.5459520000149496,
+          0.5412652500090189,
+          0.5443776249885559
+        ],
+        "app": [
+          0.5087447080295533,
+          0.5085292080184445,
+          0.5114890830009244,
+          0.5104837079998106,
+          0.5092817909899168
+        ]
+      },
+      "medians": {
+        "core": 0.542,
+        "app": 0.509
+      },
+      "saved_pct": {
+        "app": 6.1
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 911,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "jinja2",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.4577764580026269,
+          0.4546621250337921,
+          0.45860041701234877,
+          0.45742433302802965,
+          0.4561123339808546
+        ],
+        "app": [
+          0.39909374999115244,
+          0.40537220804253593,
+          0.4034270420088433,
+          0.404561500006821,
+          0.40278462501009926
+        ]
+      },
+      "medians": {
+        "core": 0.457,
+        "app": 0.403
+      },
+      "saved_pct": {
+        "app": 11.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 911,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 911,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "werkzeug",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.321866583020892,
+          1.3212837500032037,
+          1.307860291970428,
+          1.3156367919873446,
+          1.290810665988829
+        ],
+        "app": [
+          1.3140169589896686,
+          1.2850864590145648,
+          1.2687640829826705,
+          1.2637468749890104,
+          1.319386916991789
+        ]
+      },
+      "medians": {
+        "core": 1.316,
+        "app": 1.285
+      },
+      "saved_pct": {
+        "app": 2.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 992,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "werkzeug",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.5075177919934504,
+          1.5415534999920055,
+          1.423119916988071,
+          1.5992807089933194,
+          1.5837180000380613
+        ],
+        "app": [
+          1.4842767920345068,
+          1.5636530419578776,
+          1.608030333998613,
+          1.4759987919824198,
+          1.5871780830202624
+        ]
+      },
+      "medians": {
+        "core": 1.542,
+        "app": 1.564
+      },
+      "saved_pct": {
+        "app": -1.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 992,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 992,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "itsdangerous",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.3002389160101302,
+          0.28879266703734174,
+          0.2918305000057444,
+          0.28825270803645253,
+          0.2898900419822894
+        ],
+        "app": [
+          0.24461312498897314,
+          0.24170408298959956,
+          0.24519737501395866,
+          0.24216179101495072,
+          0.24683883303077891
+        ]
+      },
+      "medians": {
+        "core": 0.29,
+        "app": 0.245
+      },
+      "saved_pct": {
+        "app": 15.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 297,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "itsdangerous",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.2668338330113329,
+          0.26834233303088695,
+          0.26516075001563877,
+          0.268961458990816,
+          0.26444400002947077
+        ],
+        "app": [
+          0.22891904204152524,
+          0.23144366696942598,
+          0.2272470840252936,
+          0.22956449998309836,
+          0.23013645800529048
+        ]
+      },
+      "medians": {
+        "core": 0.267,
+        "app": 0.23
+      },
+      "saved_pct": {
+        "app": 14.0
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 297,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 297,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "markupsafe",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.2163789159967564,
+          0.21608637500321493,
+          0.21557420800672844,
+          0.2150569999939762,
+          0.21364233299391344
+        ],
+        "app": [
+          0.21515766700031236,
+          0.21455645799869671,
+          0.21492025000043213,
+          0.21482579200528562,
+          0.21508954098680988
+        ]
+      },
+      "medians": {
+        "core": 0.216,
+        "app": 0.215
+      },
+      "saved_pct": {
+        "app": 0.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 80,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "markupsafe",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.21994733397150412,
+          0.2179902499774471,
+          0.21935416699852794,
+          0.21980354201514274,
+          0.2171748750261031
+        ],
+        "app": [
+          0.18830337503459305,
+          0.18890112498775125,
+          0.18332220904994756,
+          0.18488470901502296,
+          0.18466374999843538
+        ]
+      },
+      "medians": {
+        "core": 0.219,
+        "app": 0.185
+      },
+      "saved_pct": {
+        "app": 15.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 80,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 80,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "fastapi",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.3020342499949038,
+          0.2914023749763146,
+          0.29177904198877513,
+          0.3014178750454448,
+          0.29530612501548603
+        ],
+        "app": [
+          0.30073016701499,
+          0.29230970796197653,
+          0.29732720798347145,
+          0.29579104197910056,
+          0.29991883400361985
+        ]
+      },
+      "medians": {
+        "core": 0.295,
+        "app": 0.297
+      },
+      "saved_pct": {
+        "app": -0.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "fastapi",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.2212184999953024,
+          0.2195662499871105,
+          0.22095679200720042,
+          0.21952166699338704,
+          0.2184657499892637
+        ],
+        "app": [
+          0.22419895796338096,
+          0.21967654203763232,
+          0.22468883398687467,
+          0.21828337502665818,
+          0.22704087500460446
+        ]
+      },
+      "medians": {
+        "core": 0.22,
+        "app": 0.224
+      },
+      "saved_pct": {
+        "app": -2.1
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "starlette",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.21609816700220108,
+          0.20784737501526251,
+          0.19941699999617413,
+          0.206835291988682,
+          0.20510545803699642
+        ],
+        "app": [
+          0.20807012502336875,
+          0.2043607920059003,
+          0.20960333303082734,
+          0.20690941700013354,
+          0.2105939579778351
+        ]
+      },
+      "medians": {
+        "core": 0.207,
+        "app": 0.208
+      },
+      "saved_pct": {
+        "app": -0.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "starlette",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.18607854197034612,
+          0.18329029099550098,
+          0.18542062502820045,
+          0.18615666701225564,
+          0.18580304097849876
+        ],
+        "app": [
+          0.1869122500065714,
+          0.18226391699863598,
+          0.18666941701667383,
+          0.18420349998632446,
+          0.1884724999545142
+        ]
+      },
+      "medians": {
+        "core": 0.186,
+        "app": 0.187
+      },
+      "saved_pct": {
+        "app": -0.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "httpx",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          122.03269154101145,
+          122.09909462498035,
+          242.18911662499886,
+          242.25920145900454,
+          723.5901463329792
+        ],
+        "app": [
+          121.95932895800797,
+          242.13227987498976,
+          121.96100954100257,
+          242.24054758402053,
+          242.13862979097757
+        ]
+      },
+      "medians": {
+        "core": 242.189,
+        "app": 242.132
+      },
+      "saved_pct": {
+        "app": 0.0
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.22,
+          "tests": 1418,
+          "differ": 11,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.86,
+            "tests": 1418,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.79,
+            "tests": 1418,
+            "differ": 3,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.65,
+            "tests": 1418,
+            "differ": 5,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1418,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.22,
+            "tests": 1418,
+            "differ": 11,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "httpx",
+      "workers": "8",
+      "walls": {
+        "core": [
+          121.9984829580062,
+          241.67934549995698,
+          242.96555091702612,
+          242.34599904104834,
+          242.24497712496668
+        ],
+        "app": [
+          843.000960000034,
+          242.2908928329707,
+          242.2182902909699,
+          122.07681483298074,
+          241.88673049997305
+        ]
+      },
+      "medians": {
+        "core": 242.245,
+        "app": 242.218
+      },
+      "saved_pct": {
+        "app": 0.0
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.22,
+          "tests": 1418,
+          "differ": 11,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.22,
+            "tests": 1418,
+            "differ": 11,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.51,
+            "tests": 1418,
+            "differ": 7,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.44,
+            "tests": 1418,
+            "differ": 8,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.65,
+            "tests": 1418,
+            "differ": 5,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.58,
+            "tests": 1418,
+            "differ": 6,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "urllib3",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          28.511344374972396,
+          28.236729542026296,
+          28.46711625001626,
+          28.25500858295709,
+          28.479163832962513
+        ],
+        "app": [
+          28.004691707959864,
+          28.27627462503733,
+          27.994063916034065,
+          28.268174834025558,
+          28.00573966698721
+        ]
+      },
+      "medians": {
+        "core": 28.467,
+        "app": 28.006
+      },
+      "saved_pct": {
+        "app": 1.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.85,
+          "tests": 2299,
+          "differ": 3,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.9,
+            "tests": 2299,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.95,
+            "tests": 2299,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.85,
+            "tests": 2299,
+            "differ": 3,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.95,
+            "tests": 2299,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.9,
+            "tests": 2299,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "urllib3",
+      "workers": "8",
+      "walls": {
+        "core": [
+          29.360963083978277,
+          34.3771881670109,
+          35.06885195802897,
+          34.447608791990206,
+          37.15976825001417
+        ],
+        "app": [
+          29.16129637497943,
+          29.097298791981302,
+          28.94316174997948,
+          34.74333883298095,
+          28.941995459026657
+        ]
+      },
+      "medians": {
+        "core": 34.448,
+        "app": 29.097
+      },
+      "saved_pct": {
+        "app": 15.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 2299,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 2299,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2299,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2299,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2299,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2299,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "requests",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          21.403638957999647,
+          21.388296958990395,
+          21.370959166961256,
+          21.392113832989708,
+          21.371461290982552
+        ],
+        "app": [
+          21.308220083999913,
+          21.308134959021118,
+          21.3096337079769,
+          21.354408417013474,
+          21.292402792023495
+        ]
+      },
+      "medians": {
+        "core": 21.388,
+        "app": 21.308
+      },
+      "saved_pct": {
+        "app": 0.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 635,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "requests",
+      "workers": "8",
+      "walls": {
+        "core": [
+          14.265402165998239,
+          14.24498845799826,
+          14.24721695802873,
+          14.27044970804127,
+          14.260121333005372
+        ],
+        "app": [
+          14.204492249991745,
+          14.214846083021257,
+          14.20225912501337,
+          14.20809145795647,
+          14.21556766598951
+        ]
+      },
+      "medians": {
+        "core": 14.26,
+        "app": 14.208
+      },
+      "saved_pct": {
+        "app": 0.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 635,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 635,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "attrs",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.0323265839833766,
+          1.3206776670413092,
+          1.0344453750294633,
+          1.0923444170039147,
+          1.0482473750016652
+        ],
+        "app": [
+          1.028827000001911,
+          0.981256042025052,
+          0.9807542499620467,
+          0.9613758340128697,
+          0.9666607499821112
+        ]
+      },
+      "medians": {
+        "core": 1.048,
+        "app": 0.981
+      },
+      "saved_pct": {
+        "app": 6.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1391,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "attrs",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.4684276249608956,
+          1.2665444170124829,
+          1.278884208004456,
+          1.2403198329848237,
+          1.303844082984142
+        ],
+        "app": [
+          1.2083009170019068,
+          1.1472608749754727,
+          1.1973166660172865,
+          1.3461611249949783,
+          1.3421634580008686
+        ]
+      },
+      "medians": {
+        "core": 1.279,
+        "app": 1.208
+      },
+      "saved_pct": {
+        "app": 5.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1391,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1391,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pluggy",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.17657808400690556,
+          0.1731390419881791,
+          0.17728891596198082,
+          0.1738519580103457,
+          0.17486933403415605
+        ],
+        "app": [
+          0.175251999986358,
+          0.17590054200263694,
+          0.17632533301366493,
+          0.17559016699669883,
+          0.2750302089843899
+        ]
+      },
+      "medians": {
+        "core": 0.175,
+        "app": 0.176
+      },
+      "saved_pct": {
+        "app": -0.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 139,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pluggy",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.19021712499670684,
+          0.18944233300862834,
+          0.18919083301443607,
+          0.18923054198967293,
+          0.18864508299157023
+        ],
+        "app": [
+          0.1648562919581309,
+          0.16236550000030547,
+          0.16182745801052079,
+          0.1623356249765493,
+          0.16320033295778558
+        ]
+      },
+      "medians": {
+        "core": 0.189,
+        "app": 0.162
+      },
+      "saved_pct": {
+        "app": 14.2
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 139,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 139,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "packaging",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          6.474005250027403,
+          6.476558749971446,
+          6.408873083011713,
+          6.522361749957781,
+          6.511295167030767
+        ],
+        "app": [
+          6.274279334000312,
+          6.272449709009379,
+          6.141439458995592,
+          6.327014457958285,
+          6.356015832978301
+        ]
+      },
+      "medians": {
+        "core": 6.477,
+        "app": 6.274
+      },
+      "saved_pct": {
+        "app": 3.1
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 61570,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "packaging",
+      "workers": "8",
+      "walls": {
+        "core": [
+          6.340788584027905,
+          6.391120042011607,
+          6.325744166970253,
+          6.394999624986667,
+          6.3942974169622175
+        ],
+        "app": [
+          6.232855957990978,
+          6.267286957998294,
+          6.219356249959674,
+          6.256088167021517,
+          6.223696583008859
+        ]
+      },
+      "medians": {
+        "core": 6.391,
+        "app": 6.233
+      },
+      "saved_pct": {
+        "app": 2.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 61570,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 61570,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "more-itertools",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          3.786551208002493,
+          3.7940973750082776,
+          3.957698624988552,
+          3.796823333017528,
+          3.770310416002758
+        ],
+        "app": [
+          3.786372874979861,
+          3.740620290976949,
+          3.723750624980312,
+          3.8040367090143263,
+          3.791959375026636
+        ]
+      },
+      "medians": {
+        "core": 3.794,
+        "app": 3.786
+      },
+      "saved_pct": {
+        "app": 0.2
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 725,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "more-itertools",
+      "workers": "8",
+      "walls": {
+        "core": [
+          3.7925824580015615,
+          3.7772441250272095,
+          3.8195878749829717,
+          3.7786933750030585,
+          3.864301458001137
+        ],
+        "app": [
+          3.724580915994011,
+          3.7476943749934435,
+          3.783844083023723,
+          3.7043454579543322,
+          3.7304191670264117
+        ]
+      },
+      "medians": {
+        "core": 3.793,
+        "app": 3.73
+      },
+      "saved_pct": {
+        "app": 1.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 725,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 725,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "python-dateutil",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.1225821250118315,
+          1.1047732920269482,
+          1.1196187079767697,
+          1.123061583028175,
+          1.128591916989535
+        ],
+        "app": [
+          1.0623437089961953,
+          1.060648625018075,
+          1.0552044159849174,
+          1.0507449580472894,
+          1.052177333040163
+        ]
+      },
+      "medians": {
+        "core": 1.123,
+        "app": 1.055
+      },
+      "saved_pct": {
+        "app": 6.0
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 2096,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "python-dateutil",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.9294424999970943,
+          0.9158525000093505,
+          0.9236923750140704,
+          0.9148608749965206,
+          0.9196130830096081
+        ],
+        "app": [
+          0.864432415983174,
+          0.8710406249738298,
+          0.8753284999984317,
+          0.8701774170040153,
+          0.8741911249817349
+        ]
+      },
+      "medians": {
+        "core": 0.92,
+        "app": 0.871
+      },
+      "saved_pct": {
+        "app": 5.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 2096,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 2096,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "jsonschema",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.6017625420354307,
+          1.5660424589877948,
+          1.5857056249515153,
+          1.5994875829783268,
+          1.5790279590291902
+        ],
+        "app": [
+          1.5275765410042368,
+          1.5221467920346186,
+          1.5450126249925233,
+          1.5106838750070892,
+          1.5297862499719486
+        ]
+      },
+      "medians": {
+        "core": 1.586,
+        "app": 1.528
+      },
+      "saved_pct": {
+        "app": 3.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 8337,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 4,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "jsonschema",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.4257093340274878,
+          1.433809750014916,
+          1.4235238750115968,
+          1.409068249980919,
+          1.427704542002175
+        ],
+        "app": [
+          1.3924054579692893,
+          1.3881218750029802,
+          1.4029858330031857,
+          1.4157020840211771,
+          1.3866973330150358
+        ]
+      },
+      "medians": {
+        "core": 1.426,
+        "app": 1.392
+      },
+      "saved_pct": {
+        "app": 2.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 8337,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 8337,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "marshmallow",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.44762670795898885,
+          0.4474472500151023,
+          0.4557526659918949,
+          0.45355500001460314,
+          0.45203929202398285
+        ],
+        "app": [
+          0.41049216699320823,
+          0.4101556249661371,
+          0.4144325840170495,
+          0.41217679099645466,
+          0.4184760839561932
+        ]
+      },
+      "medians": {
+        "core": 0.452,
+        "app": 0.412
+      },
+      "saved_pct": {
+        "app": 8.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1178,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "marshmallow",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.37256258295383304,
+          0.3715360829955898,
+          0.37434124998981133,
+          0.369799166044686,
+          0.3733370419940911
+        ],
+        "app": [
+          0.3409782500239089,
+          0.3413848750060424,
+          0.33950208401074633,
+          0.3384858749923296,
+          0.338456415978726
+        ]
+      },
+      "medians": {
+        "core": 0.373,
+        "app": 0.34
+      },
+      "saved_pct": {
+        "app": 8.9
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1178,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1178,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "structlog",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.558571707981173,
+          0.5499188330140896,
+          0.5560776659986004,
+          0.5534263330046088,
+          0.5574752920074388
+        ],
+        "app": [
+          0.5337972909910604,
+          0.5257215829915367,
+          0.5259242500178516,
+          0.5301150000304915,
+          0.5344922079821117
+        ]
+      },
+      "medians": {
+        "core": 0.556,
+        "app": 0.53
+      },
+      "saved_pct": {
+        "app": 4.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 920,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "structlog",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.42765720799798146,
+          0.413999916985631,
+          0.41550445900065824,
+          0.41514191700844094,
+          0.4263706670026295
+        ],
+        "app": [
+          0.3736626660102047,
+          0.379572041973006,
+          0.3687680419534445,
+          0.37210587499430403,
+          0.37138670799322426
+        ]
+      },
+      "medians": {
+        "core": 0.416,
+        "app": 0.372
+      },
+      "saved_pct": {
+        "app": 10.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 920,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 920,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "tenacity",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.8175675839884207,
+          0.8054347080178559,
+          0.7945222500129603,
+          0.8103782499674708,
+          0.7822025420027785
+        ],
+        "app": [
+          0.7593011250137351,
+          0.7676318340236321,
+          0.757184165995568,
+          0.7692607499775477,
+          0.7547688339836895
+        ]
+      },
+      "medians": {
+        "core": 0.805,
+        "app": 0.759
+      },
+      "saved_pct": {
+        "app": 5.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 161,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "tenacity",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.8072655830183066,
+          0.8094319170340896,
+          0.8053877499769442,
+          0.8106793750193901,
+          0.8069057500106283
+        ],
+        "app": [
+          0.7582169170491397,
+          0.7641632910235785,
+          0.7570841659908183,
+          0.7703191249747761,
+          0.7551547089824453
+        ]
+      },
+      "medians": {
+        "core": 0.807,
+        "app": 0.758
+      },
+      "saved_pct": {
+        "app": 6.1
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 161,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 161,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "freezegun",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.5053642079583369,
+          0.5061979159945622,
+          0.4938113749958575,
+          0.5058262090315111,
+          0.4984233339782804
+        ],
+        "app": [
+          0.47121895803138614,
+          0.4766089160111733,
+          0.47754529101075605,
+          0.4795032499823719,
+          0.47727854101685807
+        ]
+      },
+      "medians": {
+        "core": 0.505,
+        "app": 0.477
+      },
+      "saved_pct": {
+        "app": 5.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 149,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "freezegun",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.3961208750260994,
+          0.3928703750134446,
+          0.3961474590469152,
+          0.39784866699483246,
+          0.3958691249717958
+        ],
+        "app": [
+          0.3740745830000378,
+          0.378261708014179,
+          0.3749513329821639,
+          0.38105724996421486,
+          0.3732294160290621
+        ]
+      },
+      "medians": {
+        "core": 0.396,
+        "app": 0.375
+      },
+      "saved_pct": {
+        "app": 5.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 149,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 149,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "typer",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.7165922920103185,
+          1.7214031249750406,
+          1.742456832958851,
+          1.735499250004068,
+          1.7174782919464633
+        ],
+        "app": [
+          1.49060316599207,
+          1.5215542920050211,
+          1.4885621250141412,
+          1.5145171249751002,
+          1.4613511670031585
+        ]
+      },
+      "medians": {
+        "core": 1.721,
+        "app": 1.491
+      },
+      "saved_pct": {
+        "app": 13.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.85,
+          "tests": 1374,
+          "differ": 2,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.85,
+            "tests": 1374,
+            "differ": 2,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "typer",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.629535499960184,
+          1.6283604169730097,
+          1.6207102909684181,
+          1.6344461250118911,
+          1.6558441250235774
+        ],
+        "app": [
+          1.504468375002034,
+          1.5183482080465183,
+          1.5045021249679849,
+          1.502438333001919,
+          1.5112111670314334
+        ]
+      },
+      "medians": {
+        "core": 1.63,
+        "app": 1.505
+      },
+      "saved_pct": {
+        "app": 7.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 99.93,
+          "tests": 1374,
+          "differ": 1,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 99.93,
+            "tests": 1374,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "sqlalchemy",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          68.96670445799828,
+          67.58642683399376,
+          68.91555395798059,
+          68.62560420803493,
+          69.65132133301813
+        ],
+        "app": [
+          61.93726537504699,
+          61.57447691599373,
+          59.250101750018075,
+          64.4498507080134,
+          59.74406104203081
+        ]
+      },
+      "medians": {
+        "core": 68.916,
+        "app": 61.574
+      },
+      "saved_pct": {
+        "app": 10.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 25300,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "sqlalchemy",
+      "workers": "8",
+      "walls": {
+        "core": [
+          70.93403458304238,
+          71.4922320000478,
+          74.96882170799654,
+          79.63920108403545,
+          66.82467054197332
+        ],
+        "app": [
+          68.76716608298011,
+          72.483170624997,
+          64.47834979195613,
+          67.45423633395694,
+          68.0796280829818
+        ]
+      },
+      "medians": {
+        "core": 71.492,
+        "app": 68.08
+      },
+      "saved_pct": {
+        "app": 4.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 25300,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 1,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 25300,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pydantic",
+      "workers": "auto",
+      "error": "pydantic: no snapshot (rc=1)\nError: workers collected different test sets (12733 vs 12733 items); cannot dispatch safely. Workers must collect the same ids in the same order. Common causes: pytest-randomly without a fixed seed, parametrize IDs derived from time/randomness, or parametrize over a set (set/dict iteration order of strings changes with PYTHONHASHSEED, random per process). Workarounds: -p no:randomly, stable parametrize ids, a list or sorted(...) instead of a set, a fixed PYTHONHASHSEED for the run, or -n 0. `rstest migrate-check` names the unstable sites\n"
+    },
+    {
+      "suite": "pydantic",
+      "workers": "8",
+      "error": "pydantic: no snapshot (rc=1)\nError: workers collected different test sets (12733 vs 12733 items); cannot dispatch safely. Workers must collect the same ids in the same order. Common causes: pytest-randomly without a fixed seed, parametrize IDs derived from time/randomness, or parametrize over a set (set/dict iteration order of strings changes with PYTHONHASHSEED, random per process). Workarounds: -p no:randomly, stable parametrize ids, a list or sorted(...) instead of a set, a fixed PYTHONHASHSEED for the run, or -n 0. `rstest migrate-check` names the unstable sites\n"
+    },
+    {
+      "suite": "arrow",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.4990535840042867,
+          1.4903992090257816,
+          1.5095603340305388,
+          1.5177554580150172,
+          1.4910302499774843
+        ],
+        "app": [
+          1.4997286249999888,
+          1.4858128339983523,
+          1.4916817910270765,
+          1.486388541990891,
+          1.5367608329979703
+        ]
+      },
+      "medians": {
+        "core": 1.499,
+        "app": 1.492
+      },
+      "saved_pct": {
+        "app": 0.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1902,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "arrow",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.4938097919803113,
+          1.5290696669835597,
+          1.5043076659785584,
+          1.4964687919709831,
+          1.5226216250448488
+        ],
+        "app": [
+          1.4740030000102706,
+          1.5090186659945175,
+          1.7008737080032006,
+          1.493797708011698,
+          1.4813164170482196
+        ]
+      },
+      "medians": {
+        "core": 1.504,
+        "app": 1.494
+      },
+      "saved_pct": {
+        "app": 0.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 1902,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 1902,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "trio",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          1.758440875040833,
+          1.6971000829944387,
+          1.7058374580228701,
+          1.6777825420140289,
+          1.7467366670025513
+        ],
+        "app": [
+          1.4818678749725223,
+          1.5073805839638226,
+          1.5118637920240872,
+          1.5266373749473132,
+          1.5424884170060977
+        ]
+      },
+      "medians": {
+        "core": 1.706,
+        "app": 1.512
+      },
+      "saved_pct": {
+        "app": 11.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 896,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "trio",
+      "workers": "8",
+      "walls": {
+        "core": [
+          1.8066910000052303,
+          1.8081556670367718,
+          1.8065362499910407,
+          1.8188642079476267,
+          1.8152545829652809
+        ],
+        "app": [
+          1.5848916670074686,
+          1.5828163329861127,
+          1.6054686670540832,
+          1.6155892089591362,
+          1.5975014999858104
+        ]
+      },
+      "medians": {
+        "core": 1.808,
+        "app": 1.598
+      },
+      "saved_pct": {
+        "app": 11.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 896,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 896,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "anyio",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          0.23293770797317848,
+          0.22909337497549132,
+          0.22870783298276365,
+          0.22125870798481628,
+          0.2412632079795003
+        ],
+        "app": [
+          0.23998520796885714,
+          0.2259250420029275,
+          0.2392506250180304,
+          0.23329120798734948,
+          0.23329012503381819
+        ]
+      },
+      "medians": {
+        "core": 0.229,
+        "app": 0.233
+      },
+      "saved_pct": {
+        "app": -1.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "anyio",
+      "workers": "8",
+      "walls": {
+        "core": [
+          0.1891726249596104,
+          0.1886279170284979,
+          0.18901845801156014,
+          0.18924362497637048,
+          0.18814195797313005
+        ],
+        "app": [
+          0.19239300000481308,
+          0.18808937503490597,
+          0.19171579199610278,
+          0.19196795800235122,
+          0.1947141250129789
+        ]
+      },
+      "medians": {
+        "core": 0.189,
+        "app": 0.192
+      },
+      "saved_pct": {
+        "app": -1.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 0.0,
+          "tests": 0,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 0.0,
+            "tests": 0,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 3
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "langgraph",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          26.34898675000295,
+          25.219164333015215,
+          22.852146333025303,
+          26.586731749994215,
+          24.661596167017706
+        ],
+        "app": [
+          24.012532708002254,
+          26.467658791982103,
+          24.599329375021625,
+          24.105955125007313,
+          25.045036416966468
+        ]
+      },
+      "medians": {
+        "core": 25.219,
+        "app": 24.599
+      },
+      "saved_pct": {
+        "app": 2.5
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 838,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "langgraph",
+      "workers": "8",
+      "walls": {
+        "core": [
+          48.66922570898896,
+          49.731213792052586,
+          49.322106374951545,
+          49.199371374968905,
+          48.66418091603555
+        ],
+        "app": [
+          47.522629584011156,
+          49.517708916042466,
+          47.00888358295197,
+          50.92622262501391,
+          48.384355875023175
+        ]
+      },
+      "medians": {
+        "core": 49.199,
+        "app": 48.384
+      },
+      "saved_pct": {
+        "app": 1.7
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 838,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 838,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "langchain",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          7.1633014580002055,
+          7.162918042042293,
+          7.126205375010613,
+          7.1526650409796275,
+          7.423195957962889
+        ],
+        "app": [
+          6.780833667027764,
+          6.781842500029597,
+          6.734092042024713,
+          6.856541000015568,
+          6.962309082970023
+        ]
+      },
+      "medians": {
+        "core": 7.163,
+        "app": 6.782
+      },
+      "saved_pct": {
+        "app": 5.3
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3612,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "langchain",
+      "workers": "8",
+      "walls": {
+        "core": [
+          9.056781792023685,
+          9.086114624980837,
+          9.02852150000399,
+          9.176052416965831,
+          9.092245375039056
+        ],
+        "app": [
+          8.804036499990616,
+          8.778528209018987,
+          8.829287667002063,
+          8.863230749964714,
+          8.784299791965168
+        ]
+      },
+      "medians": {
+        "core": 9.086,
+        "app": 8.804
+      },
+      "saved_pct": {
+        "app": 3.1
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3612,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3612,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "sympy",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          12.209998457983602,
+          11.257824959000573,
+          11.460223833972123,
+          11.252596415986773,
+          11.355779584031552
+        ],
+        "app": [
+          11.536605417029932,
+          11.874924000003375,
+          11.763415209017694,
+          11.335568458016496,
+          11.436996416014154
+        ]
+      },
+      "medians": {
+        "core": 11.356,
+        "app": 11.537
+      },
+      "saved_pct": {
+        "app": -1.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3061,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "sympy",
+      "workers": "8",
+      "walls": {
+        "core": [
+          15.72320883302018,
+          15.401619333017152,
+          15.073595541995019,
+          14.906617292028386,
+          15.221811374998651
+        ],
+        "app": [
+          16.18214704201091,
+          15.7778366249986,
+          15.350501333014108,
+          14.856359792000148,
+          14.907773040991742
+        ]
+      },
+      "medians": {
+        "core": 15.222,
+        "app": 15.351
+      },
+      "saved_pct": {
+        "app": -0.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3061,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3061,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "scikit-learn",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          5.757360542018432,
+          5.778533082979266,
+          5.936529290978797,
+          5.840047458012123,
+          5.806944583950099
+        ],
+        "app": [
+          5.557902250031475,
+          5.595471582957543,
+          5.606719999981578,
+          5.652787750004791,
+          5.547544708009809
+        ]
+      },
+      "medians": {
+        "core": 5.807,
+        "app": 5.595
+      },
+      "saved_pct": {
+        "app": 3.6
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3941,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "scikit-learn",
+      "workers": "8",
+      "walls": {
+        "core": [
+          7.2869255829718895,
+          7.350495500024408,
+          7.225756375002675,
+          7.254870917007793,
+          7.376601208001375
+        ],
+        "app": [
+          7.694926999974996,
+          7.187819207960274,
+          7.698912458028644,
+          7.1745804999955,
+          7.167831624974497
+        ]
+      },
+      "medians": {
+        "core": 7.287,
+        "app": 7.188
+      },
+      "saved_pct": {
+        "app": 1.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 3941,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 3941,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pretix",
+      "workers": "auto",
+      "walls": {
+        "core": [
+          41.10043945803773,
+          39.526070457999595,
+          41.90649962495081,
+          41.001268584048375,
+          41.019965832994785
+        ],
+        "app": [
+          39.40149479202228,
+          40.38707333302591,
+          40.0371685839491,
+          38.08985650003888,
+          40.823761167004704
+        ]
+      },
+      "medians": {
+        "core": 41.02,
+        "app": 40.037
+      },
+      "saved_pct": {
+        "app": 2.4
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 6129,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 3,
+        "unsettled_notes": []
+      }
+    },
+    {
+      "suite": "pretix",
+      "workers": "8",
+      "walls": {
+        "core": [
+          53.345740834018216,
+          54.631110959046055,
+          54.276758084015455,
+          52.19748699996853,
+          52.294180499971844
+        ],
+        "app": [
+          52.90441233396996,
+          53.46331550000468,
+          52.08821054198779,
+          50.65710008301539,
+          54.041552958020475
+        ]
+      },
+      "medians": {
+        "core": 53.346,
+        "app": 52.904
+      },
+      "saved_pct": {
+        "app": 0.8
+      },
+      "worst_parity": {
+        "app": {
+          "score": 100.0,
+          "tests": 6129,
+          "differ": 0,
+          "missing": 0,
+          "extra": 0
+        }
+      },
+      "parity": {
+        "app": [
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          },
+          {
+            "score": 100.0,
+            "tests": 6129,
+            "differ": 0,
+            "missing": 0,
+            "extra": 0
+          }
+        ]
+      },
+      "template_notes_during_timing": {
+        "core": 0,
+        "app": 0
+      },
+      "app_converged": {
+        "runs": 2,
+        "unsettled_notes": []
+      }
+    }
+  ]
+}

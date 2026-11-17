@@ -26,6 +26,7 @@ from gates.coverage import (
     gate_smart_selection,
 )
 from gates.dispatch import (
+    gate_auto_lazy_long_pole_budget,
     gate_auto_worker_capping,
     gate_budget,
     gate_crash_after_restart_budget,
@@ -44,6 +45,7 @@ from gates.dispatch import (
     gate_maxfail_bound,
     gate_native_timeout,
     gate_order_fail_fast,
+    gate_rootdir_matches_pytest,
     gate_serial_after_crash,
     gate_serial_fixture_scope,
     gate_serial_mark,
@@ -267,6 +269,8 @@ def main():
         gate_pytest_homeassistant,
         gate_interpreter_probe_cache_heals_after_deps,
         gate_lazy_collection,
+        gate_auto_lazy_long_pole_budget,
+        gate_rootdir_matches_pytest,
         gate_serial_mark,
         gate_serial_after_crash,
         gate_serial_fixture_scope,

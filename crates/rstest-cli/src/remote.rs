@@ -1415,13 +1415,14 @@ mod tests {
         };
         // Local-only history the pull must keep, plus a shared key it overrides,
         // plus a tagged entry whose source vanished, which the overlay prunes
-        // (fingerprint self-heal). Untagged bare floats are kept as-is.
+        // (fingerprint self-heal). Untagged bare floats are kept while their
+        // test file exists (ids hang off the crate dir, cargo test's cwd).
         let gone_src = dir.join("test_gone.py");
         std::fs::write(
             dir.join(durations::FILE),
             serde_json::to_vec(&serde_json::json!({
-                "local": 1.0,
-                "shared": 2.0,
+                "src/lib.rs::local": 1.0,
+                "src/lib.rs::shared": 2.0,
                 "gone::t": { "secs": 4.0, "src": gone_src, "hash": "h" },
             }))
             .unwrap(),
@@ -1439,7 +1440,10 @@ mod tests {
 
         let merged = Merged {
             scope_costs: Default::default(),
-            durations: HashMap::from([("shared".to_string(), 9.0), ("remote".to_string(), 3.0)]),
+            durations: HashMap::from([
+                ("src/lib.rs::shared".to_string(), 9.0),
+                ("src/lib.rs::remote".to_string(), 3.0),
+            ]),
             flakes: HashMap::from([
                 ("shared".to_string(), stats(5, 5)),
                 ("remote".to_string(), stats(2, 0)),
@@ -1453,9 +1457,9 @@ mod tests {
 
         let d = durations::load_from(&dir.join(durations::FILE));
         assert_eq!(d.len(), 3, "vanished test pruned");
-        assert_eq!(d["local"], 1.0, "local-only duration kept");
-        assert_eq!(d["shared"], 9.0, "remote wins on shared key");
-        assert_eq!(d["remote"], 3.0);
+        assert_eq!(d["src/lib.rs::local"], 1.0, "local-only duration kept");
+        assert_eq!(d["src/lib.rs::shared"], 9.0, "remote wins on shared key");
+        assert_eq!(d["src/lib.rs::remote"], 3.0);
         let f = flakes::load_from(&dir.join(flakes::FILE));
         assert_eq!(f.len(), 3);
         assert_eq!(f["local"], stats(1, 0), "local-only flake kept");

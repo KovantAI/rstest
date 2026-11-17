@@ -148,6 +148,43 @@ def gate_lazy_collection(g, args, binary):
         and "falls back" not in r.stdout + r.stderr,
         f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
     )
+    # --pyargs: each name resolves to its package (or module) path, which the
+    # lazy file walk starts from; same tests as full collection. A name that
+    # doesn't resolve keeps full collection.
+    g.write("pyargs_proj/pytest.ini", "")
+    g.write("pyargs_proj/pkgx/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/__init__.py", "")
+    g.write("pyargs_proj/pkgx/tests/test_a.py", "def test_a(): pass\ndef test_b(): pass\n")
+    g.write("pyargs_proj/pkgx/tests/test_c.py", "def test_c(): pass\n")
+    pcwd = g.tmp / "pyargs_proj"
+    ids = {}
+    for mode in ("full", "lazy"):
+        rp = pcwd / f"{mode}.json"
+        r = g.run(
+            "--pyargs", "pkgx", "-n", "2", "--collect", mode, "--report-json", str(rp), cwd=pcwd
+        )
+        ids[mode] = set(json.loads(rp.read_text())["tests"]) if rp.exists() else set()
+    check(
+        "lazy: --pyargs package runs lazy, same tests as full",
+        r.returncode == 0
+        and "falls back" not in r.stdout + r.stderr
+        and len(ids["full"]) == 3
+        and ids["lazy"] == ids["full"],
+        f"rc={r.returncode} full={sorted(ids['full'])} lazy={sorted(ids['lazy'])} "
+        + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "pkgx.tests.test_c", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: --pyargs module runs lazy",
+        r.returncode == 0 and "1 passed" in r.stdout and "falls back" not in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
+    r = g.run("--pyargs", "no_such_pkg_xyz", "-n", "2", "--collect", "lazy", cwd=pcwd)
+    check(
+        "lazy: unresolved --pyargs falls back to full collection",
+        "did not resolve" in r.stderr,
+        f"rc={r.returncode} " + (r.stdout + r.stderr)[-300:],
+    )
     # R32: a send to a dead worker is not fatal; its ids are requeued and
     # run on the respawned worker.
     if not WINDOWS:
@@ -285,6 +322,102 @@ def gate_lazy_collection(g, args, binary):
     check(
         "lazy: serial exclusive",
         not overlap and len({s["worker"] for s in lser}) == 1,
+    )
+
+
+def gate_rootdir_matches_pytest(g, args, binary):
+    print("== rootdir matches pytest ==")
+    # rstest anchors .rstest_cache at its own reading of pytest's rootdir and
+    # keys file lookups on it; cached test ids hang off pytest's real one. If
+    # they differ nothing matches, scheduling silently falls back to path
+    # order, and rstest warns. pytest reads PYTEST_ADDOPTS before it settles
+    # the rootdir, so a `--rootdir` there moves it, and rstest must follow.
+    g.write("rootmm/pytest.ini", "")
+    g.write("rootmm/tests/test_a.py", "def test_a(): pass\n")
+    g.write("rootmm/tests/test_b.py", "def test_b(): pass\n")
+    cwd = g.tmp / "rootmm"
+    for mode in ("full", "lazy"):
+        r = g.run("tests", "-n", "2", "--collect", mode, cwd=cwd)
+        check(
+            f"rootdir: no warning when pytest agrees ({mode})",
+            r.returncode == 0 and "rootdir" not in r.stderr,
+            r.stderr[-300:],
+        )
+        r = g.run(
+            "tests",
+            "-n",
+            "2",
+            "--collect",
+            mode,
+            cwd=cwd,
+            env_extra={"PYTEST_ADDOPTS": "--rootdir=tests"},
+        )
+        check(
+            f"rootdir: a PYTEST_ADDOPTS --rootdir anchors the cache there ({mode})",
+            r.returncode == 0
+            and "differs from the one rstest resolved" not in r.stderr
+            and (cwd / "tests" / ".rstest_cache" / "durations.json").exists(),
+            r.stderr[-300:],
+        )
+
+
+def gate_auto_lazy_long_pole_budget(g, args, binary):
+    print("== auto-lazy long-pole budget ==")
+    # Auto-lazy keeps full collection when one file would run long past its
+    # per-worker share, unless lazy saves more than that: every eager worker
+    # re-collects the whole suite, which collect.json records. 2,000 tests x
+    # 8 workers clears the size gate; the seeded timings put test_big.py ~31s
+    # past its share. Every run rewrites both caches, so each check re-seeds.
+    proj = g.tmp / "autolazy"
+    shutil.rmtree(proj, ignore_errors=True)
+    g.write("autolazy/pytest.ini", "")
+    body = "import pytest\n@pytest.mark.parametrize('i', range(500))\ndef test_x(i): pass\n"
+    files = ["test_big.py", "test_a.py", "test_b.py", "test_c.py"]
+    for f in files:
+        g.write(f"autolazy/{f}", body)
+    cache = proj / ".rstest_cache"
+
+    def seed(collect):
+        cache.mkdir(parents=True, exist_ok=True)
+        timings = {
+            f"{f}::test_x[{i}]": (40.0 if f == "test_big.py" else 10.0) / 500
+            for f in files
+            for i in range(500)
+        }
+        (cache / "durations.json").write_text(json.dumps(timings), encoding="utf-8")
+        (cache / "collect.json").unlink(missing_ok=True)
+        if collect is not None:
+            (cache / "collect.json").write_text(
+                json.dumps({"secs": collect, "epoch": 0}), encoding="utf-8"
+            )
+
+    def picked_lazy():
+        r = g.run("-n", "8", cwd=proj)
+        return r.returncode == 0 and "auto-selected lazy" in r.stderr, r
+
+    for collect, want, label in [
+        (None, False, "no collection recorded: the 1s floor keeps full"),
+        (40.0, True, "collection lazy saves covers the long pole: lazy"),
+        (5.0, False, "too little collection saved: full"),
+    ]:
+        seed(collect)
+        lazy, r = picked_lazy()
+        check(
+            f"auto-lazy: {label}",
+            lazy == want and r.returncode == 0,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )
+    seed(None)
+    r = g.run("-n", "8", "--collect", "full", cwd=proj)
+    recorded = (
+        json.loads((cache / "collect.json").read_text())
+        if (cache / "collect.json").exists()
+        else {}
+    )
+    check(
+        "auto-lazy: a full-collection run records collect.json",
+        r.returncode == 0 and recorded.get("secs", 0) > 0,
+        f"rc={r.returncode} collect.json={recorded}",
     )
 
 

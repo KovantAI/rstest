@@ -22,10 +22,13 @@ strategy automatically. rstest picks `lazy` when all of these hold, and
   are both large; smaller suites keep full collection's locality.
 - **Dist:** `--dist load` (the default, implicit or explicit) or
   `--dist loadfile`.
-- **Selection:** no nodeid, no `--pyargs`, and no path selection (explicit
-  paths, or `--changed`/`--since-green` narrowing). The test count covers
-  the whole cached suite, so a run narrowed to a few files keeps full
-  collection's per-test spread across workers.
+- **Selection:** no nodeid and no path selection (explicit paths, or
+  `--changed`/`--since-green` narrowing). The test count covers the whole
+  cached suite, so a run narrowed to a few files keeps full collection's
+  per-test spread across workers. `--pyargs` names don't count as a
+  selection: each resolves to its package or module path, the file walk
+  starts there, and the walk check below confirms they cover the whole
+  cached suite.
 - **Features:** no `--shard`, `--shuffle`, `--incremental` or fail-fast
   `--order` (including the one `--watch` picks by default).
 - **Doctests:** none enabled (argv, ini `addopts` or `PYTEST_ADDOPTS`). Lazy
@@ -35,10 +38,18 @@ strategy automatically. rstest picks `lazy` when all of these hold, and
 - **File walk:** every cached test's file is found by the lazy walk; a
   missing one means lazy would lose tests.
 - **Balance:** no file's cached time exceeds an even per-worker share
-  (`total time / workers`) by more than a second. Lazy runs each file whole
-  on one worker, so such a file would hold up the run. The check assumes no
-  stealing, so it applies even under an explicit `--dist load` (which could
-  split the file; see [When it doesn't](#when-it-doesnt)).
+  (`total time / workers`) by more than lazy saves each worker. Lazy runs
+  each file whole on one worker, so such a file holds up the run; but every
+  worker under full collection collects the whole suite, and lazy spares it
+  all but its own share of that. The allowance is the per-worker collection
+  time the last full-collection parallel run recorded
+  (`.rstest_cache/collect.json`) times
+  `1 - 1/workers`, and at least one second (all of it before anything is
+  recorded). pandas at `-n 14`: its heaviest file runs 7.8s past its share,
+  inside the roughly 10s each worker saves, and lazy takes 28s against 55s.
+  The check assumes no stealing, so it applies even under an explicit
+  `--dist load` (which could split the file; see
+  [When it doesn't](#when-it-doesnt)).
 
 The test count comes from `.rstest_cache/durations.json`, so a **cold cache
 counts as zero tests** and a suite's first run stays `full`; a warm run of a
@@ -152,7 +163,12 @@ also overrides the auto default) or fix the tests.
   consolidate groups across a global nodeid list that lazy never builds.
 - `--dist each` is rejected too: it runs the full suite on every worker,
   so there is nothing to collect lazily.
-- Nodeid arguments (`tests/test_x.py::test_y`) and `--pyargs` fall
-  back to full collection automatically.
+- Nodeid arguments (`tests/test_x.py::test_y`) fall back to full
+  collection automatically.
+- `--pyargs` names resolve as pytest resolves them
+  (`importlib.util.find_spec`: a module's file, a package's directory), and
+  the file walk starts there. A name that doesn't resolve that way (a
+  namespace package, or one importable only through an ini `pythonpath`)
+  falls back to full collection with a warning.
 - Collection-time side effects of *unselected* files never happen:
   the point of the mode, and the trade documented above.

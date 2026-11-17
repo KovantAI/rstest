@@ -5,6 +5,7 @@ pass. Two models — eager (ItemDispatchPlugin) and lazy (LazyDispatchPlugin).""
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,6 +15,10 @@ if TYPE_CHECKING:
     from rstest_worker._internal import messages as m
 from rstest_worker._internal.retry import flaky_reruns
 from rstest_worker._internal.stream import StreamPlugin
+
+# Clock for the collection timings sent to the orchestrator; a module global so
+# tests can pin it.
+_now = time.perf_counter
 
 # (option dest, CLI spelling) of the options that reorder or cut short a session
 # based on the cache: --nf / --ff / --lf (cacheprovider) and stepwise. `-x` /
@@ -227,12 +232,21 @@ class ItemDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
 
     MIN_PENDING = 2
 
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_collection(self, session):
+        # Times the whole-suite collection each full-pool worker repeats: what
+        # lazy collection saves, which the auto-lazy check weighs.
+        self._collect_start = _now()
+
     def pytest_collection_finish(self, session):
         import hashlib
 
         ids = [item.nodeid for item in session.items]
         digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
         payload: m.CollectionDonePayload = {"count": len(ids), "hash": digest}
+        start = getattr(self, "_collect_start", None)
+        if start is not None:
+            payload["collect_seconds"] = round(_now() - start, 4)
         if self._deselected:
             payload["deselected"] = self._deselected
         # Full id list rides the wire from ONE worker only (orchestrator needs
@@ -521,6 +535,13 @@ class LazyDispatchPlugin(PoolDebuggerGuard, StreamPlugin):
             # ids back via run_ids (normally to this worker, where they're cached;
             # to another worker when stealing for balance).
             self._conn.send("file_collected", payload)
+        # perform_collect REPLACED session.items with this batch alone. Plugins
+        # read it mid-session as "this session's tests": pytest-django's
+        # django_db_setup picks the test databases from it, and a DB-free batch
+        # collected just before the first DB test ran left it creating none
+        # ("no such table" for every DB test on that worker). Keep it the whole
+        # set this worker has collected, as a full collection would show it.
+        session.items = list(items_by_id.values())
         return total
 
     def pytest_runtestloop(self, session):

@@ -341,6 +341,11 @@ pub enum Event {
         /// Every worker collects and deselects the same items.
         #[serde(default)]
         deselected: u64,
+        /// Seconds this worker spent in pytest's collection phase: the
+        /// whole-suite collection every full-pool worker repeats, which lazy
+        /// collection saves (auto-lazy weighs it).
+        #[serde(default)]
+        collect_seconds: Option<f64>,
     },
     /// Lazy mode: session configured, ready for RunFiles. `cache_dir`
     /// rides from every worker; the orchestrator keeps the first.
@@ -426,6 +431,24 @@ pub enum Event {
         /// `-n auto`); absent where it can't be read (Windows).
         #[serde(default)]
         peak_rss: Option<u64>,
+        /// `--fork-pool=app` recording: the modules this worker imported that
+        /// a warm template may import ahead of the fork, in import order.
+        #[serde(default)]
+        imported: Vec<String>,
+        /// `--fork-pool=app` recording: the worker's `sys.path` at session end.
+        #[serde(default)]
+        sys_path: Vec<String>,
+        /// `--fork-pool=app` recording: coverage was tracing in the worker.
+        #[serde(default)]
+        coverage: bool,
+        /// `--fork-pool=app` recording: names pytest marks for assertion
+        /// rewriting; the template must not import them, even transitively.
+        #[serde(default)]
+        rewrite: Vec<String>,
+        /// `--fork-pool=app` recording: environment keys the worker's session
+        /// changed; the template must not read them at import.
+        #[serde(default)]
+        env: Vec<String>,
     },
     /// `--junitxml`: pytest's own serialized `<testcase>` element(s) for one
     /// test attempt (a call failure plus a teardown error is two), streamed as
@@ -596,7 +619,8 @@ mod tests {
             from_python(serde_json::json!({"kind": "done", "payload": {"exitstatus": 5}})),
             Event::Done {
                 exitstatus: 5,
-                peak_rss: None
+                peak_rss: None,
+                ..
             }
         ));
         assert!(matches!(
@@ -605,7 +629,8 @@ mod tests {
             ),
             Event::Done {
                 exitstatus: 0,
-                peak_rss: Some(1024)
+                peak_rss: Some(1024),
+                ..
             }
         ));
         assert!(matches!(
@@ -730,7 +755,7 @@ mod property {
             Event::CollectionDone {
                 count, hash, ids, locations, marks, serial, cache_dir, flaky, groups,
                 rootdir, args_source, root_args, inifile, order_flags, confcutdir, maxfail,
-                deselected,
+                deselected, collect_seconds: None,
             }
         }
     }
@@ -814,7 +839,12 @@ mod property {
             (any::<i32>(), proptest::option::of(any::<u64>())).prop_map(
                 |(exitstatus, peak_rss)| Event::Done {
                     exitstatus,
-                    peak_rss
+                    peak_rss,
+                    imported: vec![],
+                    sys_path: vec![],
+                    coverage: false,
+                    rewrite: vec![],
+                    env: vec![],
                 }
             ),
             (small_str(), small_strs())

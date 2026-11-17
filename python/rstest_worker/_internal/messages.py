@@ -102,6 +102,7 @@ class SessionRootsPayload(TypedDict, total=False):
 
 class CollectionDonePayload(SessionRootsPayload, _CollectionDoneRequired, total=False):
     deselected: int  # items pytest deselected (-k/-m, hooks), only when > 0
+    collect_seconds: float  # this worker's whole collection phase
     # Only worker 0 (RSTEST_SEND_IDS=1) ships the id-bearing fields.
     ids: list[str]
     # Discovery's lone worker only (no RSTEST_WORKER_ID), not the pool's gw0.
@@ -136,6 +137,11 @@ class _DoneRequired(TypedDict):
 
 class DonePayload(_DoneRequired, total=False):
     peak_rss: int  # the worker's peak RSS in bytes (memory-aware -n auto)
+    imported: list[str]  # --fork-pool=app: warmable modules, import order
+    sys_path: list[str]  # --fork-pool=app: sys.path the modules were imported with
+    coverage: bool  # --fork-pool=app: coverage was tracing (template unsafe)
+    rewrite: list[str]  # --fork-pool=app: names pytest marks for assertion rewriting
+    env: list[str]  # --fork-pool=app: environment keys the worker's session changed
 
 
 class ItemStartPayload(TypedDict):

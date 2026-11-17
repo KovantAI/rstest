@@ -136,6 +136,7 @@ pytest 9.2 adds a few more, also without a warning:
 | **Long string parameters get short ids.** A `str` or `bytes` parameter value over 100 characters no longer becomes the test id: `test_s[xxxx…]` is now `test_s[s0]` (argname plus index). | Anything keyed by those nodeids: `--deselect` lists, `--lf` and quarantine files, and rstest's caches (durations, run history), which start that test's history afresh. | Set `parametrize_long_str_id_strategy = "legacy"` in your pytest config to keep the old ids, or give the parameters explicit `ids=`. |
 | **`-c` / `--config-file` must name a readable config file.** A path that is missing, a directory, or a format pytest can't load is now a usage error (exit 4). | CI scripts that pass a `-c` path that doesn't exist on some runners. | Pass an existing file, or drop the flag where there is none. |
 | **Plugin import failures have their own exit codes.** A plugin that can't be found (`-p`, `pytest_plugins`, `PYTEST_PLUGINS`) exits 4; one that is found but fails to import exits 3. Both used to exit 1, like failing tests. | CI steps that treat exit 1 as "tests failed" and anything else as infrastructure. | Nothing to fix in the suite; check scripts that branch on the exit code. |
+| **`monkeypatch.setattr` takes the value to restore from the object's own `__dict__`.** Unless the class defines the name as a data descriptor, an attribute the object only exposes through `__getattr__` counts as absent, so the undo at teardown **deletes** it instead of putting the old value back. | Tests that patch an attribute on a proxy object that forwards to a wrapped one, such as dynaconf's `settings` (`monkeypatch.setattr(settings, "feature_mode", "on")`): the delete reaches the real setting, and every later test in that process fails with `AttributeError: ... has no attribute 'feature_mode'`. Plain pytest 9.2 fails the same way. | Set and restore through the object's own API in a fixture (dynaconf: read the old value with `settings.get(...)`, `settings.set(...)` the new one, and set the old one back on teardown), so monkeypatch never deletes it. |
 
 ### 3. Verify
 
@@ -177,7 +178,11 @@ The 9.1 → 9.2 delta:
 3. A `-c` path that doesn't exist is a usage error, and plugin import
    failures exit 4 or 3 instead of 1 (see the
    [behavioral changes](#behavioral-changes-the-w-probe-wont-catch)).
-4. Plugins that reach into pytest internals need a 9.2-ready release:
+4. `monkeypatch.setattr` on a proxy object (dynaconf's `settings`, or any
+   object that serves the attribute from `__getattr__`) deletes the real
+   attribute at teardown, and later tests fail with `AttributeError` (see the
+   [behavioral changes](#behavioral-changes-the-w-probe-wont-catch)).
+5. Plugins that reach into pytest internals need a 9.2-ready release:
    pytest-bdd 9.0.1 and pytest-benchmark 5.3.1 or newer. pytest-forked
    1.7.5 fails every forked test on 9.2; its fix is
    [pending upstream](https://github.com/pytest-dev/pytest-forked/pull/112).

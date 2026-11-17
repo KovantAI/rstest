@@ -155,6 +155,15 @@ fn file_batch(queue: &VecDeque<String>, weights: &HashMap<String, f64>, workers:
     take
 }
 
+/// Whether a worker takes another file batch: nothing left to collect and
+/// little left to run, counting its collected-but-undispatched ids. A busy
+/// worker must not hoard files an idle one could collect: lazy keeps file
+/// affinity by default, so nothing moves them later (pandas: one worker sat
+/// on 78k queued ids and kept taking files).
+fn wants_files(uncollected: usize, own_queue: usize, outstanding: usize, chunk: usize) -> bool {
+    uncollected == 0 && own_queue <= chunk && outstanding <= chunk
+}
+
 pub fn run_lazy_pool(
     cfg: &crate::scheduling::pool::PoolConfig,
     files: Vec<PathBuf>,
@@ -230,6 +239,7 @@ pub fn run_lazy_pool(
     let mut warnings: Vec<proto::WarningEntry> = Vec::new();
     let mut statuses = Vec::new();
     let mut peak_rss: Option<u64> = None;
+    let mut warm_record = crate::scheduling::warm::Record::default();
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
     let mut total_items = 0usize;
@@ -509,9 +519,17 @@ pub fn run_lazy_pool(
             Ok(Event::Done {
                 exitstatus,
                 peak_rss: peak,
+                imported,
+                sys_path,
+                coverage,
+                rewrite,
+                env,
             }) => {
                 statuses.push(exitstatus);
                 peak_rss = peak_rss.max(peak);
+                warm_record.merge(imported, sys_path, coverage);
+                warm_record.rewrite.extend(rewrite);
+                warm_record.env.extend(env);
                 let s = &mut states[idx];
                 s.dead = true;
                 // A session that ended on its own never ran what reached it
@@ -635,16 +653,16 @@ pub fn run_lazy_pool(
         let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
 
         // File assignment: a worker takes a batch of files (see
-        // `file_batch`), picked up when it has nothing left to collect and
-        // little left to run, counting its collected-but-undispatched ids (a
-        // busy worker must not hoard files an idle one could collect).
+        // `file_batch`) when `wants_files`.
         if !stopping {
             let workers = states.len();
             for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
-                if s.uncollected_files.is_empty()
-                    && s.own_queue.len() <= chunk
-                    && s.outstanding.len() <= chunk
-                {
+                if wants_files(
+                    s.uncollected_files.len(),
+                    s.own_queue.len(),
+                    s.outstanding.len(),
+                    chunk,
+                ) {
                     let take = file_batch(&file_queue, &file_weights, workers);
                     let paths: Vec<String> = file_queue.drain(..take).collect();
                     if !paths.is_empty() {
@@ -879,8 +897,15 @@ pub fn run_lazy_pool(
         collection_size: 0,
         startup_seconds,
         fork_prewarmed,
+        warm_record,
+        warm: None,
         sources,
         peak_rss,
+        // Not recorded here: per-file collection timed under every worker's
+        // contention sums to far more than one eager worker's collection (2x
+        // on pandas at -n 14), and lazy runs refreshing it would ratchet the
+        // auto-lazy budget up. Only eager runs measure what lazy saves.
+        collect_seconds: None,
         exiting,
     })
 }
@@ -924,7 +949,7 @@ fn start_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_batch, order_files};
+    use super::{file_batch, order_files, wants_files};
     use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
 
@@ -955,6 +980,17 @@ mod tests {
         // The light tail goes back to the count cap.
         let tail: VecDeque<String> = q.into_iter().skip(8).collect();
         assert_eq!(file_batch(&tail, &weights, 8), 31);
+    }
+
+    #[test]
+    fn wants_files_only_when_idle_enough() {
+        assert!(wants_files(0, 0, 0, 64));
+        assert!(wants_files(0, 64, 64, 64)); // at the limit
+        assert!(!wants_files(1, 0, 0, 64)); // still collecting
+        assert!(!wants_files(0, 0, 65, 64)); // enough in flight
+                                             // Plenty queued but little in flight: took files before, piling the
+                                             // heaviest files on one worker.
+        assert!(!wants_files(0, 78_000, 10, 64));
     }
 
     #[test]
