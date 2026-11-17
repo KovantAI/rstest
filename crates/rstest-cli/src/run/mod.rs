@@ -2401,9 +2401,13 @@ fn lazy_layout_fits(
     n: usize,
     collect: Option<f64>,
 ) -> bool {
+    // A file's weight counts the per-test overhead its cached call times
+    // miss: packaging's tests/test_version.py holds 84% of 61k sub-millisecond
+    // tests, ~0.4s of call time but ~10s on the one worker lazy pins it to.
     let mut per_file: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
     for (id, secs) in cache {
-        *per_file.entry(crate::text::nodeid_file(id)).or_insert(0.0) += secs;
+        *per_file.entry(crate::text::nodeid_file(id)).or_insert(0.0) +=
+            secs + PER_TEST_OVERHEAD_SECS;
     }
     let walked: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
     if !per_file.keys().all(|f| walked.contains(f)) {
@@ -3904,6 +3908,27 @@ mod tests {
             2,
             None
         ));
+    }
+
+    #[test]
+    fn lazy_layout_weighs_files_by_test_count_too() {
+        // packaging (corpus, 2026-11-17): 51,517 of 61,573 tests sit in one
+        // file and their call times round to ~0. By call time alone the suite
+        // looked balanced (0.4s over a share) and auto-lazy pinned 84% of the
+        // tests on one worker: 18.1s against 10.4s under full collection.
+        let mut cache: std::collections::HashMap<String, f64> = (0..51_517)
+            .map(|i| (format!("tests/test_version.py::t[{i}]"), 0.0))
+            .collect();
+        for f in ["test_requirements", "test_markers", "test_specifiers"] {
+            cache.extend((0..3_000).map(|i| (format!("tests/{f}.py::t[{i}]"), 0.0)));
+        }
+        let files = walked(&[
+            "tests/test_version.py",
+            "tests/test_requirements.py",
+            "tests/test_markers.py",
+            "tests/test_specifiers.py",
+        ]);
+        assert!(!lazy_layout_fits(&cache, &files, 14, None));
     }
 
     #[test]
