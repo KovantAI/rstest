@@ -437,7 +437,7 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
         and (recorded_walls.get("lazy") or {}).get("workers") == 8
         # seeded entries carry epoch 0; only a real recording stamps one
         and (recorded_walls.get("lazy") or {}).get("epoch", 0) > 0,
-        f"mode_wall.json={recorded_walls}",
+        f"mode_wall.json={recorded_walls} " + r.stdout[-300:] + r.stderr[-300:],
     )
     seed(None)
     r = g.run("-n", "8", "--collect", "full", cwd=proj)
