@@ -808,24 +808,52 @@ pub(crate) fn execute_inner(
         })
         .flatten();
     cfg.worker_env.warm = warm_run.as_ref().map(|w| w.env.clone());
+    let selection = DispatchSelection {
+        shuffle_seed: inc.shuffle_seed,
+        shard: inc.shard,
+        budget: budget.as_ref(),
+        lazy: inc.lazy,
+        quarantine: quarantine.as_ref(),
+        durations: &duration_cache,
+        env_fp: &env_fp,
+    };
     let mut outcome = dispatch_run(
         &cfg,
         cli,
         &settings,
         &args,
         &inc.skip_ids,
-        DispatchSelection {
-            shuffle_seed: inc.shuffle_seed,
-            shard: inc.shard,
-            budget: budget.as_ref(),
-            lazy: inc.lazy,
-            quarantine: quarantine.as_ref(),
-            durations: &duration_cache,
-            env_fp: &env_fp,
-        },
+        selection,
         pinned,
         &mut sink,
     )?;
+    // `--fork-pool=app`: every worker forked from the warm template died
+    // before any test reported (agent-platform-backend on macOS: a library's
+    // background thread hit the Objective-C fork-safety abort). Nothing ran,
+    // so run it again with plain workers instead of failing it; `finish`
+    // below still resets the template. Once a test has reported, rerunning
+    // would repeat its side effects, so that run fails as before.
+    if warm_run.as_ref().is_some_and(|w| w.env.manifest.is_some())
+        && outcome.warm_record.imported.is_empty()
+        && outcome.run.tests().is_empty()
+    {
+        sink.warn(
+            "rstest: note: --fork-pool=app: every worker failed before any test ran with \
+             the warm template; running again without it",
+        );
+        outcome.reap_workers();
+        cfg.worker_env.warm = None;
+        outcome = dispatch_run(
+            &cfg,
+            cli,
+            &settings,
+            &args,
+            &inc.skip_ids,
+            selection,
+            pinned,
+            &mut sink,
+        )?;
+    }
 
     apply_quarantine(
         cli,
@@ -1582,6 +1610,7 @@ fn quarantined_exit(
 /// lazy-collection choice, `--quarantine` matcher (fail-fast keeps quarantined
 /// tests out of the front), the run's shared duration cache, and the env
 /// fingerprint (fail-fast diffs against the last green run recorded under it).
+#[derive(Clone, Copy)]
 struct DispatchSelection<'a> {
     shuffle_seed: Option<u64>,
     shard: Option<(usize, usize)>,
