@@ -104,6 +104,13 @@ between 0.x releases and are listed here.
   53s now. Files now go out in path order, and only the long poles (a file
   of at least a sixteenth of one worker's share of the cached time) go
   first, so none starts late. pandas is unchanged (35-36s at `-n 8`).
+- **rstest refuses a worker of another version.** The `rstest` command and
+  the rstest installed in the project's environment (whose worker runs the
+  tests) can differ, for example a `uv tool` or `pipx` install next to a
+  project that pins an older release. They exchange messages that change
+  between releases, and a mismatched pair could misreport or hang a run. Each
+  worker now checks the command's version at startup and exits with a message
+  naming both versions and how to fix it.
 - **A `--rootdir` in `PYTEST_ADDOPTS` now moves `.rstest_cache` too.**
   pytest reads `PYTEST_ADDOPTS` (and expands `@argsfile`s) before it settles
   the rootdir, but rstest read the command line only, so it kept the cache
