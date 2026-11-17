@@ -395,21 +395,33 @@ mod tests {
         // "older than 3.9" while MIN_VERSION is 3.10. Every "older than X.Y"
         // and "Python X.Y+" claim in the docs names MIN_VERSION.
         let claim = regex::Regex::new(
-            r"(?i)(?:older than (?:the required )?(?:python )?|python \**)(\d+)\.(\d+)(\+?)",
+            r"(?i)(?:(\w+) )?(?:older than (?:the required )?(?:python )?|python \**)(\d+)\.(\d+)(\+?)",
         )
         .unwrap();
+        // "Python 3.13.13" in sample output is not a floor claim, and neither
+        // is "pytest older than 9.1".
+        let floors = |sentence: &str| -> Vec<(String, String)> {
+            claim
+                .captures_iter(sentence)
+                .filter(|c| {
+                    let older = c[0].to_lowercase().contains("older than");
+                    let pytest = c
+                        .get(1)
+                        .is_some_and(|w| w.as_str().eq_ignore_ascii_case("pytest"));
+                    (older && !pytest) || !c[4].is_empty()
+                })
+                .map(|c| (c[2].to_string(), c[3].to_string()))
+                .collect()
+        };
+        assert!(floors("On pytest older than 9.1 the probe").is_empty());
+        assert_eq!(floors("a Python older than 3.10").len(), 1);
         let want = format!("{}.{}", super::MIN_VERSION.0, super::MIN_VERSION.1);
         let (mut bad, mut seen) = (Vec::new(), 0);
         for (page, text) in crate::doc_pages::pages() {
             for sentence in crate::doc_pages::sentences(&text) {
-                for c in claim.captures_iter(&sentence) {
-                    // "Python 3.13.13" in sample output is not a floor claim.
-                    let floor = c[0].to_lowercase().starts_with("older") || !c[3].is_empty();
-                    if !floor {
-                        continue;
-                    }
+                for (major, minor) in floors(&sentence) {
                     seen += 1;
-                    if format!("{}.{}", &c[1], &c[2]) != want {
+                    if format!("{major}.{minor}") != want {
                         bad.push(format!("{page}: {sentence}"));
                     }
                 }
