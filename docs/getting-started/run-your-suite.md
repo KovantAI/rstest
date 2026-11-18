@@ -59,7 +59,7 @@ rstest picks the output style from where the output goes:
 
 Here is `dots` on django-allauth's 2,050-test suite at `-n 4` (the middle
 lines are elided). [Benchmarks](../reference/benchmarks.md) measures this
-suite at 9.1s at `-n 4`:
+suite at 8.5s at `-n 4`:
 
 ```console
 $ rstest -n 4
