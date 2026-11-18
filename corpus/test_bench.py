@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))  # bench imports its sibling `run
 
 import json
 
+import pytest
 from bench import _baseline_unusable, _parity_row, _render_sweep, _row_status, render
 from procmem import linear_fit, suspended
 from run import Suite, _status, diff
@@ -682,9 +683,18 @@ def _fake_python(tmp_path):
     return py
 
 
-def _run_main(tmp_path, monkeypatch, argv):
-    """Run bench.main() offline against a fake suite; returns (bench.json, calls)."""
+def _run_main(tmp_path, monkeypatch, argv, runtime=None):
+    """Run bench.main() offline against a fake suite; returns (bench.json, calls).
+
+    The fake venv forwards to this interpreter, which needn't have rstest
+    installed, so the venv gate is off unless `runtime` stands in for the probe.
+    """
     import bench
+
+    if runtime is None:
+        monkeypatch.setattr(bench, "_venv_problem", lambda rt: None)
+    else:
+        monkeypatch.setattr(bench, "_suite_runtime", lambda s: runtime)
 
     _fake_python(tmp_path)
     snap = _write_snap(tmp_path / "snap.json", {"t.py::a": {"call": "passed"}})
@@ -764,3 +774,82 @@ if __name__ == "__main__":  # allow `python corpus/test_bench.py` without pytest
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---- R59 / R58: half-prepared venvs must never be measured -------------------
+
+
+def test_suite_makes_wheel_and_driver_paths_absolute(tmp_path, monkeypatch):
+    # Installs and rstest runs use the suite dir as cwd, so a path relative to
+    # the caller's cwd would resolve against the wrong directory (R59: the weekly
+    # CI bench passed `--wheel target/wheels/...` and never prepared a suite).
+    import types
+
+    import run
+
+    monkeypatch.chdir(tmp_path)
+    argvs = []
+
+    def fake_sh(argv, cwd=None, env=None, timeout=None):
+        argvs.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run, "sh", fake_sh)
+    suite = Suite("s", {}, "target/wheels/w.whl", "target/release/rstest")
+    suite.pip(run.PYTEST_PIN, suite.wheel)
+    assert argvs[-1][-1] == str(tmp_path / "target" / "wheels" / "w.whl")
+    assert suite.rstest_argv(tmp_path / "snap.json")[0] == str(
+        tmp_path / "target" / "release" / "rstest"
+    )
+    assert Suite("s", {}, "w.whl", "rstest").rstest_bin == "rstest"  # PATH lookup kept
+    assert Suite("s", {}, "", "rstest").wheel == ""  # bench: no wheel built
+
+
+def _run_prepare_only(tmp_path, monkeypatch, fail):
+    import run
+
+    def fetch(self, lock):
+        if fail:
+            raise RuntimeError("install failed")
+
+    monkeypatch.setattr(run.Suite, "fetch", fetch)
+    monkeypatch.setattr(run.Suite, "install", lambda self: None)
+    monkeypatch.setattr(run, "_record_plugins", lambda suite, res: None)
+    monkeypatch.setattr(run, "LOCK", tmp_path / "lock.json")
+    monkeypatch.setattr(run, "RESULTS", tmp_path / "results.json")
+    monkeypatch.setattr(run, "HISTORY", tmp_path / "history")
+    argv = ["run.py", "--prepare-only", "--only", "flask,click", "--wheel", "w.whl"]
+    monkeypatch.setattr(sys, "argv", argv)
+    run.main()
+
+
+def test_prepare_only_exits_nonzero_when_a_suite_fails(tmp_path, monkeypatch):
+    # R58: a failed prepare exited 0, so `run.py --prepare-only && bench.py`
+    # went on to measure whatever the venvs held.
+    with pytest.raises(SystemExit) as exc:
+        _run_prepare_only(tmp_path, monkeypatch, fail=True)
+    assert "prepare failed for: click, flask" in str(exc.value)
+
+
+def test_prepare_only_returns_when_every_suite_prepares(tmp_path, monkeypatch):
+    _run_prepare_only(tmp_path, monkeypatch, fail=False)
+
+
+def test_venv_problem_names_a_half_prepared_venv():
+    from bench import _venv_problem
+
+    ok = {"pytest": "9.2.0", "rstest_worker": "0.12.0"}
+    assert _venv_problem(ok) is None
+    assert "rstest is not installed" in _venv_problem({**ok, "rstest_worker": None})
+    assert "pytest is 8.4.1" in _venv_problem({**ok, "pytest": "8.4.1"})
+    assert "probe failed" in _venv_problem({"error": "boom"})
+
+
+def test_bench_refuses_a_venv_without_rstest_before_any_run(tmp_path, monkeypatch):
+    # What the weekly CI bench measured for two months: suite deps installed,
+    # rstest missing, pytest unpinned. No timed run may start.
+    half = {"python": "3.13", "pytest": "8.4.1", "pytest_xdist": None, "rstest_worker": None}
+    with pytest.raises(SystemExit) as exc:
+        _run_main(tmp_path, monkeypatch, ["--only", "fastapi", "--sweep", ""], runtime=half)
+    assert "fastapi: rstest is not installed" in str(exc.value)
+    assert not (tmp_path / "bench.json").exists()
