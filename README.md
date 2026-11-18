@@ -75,8 +75,8 @@ The wins come from suite *shape*, not magic. Quick self-check:
 | Your suite | What to expect |
 |---|---|
 | Wait-bound (IO, sleeps, network, timeouts) | **Biggest win**: xdist's default `--dist load` hands out consecutive batches in collection order with no timing data, so a file of slow tests clusters on a few workers and starts late; rstest's duration cache starts the slowest tests first, spread across workers. |
-| CPU-bound, already splits well under xdist | **No win, xdist can be slightly ahead**: gain up to the [performance-core](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#performance-cores) count, same as xdist (sympy `-n 8`: rstest 16.0s vs xdist 14.3s). |
-| Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 60s vs 123s). |
+| CPU-bound, already splits well under xdist | **No win, xdist can be slightly ahead**: gain up to the [performance-core](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#performance-cores) count, same as xdist (sympy `-n 8`: rstest 15.5s vs xdist 14.2s). |
+| Very many tests (100k+) | **Win over xdist**: xdist's single Python controller becomes the bottleneck; rstest's orchestrator is Rust (pandas `-n 8`: 33s vs 113s). |
 | Gated by one long test | **No win beyond that test**: no worker count beats the [long pole](https://python-rstest.readthedocs.io/en/stable/concepts/glossary/#long-pole). `--doctor` names it. |
 | Small (< ~10s serial) | **Little wall-time change**: value is `--watch`, `--changed`, `--doctor`, not raw speed. |
 | Many tiny per-service suites | Speedup is per-suite; the aggregate CI win depends on your largest suites. |
@@ -100,19 +100,19 @@ with `rstest -n auto` and reports parity and speed, with no config
 Real open-source suites, end-to-end, with per-test outcome diffing against
 the pytest baseline: 100% parity on all four suites in the measured warm runs
 (allauth and rich have tests that flake under plain pytest too, so some runs
-land at ~99.8-99.9%), and 99.91-99.98% on aiohttp's cold runs, whose
+land at ~99.8-99.9%), and 99.98% on aiohttp's cold run, whose
 socket-leak warning flake hits xdist too (every known flake is catalogued in
 the docs).
 
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | Suite | Tests | pytest | xdist `-n 8` | rstest `-n 8` |
 |---|---|---|---|---|
-| aiohttp | 4,469 | 196s | 161s (73s with `--dist worksteal`) | **67s** warm · 150s cold |
-| pandas | 193,843 | 220s | 123s | **60s** (xdist's controller pins a core) |
-| django-allauth | 2,050 | 28s | 9.3s | **6.3s** |
-| rich | 981 | 3.8s | 2.8s | **2.6s** |
+| aiohttp | 4,469 | 193s | 160s (73s with `--dist worksteal`) | **67s** warm · 150s cold |
+| pandas | 193,843 | 197s | 113s | **33s** (xdist's controller pins a core) |
+| django-allauth | 2,050 | 25s | 11.4s | **5.4s** |
+| rich | 981 | 3.6s | 2.7s | **2.5s** |
 
-Apple M4 Max, CPython 3.13, rstest 0.11.0, pytest 9.2.0, pytest-xdist 3.8,
+Apple M4 Max, CPython 3.13, rstest 0.12.0, pytest 9.2.0, pytest-xdist 3.8,
 median of 5 runs at the same `-n` for both runners. On CPU-bound suites
 (sympy, scikit-learn) xdist is at parity or up to 11% ahead; see the
 benchmarks page.
@@ -124,8 +124,8 @@ can't run from the root at all):
 <!-- SOURCE OF TRUTH: docs/reference/benchmarks.md, keep numbers in sync -->
 | | wall | parity |
 |---|---|---|
-| pytest: 5 serial invocations | 191.3s | baseline |
-| rstest at the root | **25.6s** (7.5×) | 100% |
+| pytest: 5 serial invocations | 192.0s | baseline |
+| rstest at the root | **26.1s** (7.4×) | 100% |
 
 Same method as above (median of 5, rstest `-n auto`). One of the five
 packages, `libs/sdk-py`, collects no tests under either runner in the
