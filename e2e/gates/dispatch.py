@@ -377,7 +377,7 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
         g.write(f"autolazy/{f}", body)
     cache = proj / ".rstest_cache"
 
-    def seed(collect):
+    def seed(collect, mode_walls=None):
         cache.mkdir(parents=True, exist_ok=True)
         timings = {
             f"{f}::test_x[{i}]": (40.0 if f == "test_big.py" else 10.0) / 500
@@ -390,6 +390,10 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
             (cache / "collect.json").write_text(
                 json.dumps({"secs": collect, "epoch": 0}), encoding="utf-8"
             )
+        # Every run records its mode's wall: start each check from a known one.
+        (cache / "mode_wall.json").unlink(missing_ok=True)
+        if mode_walls is not None:
+            (cache / "mode_wall.json").write_text(json.dumps(mode_walls), encoding="utf-8")
 
     def picked_lazy():
         r = g.run("-n", "8", cwd=proj)
@@ -407,6 +411,34 @@ def gate_auto_lazy_long_pole_budget(g, args, binary):
             lazy == want and r.returncode == 0,
             f"rc={r.returncode} " + r.stderr[-300:],
         )
+
+    # The outcome guard: with the budget allowing lazy, a recorded lazy run
+    # that took longer than the recorded full run (same workers, same suite)
+    # keeps auto on full collection; a faster one keeps lazy.
+    def walls(full_secs, lazy_secs):
+        run = lambda secs: {"secs": secs, "workers": 8, "tests": 2000, "epoch": 0}  # noqa: E731
+        return {"full": run(full_secs), "lazy": run(lazy_secs)}
+
+    for full_secs, lazy_secs, want, label in [
+        (10.0, 20.0, False, "lazy measured slower than full here: full"),
+        (20.0, 10.0, True, "lazy measured faster than full here: lazy"),
+    ]:
+        seed(40.0, walls(full_secs, lazy_secs))
+        lazy, r = picked_lazy()
+        check(
+            f"auto-lazy: {label}",
+            lazy == want and r.returncode == 0,
+            f"rc={r.returncode} " + r.stderr[-300:],
+        )
+    recorded_walls = json.loads((cache / "mode_wall.json").read_text())
+    check(
+        "auto-lazy: a parallel run records its mode's wall",
+        (recorded_walls.get("lazy") or {}).get("tests") == 2000
+        and (recorded_walls.get("lazy") or {}).get("workers") == 8
+        # seeded entries carry epoch 0; only a real recording stamps one
+        and (recorded_walls.get("lazy") or {}).get("epoch", 0) > 0,
+        f"mode_wall.json={recorded_walls} " + r.stdout[-300:] + r.stderr[-300:],
+    )
     seed(None)
     r = g.run("-n", "8", "--collect", "full", cwd=proj)
     recorded = (
@@ -719,6 +751,53 @@ def gate_fork_pool(g, args, binary):
         "fork-pool: doctor json fork_prewarm=true + startup_seconds present",
         d.get("fork_prewarm") is True and "startup_seconds" in d,
         str({k: d.get(k) for k in ("fork_prewarm", "startup_seconds")}),
+    )
+
+
+def gate_fork_pool_app(g, args, binary):
+    print("== --fork-pool=app ==")
+    if WINDOWS:
+        check("fork-pool=app: skipped on Windows", True)
+        return
+    tests = "".join(f"def test_{i}():\n    assert helper.VALUE == 41\n" for i in range(3))
+    g.write("fpa/pytest.ini", "")
+    g.write("fpa/helper.py", "VALUE = 41\n")
+    g.write("fpa/test_a.py", "import helper\n" + tests)
+    cwd = g.tmp / "fpa"
+    shutil.rmtree(cwd / ".rstest_cache", ignore_errors=True)
+    # Run 1 records the app modules; run 2 forks its workers off a template
+    # that imported them first. Same results either way.
+    first = g.run("-n", "2", "--fork-pool=app", "--doctor", cwd=cwd)
+    second = g.run("-n", "2", "--fork-pool=app", "--doctor", cwd=cwd)
+    check(
+        "fork-pool=app: records the template, then uses it, same results",
+        first.returncode == second.returncode == 0
+        and "3 passed" in first.stdout
+        and "3 passed" in second.stdout
+        and (cwd / ".rstest_cache" / "warm" / "manifest.json").exists()
+        and "warm template:" in second.stdout + second.stderr,
+        f"rc={first.returncode},{second.returncode} " + (second.stdout + second.stderr)[-300:],
+    )
+    # A template every forked worker dies under (here: an app module that
+    # remembers the pid that imported it; agent-platform-backend on macOS: an
+    # Objective-C fork-safety abort). Nothing ran, so rstest runs the suite
+    # again without the template instead of failing it.
+    g.write("fpb/pytest.ini", "")
+    g.write("fpb/pidmod.py", "import os\nPID = os.getpid()\n")
+    g.write(
+        "fpb/conftest.py",
+        "import os\nimport pidmod\nif pidmod.PID != os.getpid():\n    os._exit(3)\n",
+    )
+    g.write("fpb/test_b.py", "".join(f"def test_{i}():\n    pass\n" for i in range(3)))
+    cwd = g.tmp / "fpb"
+    shutil.rmtree(cwd / ".rstest_cache", ignore_errors=True)
+    g.run("-n", "2", "--fork-pool=app", cwd=cwd)
+    r = g.run("-n", "2", "--fork-pool=app", cwd=cwd)
+    out = r.stdout + r.stderr
+    check(
+        "fork-pool=app: a template that kills every worker reruns without it",
+        r.returncode == 0 and "3 passed" in r.stdout and "running again without it" in out,
+        f"rc={r.returncode} " + out[-400:],
     )
 
 

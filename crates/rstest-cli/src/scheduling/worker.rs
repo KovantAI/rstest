@@ -1164,6 +1164,11 @@ pub fn scrub_secrets(command: &mut Command) {
     }
 }
 
+/// The orchestrator's version, passed to every worker, which refuses to run
+/// under a different one (`rstest_worker/__main__.py`): a `rstest` on PATH and
+/// the rstest installed in the project's environment can drift apart.
+pub(crate) const ORCHESTRATOR_VERSION_ENV: &str = "RSTEST_ORCHESTRATOR_VERSION";
+
 /// Build the worker's [`Command`] (argv + per-run child environment + stdio)
 /// without spawning it. Split out of [`Worker::spawn_with_io`] so the arg/env
 /// wiring is unit-testable via `Command::get_args`/`get_envs` — no live process.
@@ -1193,6 +1198,7 @@ fn build_worker_command(
             &evt_fd.to_string(),
         ])
         .env("PYTHONPATH", worker_pythonpath())
+        .env(ORCHESTRATOR_VERSION_ENV, env!("CARGO_PKG_VERSION"))
         // Run-wide params ride the CHILD's environment (thread-safe), never
         // process-global `set_var` (which races across threads / is unsafe
         // in edition 2024).
@@ -1523,6 +1529,7 @@ fn apply_shared_worker_env(command: &mut Command, n: usize, env: &WorkerEnv) {
     scrub_secrets(command);
     command
         .env("PYTHONPATH", worker_pythonpath())
+        .env(ORCHESTRATOR_VERSION_ENV, env!("CARGO_PKG_VERSION"))
         .env("RSTEST_RUN_UID", &env.run_uid)
         .env("RSTEST_WORKER_COUNT", n.to_string())
         .env("RSTEST_BASETEMP", crate::scratch::dir());
@@ -2171,6 +2178,37 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn workers_are_told_the_orchestrator_version() {
+        // Both spawn paths: a worker refuses a different rstest version.
+        let cmd = build_worker_command(Path::new("python3"), None, Stdio::Null, &base_env(), 3, 4);
+        assert_eq!(
+            envs_of(&cmd)[super::ORCHESTRATOR_VERSION_ENV],
+            env!("CARGO_PKG_VERSION")
+        );
+        #[cfg(unix)]
+        {
+            let mut zygote = Command::new("python3");
+            super::apply_shared_worker_env(&mut zygote, 2, &base_env());
+            assert_eq!(
+                envs_of(&zygote)[super::ORCHESTRATOR_VERSION_ENV],
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+    }
+
+    #[test]
+    fn worker_version_file_matches_the_cargo_version() {
+        // A release bump that misses python/rstest_worker/_version.py would
+        // make every worker refuse the new orchestrator.
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../python/rstest_worker/_version.py"
+        ));
+        let want = format!("__version__ = \"{}\"", env!("CARGO_PKG_VERSION"));
+        assert!(src.contains(&want), "_version.py must hold {want}");
     }
 
     #[test]

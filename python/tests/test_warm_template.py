@@ -344,6 +344,32 @@ def test_a_module_importing_a_denied_one_is_denied_too(app):
     assert "wt_bad" not in sys.modules
 
 
+def test_a_partial_import_that_patched_a_kept_module_restarts_the_template(app):
+    # R56, sqlmesh on agent-platform-backend: sqlmesh's __init__ patches
+    # sqlglot's parser (through sqlmesh.core.dialect, which stays imported),
+    # then fails on a denied import. Forking from that template gave every
+    # worker a patched sqlglot without sqlmesh; each imported sqlmesh again,
+    # patched twice and recursed forever.
+    app.write("wt_lib", "PATCHES = 0\n")
+    app.write("wt_ext", "import wt_lib\nwt_lib.PATCHES += 1\n")
+    app.write("wt_patcher", "import wt_ext\nimport wt_denied_dep\n")
+    app.write("wt_denied_dep", "X = 1\n")
+    clean, result = app.run(
+        ["wt_lib", "wt_patcher"], deny={"wt_denied_dep": "opens a socket at import"}
+    )
+    assert not clean
+    assert "imports denied module wt_denied_dep" in result["denied"]["wt_patcher"]
+    assert "leaving wt_ext imported" in result["hazard"]
+
+
+def test_a_failed_import_that_left_nothing_behind_keeps_the_template(app):
+    # The usual case stays warm: nothing ran far enough to change the process.
+    app.write("wt_lone", "import wt_denied_dep2\n")
+    app.write("wt_denied_dep2", "X = 1\n")
+    clean, result = app.run(["wt_lone"], deny={"wt_denied_dep2": "opens a socket at import"})
+    assert clean and result["hazard"] is None
+
+
 def test_a_module_importing_a_rewrite_marked_one_is_denied(app):
     # Corpus regression (packaging, urllib3, sqlalchemy, trio): an app module
     # pulled in hypothesis's `_hypothesis_globals`, which pytest marks for

@@ -37,6 +37,7 @@ from gates.dispatch import (
     gate_duration_regression_gate,
     gate_fixture_cost_dispatch,
     gate_fork_pool,
+    gate_fork_pool_app,
     gate_isolated_mark,
     gate_lazy_collection,
     gate_lazy_work_stealing,
@@ -81,6 +82,7 @@ from gates.misc import (
     gate_lone_surrogate_in_report,
     gate_network_guard,
     gate_worker_identity_fixtures,
+    gate_worker_version_mismatch,
 )
 from gates.monorepo import (
     gate_monorepo,
@@ -217,6 +219,7 @@ def main():
         gate_failures_by_cause,
         gate_network_guard,
         gate_worker_identity_fixtures,
+        gate_worker_version_mismatch,
         gate_output_styles,
         gate_multiprocessing_spawn_children,
         gate_crash_handling,
@@ -298,6 +301,7 @@ def main():
         gate_dist_each,
         gate_dist_validation,
         gate_fork_pool,
+        gate_fork_pool_app,
         gate_isolated_mark,
         gate_testnodedown_for_crashed_workers,
         gate_xdist_master_side_hooks,
