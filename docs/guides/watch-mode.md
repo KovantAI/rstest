@@ -9,7 +9,7 @@ $ rstest --watch
 ```
 
 ```text
-rstest 0.11.1 — 2 workers (parallel by default; -n 0 for single-worker mode)
+rstest 0.12.0 — 2 workers (parallel by default; -n 0 for single-worker mode)
 ...                                                                      [100%]
 
 3 passed in 0.16s
@@ -104,7 +104,7 @@ itself costs 140-165ms here, growing with `-n`. Reproduce with
 On macOS and Linux a watch session keeps one **template** process that has imported
 your app's modules (`--fork-pool=app`, the `--watch` default there), and forks
 each cycle's workers from it. A save then pays no app import. On a test file
-that imports scikit-learn (Apple M4 Max, rstest 0.11.1; 10 saves):
+that imports scikit-learn (Apple M4 Max, rstest 0.12.0; 10 saves):
 
 | Worker count | Without the template | With it, from the 3rd save |
 |---|---|---|
