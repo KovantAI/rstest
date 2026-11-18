@@ -84,7 +84,7 @@ cores). The default spectrum is picked to span every regime, not just the wins:
 | httpx | struggler: forced `-n 0` (session fixture, fixed port) | ~1.0× |
 | fastapi | mid gain | 2.6× |
 | anyio | big gain (also the sweep suite) | 3.9× |
-| langgraph | monorepo: N serial per-lib pytest vs one root run | 7.5× |
+| langgraph | monorepo: N serial per-lib pytest vs one root run | 7.4× |
 
 Speedup tracks the *parallelizable share*, not raw size (a tiny or
 serial-pinned suite can sit at or below 1×). Every point is the **median** of
@@ -127,7 +127,7 @@ ordinary CI on it.
 ## Results (2026-06-13, M-series macOS, wheel 0.0.5)
 
 A historical snapshot, kept as the per-suite parity record. The current
-published numbers (re-measured 2026-11-10 with rstest 0.11.0) are in
+published numbers (re-measured 2026-11-18 with rstest 0.12.0) are in
 [docs/reference/benchmarks.md](../docs/reference/benchmarks.md); test counts
 and walls there differ from this table.
 
@@ -176,10 +176,10 @@ anyio 3.9×, allauth 3.0×, requests 5.5×, typer 3.1×.
 
 ### Monorepo (mono mode)
 
-Measured separately from the table above (2026-11-10, rstest 0.11.0, pytest
+Measured separately from the table above (2026-11-18, rstest 0.12.0, pytest
 9.2.0 pin, `bench.py --only langgraph --sweep ''`: median of 5 after one
 warm-up, min-max in parentheses; result in
-`bench-results/2026-11-10-langgraph.json`). langgraph is a monorepo: N
+`bench-results/2026-11-18-langgraph.json`). langgraph is a monorepo: N
 per-lib pytest configs the baseline runs serially vs one root rstest
 pass. The measured subset is the five DB-free, service-free libs
 (`libs/langgraph` itself is excluded: its live-app/service tests hang
@@ -187,7 +187,7 @@ the plain-pytest baseline in a service-less env; see `suites.toml`).
 
 | suite | tests | parity | pytest | rstest | speedup |
 |---|---|---|---|---|---|
-| langgraph (5 libs) | 838 | 100% | 191.3s (186.6-197.5) | 25.6s (24.5-31.7) | 7.5× |
+| langgraph (5 libs) | 838 | 100% | 192.0s (186.3-200.1) | 26.1s (25.2-26.6) | 7.4× |
 
 `libs/sdk-py` collects no tests under either runner (its test modules import
 `starlette`, which the prepared venv lacks; both runners report the same 10
