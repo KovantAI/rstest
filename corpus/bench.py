@@ -80,8 +80,8 @@ import tomllib
 
 # Executed as `python corpus/bench.py`, so this dir is on sys.path and the
 # corpus machinery (Suite/prepare/diff) imports directly — no duplication.
-from procmem import linear_fit, run_measured, suspended
-from run import HERE, REPO, Suite, diff, log
+from procmem import linear_fit, require_psutil, run_measured, suspended
+from run import HERE, PYTEST_PIN, REPO, Suite, diff, log
 
 BENCH = HERE / "bench.json"
 
@@ -591,6 +591,22 @@ def _suite_runtime(suite):
     return json.loads(r.stdout)
 
 
+def _venv_problem(rt):
+    """Why a suite venv (its `_suite_runtime`) can't be measured, or None.
+
+    A failed prepare can leave a venv with the suite's deps but no rstest and an
+    unpinned pytest; measuring it would publish numbers for the wrong setup.
+    """
+    if "error" in rt:
+        return f"runtime probe failed: {rt['error']}"
+    if not rt.get("rstest_worker"):
+        return "rstest is not installed in its venv"
+    pin = PYTEST_PIN.split("==")[1]
+    if rt.get("pytest") != pin:
+        return f"pytest is {rt.get('pytest')}, not the pinned {pin}"
+    return None
+
+
 def _environment(args, suites=None):
     """What every published table records next to it (benchmark methodology)."""
 
@@ -698,6 +714,8 @@ def main():
         help="hard gate: fail if any measured suite's parity is below this",
     )
     args = ap.parse_args()
+    if args.memory:
+        require_psutil()  # before the spectrum: the memory phase runs last
     global COLD
     COLD = args.cold
     if args.xdist_dist:
@@ -719,12 +737,17 @@ def main():
     suites = {n: Suite(n, cfg[n], wheel, args.rstest) for n in names}
     env_info = _environment(args, suites)  # before any run: the load it records is the start load
 
-    spectrum, py_cache = [], {}
-    for name, suite in suites.items():
+    for name, suite in suites.items():  # all up front: never fail hours into a run
         if not (suite.venv / "bin" / "python").exists():
             sys.exit(
                 f"{name}: not prepared — run `corpus/run.py --prepare-only --only {name}` first"
             )
+        problem = _venv_problem(env_info["suite_runtimes"][name])
+        if problem:
+            sys.exit(f"{name}: {problem} — re-run `corpus/run.py --prepare-only --only {name}`")
+
+    spectrum, py_cache = [], {}
+    for name, suite in suites.items():
         log(f"spectrum: {name}")
         row, py_walls, py_snap = bench_suite(suite, args.repeat, args.warmup)
         spectrum.append(row)

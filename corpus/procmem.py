@@ -14,7 +14,8 @@ Two memory numbers, both for the whole process tree the command starts
                   whose only child is the command.
   peak_tree_rss — the largest SUM of RSS over the whole tree, sampled with
                   psutil every `sample` seconds. Sampled, so a short spike
-                  between two samples can be missed; None without psutil.
+                  between two samples can be missed. Sampling requires psutil
+                  (`require_psutil`); timing alone never needs it.
 
 Wall time is taken inside the wrapper around the child alone, so the wrapper's
 own interpreter start-up is not counted.
@@ -48,6 +49,16 @@ SUSPEND_SLACK = 1.0  # seconds; clock-step noise is far below this
 _MAXRSS_UNIT = 1 if sys.platform == "darwin" else 1024
 
 
+def require_psutil():
+    """Exit unless this interpreter has psutil, which memory sampling needs.
+
+    Without it every tree total and the fit come back None while the run still
+    succeeds, so a published memory table would silently lose its numbers.
+    """
+    if psutil is None:
+        sys.exit(f"memory sampling needs psutil, which {sys.executable} does not have")
+
+
 def run_measured(cmd, cwd, env=None, *, sample=None, timeout=None):
     """Run `cmd`; return {rc, wall, stdout, stderr, max_proc_rss, peak_tree_rss}.
 
@@ -55,6 +66,8 @@ def run_measured(cmd, cwd, env=None, *, sample=None, timeout=None):
     timing runs, so the sampler's own CPU never touches a speed number. Memory
     values are bytes.
     """
+    if sample:
+        require_psutil()
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "result.json"
         wrapper = [sys.executable, str(Path(__file__).resolve()), str(out), "--", *cmd]
@@ -64,7 +77,7 @@ def run_measured(cmd, cwd, env=None, *, sample=None, timeout=None):
             proc = subprocess.Popen(wrapper, cwd=cwd, env=env, stdout=fo, stderr=fe, text=True)
             peak_tree = None
             try:
-                if sample and psutil is not None:
+                if sample:
                     peak_tree = _sample_tree(proc, sample, timeout)
                 proc.wait(timeout=timeout)
             except BaseException:

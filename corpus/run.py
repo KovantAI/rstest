@@ -193,8 +193,13 @@ class Suite:
     def __init__(self, name, cfg, wheel, rstest_bin):
         self.name = name
         self.cfg = cfg
-        self.wheel = wheel
-        self.rstest_bin = rstest_bin
+        # Absolute: installs and rstest runs use the suite dir as cwd, where a
+        # path relative to the caller's cwd doesn't resolve. A bare driver name
+        # (no separator) stays a PATH lookup.
+        self.wheel = str(Path(wheel).resolve()) if wheel else wheel
+        self.rstest_bin = (
+            str(Path(rstest_bin).resolve()) if os.sep in str(rstest_bin) else rstest_bin
+        )
         self.dir = WORK / name
         self.src = self.dir / "src"
         self.venv = self.dir / "venv"
@@ -781,6 +786,9 @@ def main():
         log(f"=== PREPARE done: {len(prepared)}/{len(suites)} ready ===")
         if args.prepare_only:
             _save(results, order, run, history=False)
+            if len(prepared) < len(suites):
+                failed = sorted(set(suites) - set(prepared))
+                sys.exit(f"prepare failed for: {', '.join(failed)}")
             return
 
     # ---------- PHASE 2: EXECUTE (offline) ----------
