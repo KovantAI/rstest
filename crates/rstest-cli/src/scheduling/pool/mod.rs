@@ -24,6 +24,7 @@ mod dispatch;
 pub use dispatch::FixtureGroup;
 mod io;
 mod replay;
+mod reruns;
 mod state;
 
 pub(crate) use dispatch::chunk_size;
@@ -43,7 +44,8 @@ use crate::scheduling::proto::{self, Event};
 use dispatch::{build_dispatch, Dispatch};
 use io::{dispatch_to, feed, release_lookahead, seed_each, spawn_into, start_into};
 use replay::{seed_replay, ReplayState};
-use state::WorkerState;
+use reruns::Reruns;
+use state::{PoolCtl, WorkerState};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Dist {
@@ -301,23 +303,6 @@ fn report_nodeid(ids_store: &Option<Vec<String>>, dist: Dist, worker: usize, ind
     nodeid
 }
 
-/// Whether `index` is rerun-eligible under `--reruns-only-known-flaky`: no gate
-/// set (feature off) always passes; otherwise an explicit `@mark.flaky` (present
-/// in `flaky_budget`) or a prior-flaky nodeid in the set qualifies. Matches on
-/// the clean nodeid from `ids_store` (not a report id, which may carry a `[gwN]`
-/// suffix in Dist::Each) so the ItemDone and crash gates stay consistent.
-fn known_flaky_ok(
-    known_flaky: Option<&std::collections::HashSet<String>>,
-    flaky_budget: &std::collections::HashMap<u64, u32>,
-    ids_store: &Option<Vec<String>>,
-    index: u64,
-) -> bool {
-    known_flaky.is_none_or(|set| {
-        flaky_budget.contains_key(&index)
-            || nodeid_at(ids_store, index).is_some_and(|id| set.contains(id))
-    })
-}
-
 // The eager pool's knobs (dist/order/shuffle/shard/skip/pinned) are genuinely
 // independent run-shaping inputs; bundling them buys no clarity over the named
 // params, so this one call site keeps them flat.
@@ -359,9 +344,6 @@ pub fn run_pool(
         fork_prewarm,
         quarantine,
     } = cfg;
-    // Widened by the designate's CollectionDone when `-x`/`--maxfail` comes
-    // from ini `addopts` / PYTEST_ADDOPTS, which the argv parse can't see.
-    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
 
     // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
@@ -433,35 +415,23 @@ pub fn run_pool(
     let mut reference: Option<(u64, String)> = None;
     // Designate's id list, retained for crash-report nodeids.
     let mut ids_store: Option<Vec<String>> = None;
-    let mut total_items = 0usize;
     let mut dispatch: Option<Dispatch> = None;
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
     // Each-mode: a crash replacement runs only the dead worker's
     // REMAINING items (xdist semantics), stashed here per slot.
     let mut each_remnant: Vec<Option<Vec<u64>>> = vec![None; n];
-    // Serial-phase designate: lowest alive index.
-    let mut designate = 0usize;
     // testnodedown payloads of CRASHED workers, awaiting a surviving
     // worker to run the cleanup hooks (xdist's master does this natively;
     // rstest routes it to a sibling).
     let mut pending_downs: VecDeque<(serde_json::Value, String)> = VecDeque::new();
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
-    let mut rerun_used: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
-    // @pytest.mark.flaky(reruns=N) budgets, from the designate's payload.
-    let mut flaky_budget: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
-    let budget_of = |flaky: &std::collections::HashMap<u64, u32>, i: u64| -> u32 {
-        flaky.get(&i).copied().unwrap_or(reruns)
-    };
-    let mut fail_count = orchestrator::MaxfailCount::new(quarantine);
+    let mut retry = Reruns::new(reruns, only_rerun, known_flaky);
     // --incremental: nodeids collected but skipped (unchanged since last green),
     // injected as cached passes once the run finishes.
     let mut cached_ids: Vec<String> = Vec::new();
-    // Global -x/--maxfail: once tripped, dispatch halts and every alive
-    // worker is told stop_run: it finishes the test in flight and starts
-    // nothing more, its queued items (held lookahead included) unrun.
-    let mut stopping = false;
+    let mut ctl = PoolCtl::new(maxfail, quarantine);
     // Initial seeding round: a worker whose second (lookahead) dispatch would
     // take work a not-yet-seeded worker needs (a long pole, an affinity group,
     // or the last items of a tiny suite) gets ONE dispatch as it collects; its
@@ -546,8 +516,8 @@ pub fn run_pool(
                 {
                     if let Some(d) = dispatch.as_mut() {
                         seed_round_open = false;
-                        let chunk = chunk_size(total_items, states.len());
-                        release_lookahead(&mut states, d, chunk, designate, stopping)?;
+                        let chunk = chunk_size(ctl.total_items, states.len());
+                        release_lookahead(&mut states, d, chunk, ctl.designate, ctl.stopping)?;
                     }
                 }
                 prog.tick(sink);
@@ -573,25 +543,21 @@ pub fn run_pool(
                 // a failed attempt may be discarded and retried, and only
                 // the FINAL attempt reaches the user/output/exit code.
                 if let Some(i) = states[idx].running {
-                    if budget_of(&flaky_budget, i) > 0 {
+                    if retry.budget(i) > 0 {
                         states[idx].attempt_failed |= r.outcome == "failed";
                         states[idx].attempt.push(r);
                         continue;
                     }
                 }
-                let counted = fail_count.n;
-                fail_count.record(&r);
-                if fail_count.n > counted {
+                let counted = ctl.fail_count.n;
+                ctl.fail_count.record(&r);
+                if ctl.fail_count.n > counted {
                     promote_partners(&mut dispatch, states[idx].running);
                 }
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
-                if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
-                    stopping = true;
-                    run.stopped_after = Some(fail_count.n);
-                    orchestrator::stop_all(&mut states);
-                }
+                ctl.trip_maxfail(&mut run, &mut states);
             }
             Ok(Event::CollectError { path, longrepr }) => {
                 // Every worker collects the whole suite: show each error once.
@@ -639,7 +605,7 @@ pub fn run_pool(
                 // pytest's own resolution (argv + addopts, last wins) is
                 // authoritative; it arrives before any item is dispatched.
                 if reported_maxfail.is_some() {
-                    maxfail = reported_maxfail;
+                    ctl.maxfail = reported_maxfail;
                 }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
@@ -658,7 +624,7 @@ pub fn run_pool(
                     if let Some(f) = flaky {
                         for (k, v) in f {
                             if let Ok(i) = k.parse::<u64>() {
-                                flaky_budget.insert(i, v);
+                                retry.marked.insert(i, v);
                             }
                         }
                     }
@@ -666,11 +632,11 @@ pub fn run_pool(
                 match &reference {
                     None => {
                         reference = Some((count, hash));
-                        total_items = count as usize;
+                        ctl.total_items = count as usize;
                         prog.set_total(if dist == Dist::Each {
-                            total_items * states.len()
+                            ctl.total_items * states.len()
                         } else {
-                            total_items
+                            ctl.total_items
                         });
                     }
                     Some((ref_count, ref_hash)) => {
@@ -700,7 +666,7 @@ pub fn run_pool(
                 if let Some(ids) = ids {
                     // The auto-quarantine cap is a share of the tests this run
                     // reports: the collected suite, or a shard's bucket below.
-                    fail_count.set_total(ids.len());
+                    ctl.fail_count.set_total(ids.len());
                     if pinned.is_some() {
                         replay.serial.extend(serial.iter().flatten().copied());
                     }
@@ -717,7 +683,7 @@ pub fn run_pool(
                                 idx.len(),
                                 ids.len()
                             ));
-                            fail_count.set_total(idx.len());
+                            ctl.fail_count.set_total(idx.len());
                             idx.into_iter().collect::<HashSet<u64>>()
                         });
                         // --incremental: fold the skip set into `keep` — an index
@@ -743,7 +709,7 @@ pub fn run_pool(
                                     ids.len()
                                 ));
                                 // The progress total tracks only tests that run.
-                                prog.set_total(total_items.saturating_sub(skipped_positions));
+                                prog.set_total(ctl.total_items.saturating_sub(skipped_positions));
                             }
                             cached_ids.append(&mut cached);
                             Some(run_idx)
@@ -772,7 +738,7 @@ pub fn run_pool(
                                     .filter(|&i| in_keep(i) && !pick.keep.contains(&i))
                                     .map(|i| ids[i as usize].clone())
                                     .collect();
-                                fail_count.set_total(pick.keep.len());
+                                ctl.fail_count.set_total(pick.keep.len());
                                 prog.set_total(pick.keep.len());
                                 Some(pick.keep)
                             }
@@ -833,7 +799,7 @@ pub fn run_pool(
                         s.outstanding.remove(pos);
                     }
                 }
-                if !stopping {
+                if !ctl.stopping {
                     // Not a global stop: the worker left its run loop, so it
                     // takes no more items (anything already sent comes back
                     // at its Done). Redistribute to the other workers.
@@ -844,86 +810,18 @@ pub fn run_pool(
                 }
             }
             Ok(Event::ItemDone { index }) => {
-                prog.item_finished(sink, idx);
-                let chunk = chunk_size(total_items, states.len());
-                let s = &mut states[idx];
-                s.running = None;
-                s.running_since = None;
-                s.running_watchdog = None;
-                if let Some(pos) = s.outstanding.iter().position(|&x| x == index) {
-                    s.outstanding.remove(pos);
-                }
-                // --dist each / replay: top up from the unsent backlog.
-                feed(s, stopping);
-                let item_budget = budget_of(&flaky_budget, index);
-                if item_budget > 0 {
-                    // --only-rerun: failures must match a pattern to retry.
-                    let rerun_allowed = orchestrator::rerun_allowed(only_rerun, &s.attempt);
-                    // --reruns-only-known-flaky: gate on prior flaky history.
-                    // An explicit @mark.flaky (present in flaky_budget) is an
-                    // author declaration and always bypasses the gate. Match on
-                    // the CLEAN nodeid from ids_store (keyed by index), not
-                    // s.attempt's report nodeid: in Dist::Each the report id
-                    // carries a ` [gwN]` suffix (added on receipt) and would
-                    // never match the un-suffixed history set. Same lookup the
-                    // crash path uses, keeping the two gates consistent.
-                    let flaky_ok = known_flaky_ok(known_flaky, &flaky_budget, &ids_store, index);
-                    let used = rerun_used.entry(index).or_insert(0);
-                    if s.attempt_failed && *used < item_budget && rerun_allowed && flaky_ok {
-                        // Failed attempt with budget left: discard its
-                        // reports and requeue the item.
-                        *used += 1;
-                        s.attempt.clear();
-                        s.attempt_failed = false;
-                        if let Some(d) = dispatch.as_mut() {
-                            d.requeued.push_back(index);
-                        }
-                    } else {
-                        let attempts = *used;
-                        let failed_now = s.attempt_failed;
-                        let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
-                        let attempt = std::mem::take(&mut s.attempt);
-                        s.attempt_failed = false;
-                        let counted = fail_count.n;
-                        orchestrator::finalize_attempt(
-                            sink,
-                            &mut run,
-                            &mut prog,
-                            &mut fail_count,
-                            idx,
-                            orchestrator::FinishedAttempt {
-                                attempts_used: attempts,
-                                reports: attempt,
-                                failed: failed_now,
-                                flaky_key,
-                            },
-                        );
-                        if fail_count.n > counted {
-                            promote_partners(&mut dispatch, Some(index));
-                        }
-                        if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
-                            stopping = true;
-                            run.stopped_after = Some(fail_count.n);
-                            orchestrator::stop_all(&mut states);
-                        }
-                    }
-                }
-                let s = &mut states[idx];
-                // Refill when half-drained. Threshold must never be 0: the
-                // worker HOLDS its last pending item (nextitem lookahead), so
-                // outstanding floors at 1 until refilled; a 0 threshold deadlocks.
-                if !stopping && s.outstanding.len() <= (chunk / 2).max(1) {
-                    if let Some(d) = dispatch.as_mut() {
-                        // An idle worker holds a lone new item (a rerun, the
-                        // serial phase) for its successor: dispatch again, as
-                        // when seeding, to send one or release it.
-                        let idle = s.outstanding.is_empty();
-                        dispatch_to(s, d, chunk, idx == designate)?;
-                        if idle {
-                            dispatch_to(s, d, chunk, idx == designate)?;
-                        }
-                    }
-                }
+                on_item_done(
+                    idx,
+                    index,
+                    &mut states,
+                    &mut dispatch,
+                    &mut ctl,
+                    &mut retry,
+                    &ids_store,
+                    &mut run,
+                    &mut prog,
+                    sink,
+                )?;
             }
             Ok(Event::SessionExit { reason, returncode }) => {
                 // pytest.exit() in a test ends the whole run, as under pytest:
@@ -947,8 +845,8 @@ pub fn run_pool(
                 }
                 run.session_exit
                     .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
-                if !stopping {
-                    stopping = true;
+                if !ctl.stopping {
+                    ctl.stopping = true;
                     orchestrator::stop_all(&mut states);
                 }
             }
@@ -972,7 +870,7 @@ pub fn run_pool(
                 // reached it after it left its loop: a refill or a rerun.
                 // Requeue it for the live workers, unless the run is stopping.
                 let left: Vec<u64> = s.outstanding.drain(..).collect();
-                if !stopping {
+                if !ctl.stopping {
                     if let Some(d) = dispatch.as_mut() {
                         d.requeued.extend(left);
                     }
@@ -1024,9 +922,10 @@ pub fn run_pool(
                     // Same known-flaky gate as the ItemDone path: a crash of a
                     // non-known-flaky, unmarked test is not retried when
                     // --reruns-only-known-flaky is on.
-                    let known_ok = known_flaky_ok(known_flaky, &flaky_budget, &ids_store, i);
-                    let used = rerun_used.entry(i).or_insert(0);
-                    if *used < budget_of(&flaky_budget, i) && known_ok {
+                    let known_ok = retry.known_flaky_ok(&ids_store, i);
+                    let budget = retry.budget(i);
+                    let used = retry.used.entry(i).or_insert(0);
+                    if *used < budget && known_ok {
                         *used += 1;
                         if let Some(d) = dispatch.as_mut() {
                             d.requeued.push_back(i);
@@ -1120,7 +1019,7 @@ pub fn run_pool(
                     // wait(). The slot stays in the vec, so reap in place.
                     states[idx].worker.reap();
                     done_workers += 1;
-                    if idx == designate {
+                    if idx == ctl.designate {
                         // Serial phase needs a host; promote the lowest worker
                         // still listening (a finishing one keeps listening, as
                         // for reruns). With none left the serial items are
@@ -1129,7 +1028,7 @@ pub fn run_pool(
                             .iter()
                             .position(|s| !s.dead && !s.ended && !s.stopped)
                         {
-                            designate = next;
+                            ctl.designate = next;
                         }
                     }
                     if done_workers == states.len() {
@@ -1158,7 +1057,7 @@ pub fn run_pool(
                  falling back to collection order (serial marks unknown)",
             );
             dispatch = Some(Dispatch {
-                order: (0..total_items as u64).collect(),
+                order: (0..ctl.total_items as u64).collect(),
                 slow_count: 0,
                 lead_ends: Vec::new(),
                 fixture_groups: Vec::new(),
@@ -1175,20 +1074,20 @@ pub fn run_pool(
         // Activate the serial phase once every non-designate worker has
         // fully finished its session (Done = fixtures torn down).
         if let Some(d) = dispatch.as_mut() {
-            if !stopping
+            if !ctl.stopping
                 && !d.serial_active
                 && !d.serial.is_empty()
                 && states
                     .iter()
                     .enumerate()
-                    .all(|(i, s)| i == designate || s.dead)
-                && !states[designate].dead
+                    .all(|(i, s)| i == ctl.designate || s.dead)
+                && !states[ctl.designate].dead
             {
                 d.serial_active = true;
-                let chunk = chunk_size(total_items, states.len());
+                let chunk = chunk_size(ctl.total_items, states.len());
                 // Kick the (idle, held-open) designate: two dispatches so
                 // the first serial item has a known successor.
-                let s = &mut states[designate];
+                let s = &mut states[ctl.designate];
                 dispatch_to(s, d, chunk, true)?;
                 dispatch_to(s, d, chunk, true)?;
             }
@@ -1204,7 +1103,7 @@ pub fn run_pool(
                 &mut states,
                 &ids_store,
                 &reference,
-                stopping,
+                ctl.stopping,
                 sink,
             );
             continue;
@@ -1221,9 +1120,9 @@ pub fn run_pool(
             seed_each(
                 &mut states,
                 &mut each_remnant,
-                total_items,
+                ctl.total_items,
                 ids_ready,
-                stopping,
+                ctl.stopping,
             );
             continue;
         }
@@ -1232,20 +1131,20 @@ pub fn run_pool(
             seed_new_workers(
                 d,
                 &mut states,
-                total_items,
-                designate,
-                stopping,
+                ctl.total_items,
+                ctl.designate,
+                ctl.stopping,
                 &mut seed_round_open,
                 &mut seed_round_deadline,
             )?;
         }
 
-        if let Some(d) = dispatch.as_mut().filter(|_| !stopping) {
-            kick_idle_for_requeued(d, &mut states, total_items, designate)?;
+        if let Some(d) = dispatch.as_mut().filter(|_| !ctl.stopping) {
+            kick_idle_for_requeued(d, &mut states, ctl.total_items, ctl.designate)?;
         }
 
         if let Some(d) = dispatch.as_ref() {
-            end_drained_sessions(d, &mut states, designate, stopping);
+            end_drained_sessions(d, &mut states, ctl.designate, ctl.stopping);
         }
     }
 
@@ -1259,7 +1158,7 @@ pub fn run_pool(
     // Every worker able to run the rest died for good: report what never ran
     // (reclaimed, never dispatched, or serial) instead of dropping it from the
     // artifacts. Not after a -x/--maxfail stop, where unrun tests are expected.
-    if lost_worker && !stopping {
+    if lost_worker && !ctl.stopping {
         if let Some(d) = dispatch.as_mut() {
             let unrun: Vec<u64> = d
                 .requeued
@@ -1282,7 +1181,7 @@ pub fn run_pool(
     for id in &cached_ids {
         run.record_cached(id.clone());
     }
-    run.cap_total = fail_count.total;
+    run.cap_total = ctl.fail_count.total;
     let retried = reruns > 0 || !run.flaky.is_empty();
     let exitstatus = orchestrator::finalize_exit(
         &statuses,
@@ -1341,6 +1240,101 @@ pub fn run_pool(
         lazy: false,
         exiting,
     })
+}
+
+/// A worker finished item `index`: retry it if its attempt failed with budget
+/// left (and the `--only-rerun` / known-flaky gates allow), else record the
+/// final attempt; then refill the worker once it is half-drained.
+#[allow(clippy::too_many_arguments)]
+fn on_item_done(
+    idx: usize,
+    index: u64,
+    states: &mut [WorkerState],
+    dispatch: &mut Option<Dispatch>,
+    ctl: &mut PoolCtl,
+    retry: &mut Reruns,
+    ids_store: &Option<Vec<String>>,
+    run: &mut Run,
+    prog: &mut Progress,
+    sink: &mut Sink,
+) -> Result<()> {
+    prog.item_finished(sink, idx);
+    let chunk = chunk_size(ctl.total_items, states.len());
+    let s = &mut states[idx];
+    s.running = None;
+    s.running_since = None;
+    s.running_watchdog = None;
+    if let Some(pos) = s.outstanding.iter().position(|&x| x == index) {
+        s.outstanding.remove(pos);
+    }
+    // --dist each / replay: top up from the unsent backlog.
+    feed(s, ctl.stopping);
+    let item_budget = retry.budget(index);
+    if item_budget > 0 {
+        // --only-rerun: failures must match a pattern to retry.
+        let rerun_allowed = orchestrator::rerun_allowed(retry.only_rerun, &s.attempt);
+        // --reruns-only-known-flaky: gate on prior flaky history.
+        // An explicit @mark.flaky (present in `retry.marked`) is an
+        // author declaration and always bypasses the gate. Match on
+        // the CLEAN nodeid from ids_store (keyed by index), not
+        // s.attempt's report nodeid: in Dist::Each the report id
+        // carries a ` [gwN]` suffix (added on receipt) and would
+        // never match the un-suffixed history set. Same lookup the
+        // crash path uses, keeping the two gates consistent.
+        let flaky_ok = retry.known_flaky_ok(ids_store, index);
+        let used = retry.used.entry(index).or_insert(0);
+        if s.attempt_failed && *used < item_budget && rerun_allowed && flaky_ok {
+            // Failed attempt with budget left: discard its
+            // reports and requeue the item.
+            *used += 1;
+            s.attempt.clear();
+            s.attempt_failed = false;
+            if let Some(d) = dispatch.as_mut() {
+                d.requeued.push_back(index);
+            }
+        } else {
+            let attempts = *used;
+            let failed_now = s.attempt_failed;
+            let flaky_key = s.attempt.first().map(|r| r.nodeid.clone());
+            let attempt = std::mem::take(&mut s.attempt);
+            s.attempt_failed = false;
+            let counted = ctl.fail_count.n;
+            orchestrator::finalize_attempt(
+                sink,
+                run,
+                prog,
+                &mut ctl.fail_count,
+                idx,
+                orchestrator::FinishedAttempt {
+                    attempts_used: attempts,
+                    reports: attempt,
+                    failed: failed_now,
+                    flaky_key,
+                },
+            );
+            if ctl.fail_count.n > counted {
+                promote_partners(dispatch, Some(index));
+            }
+            ctl.trip_maxfail(run, states);
+        }
+    }
+    let s = &mut states[idx];
+    // Refill when half-drained. Threshold must never be 0: the
+    // worker HOLDS its last pending item (nextitem lookahead), so
+    // outstanding floors at 1 until refilled; a 0 threshold deadlocks.
+    if !ctl.stopping && s.outstanding.len() <= (chunk / 2).max(1) {
+        if let Some(d) = dispatch.as_mut() {
+            // An idle worker holds a lone new item (a rerun, the
+            // serial phase) for its successor: dispatch again, as
+            // when seeding, to send one or release it.
+            let idle = s.outstanding.is_empty();
+            dispatch_to(s, d, chunk, idx == ctl.designate)?;
+            if idle {
+                dispatch_to(s, d, chunk, idx == ctl.designate)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Seeding: any verified-collected worker is seeded once the dispatch
