@@ -1228,87 +1228,20 @@ pub fn run_pool(
             continue;
         }
 
-        // Seeding: any verified-collected worker is seeded once the dispatch
-        // queue exists. Two dispatches each: a worker only RUNS an item once it
-        // knows the successor, so a lone pending item never starts. During the
-        // initial round the second may wait until every worker has its first
-        // (see `seed_round_open`), so long poles, affinity groups and tiny
-        // suites spread one per worker instead of pairing up on the earliest.
         if let Some(d) = dispatch.as_mut() {
-            let chunk = chunk_size(total_items, states.len());
-            let mut unseeded = states.iter().filter(|s| !s.seeded && !s.dead).count();
-            for (i, s) in states
-                .iter_mut()
-                .enumerate()
-                .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
-            {
-                s.seeded = true;
-                unseeded -= 1;
-                if stopping {
-                    // Late collector during a global stop: end it cleanly.
-                    let _ = s.worker.send(&proto::Command::EndSession);
-                    s.ended = true;
-                    continue;
-                }
-                dispatch_to(s, d, chunk, i == designate)?;
-                if seed_round_open {
-                    seed_round_deadline
-                        .get_or_insert_with(|| std::time::Instant::now() + SEED_ROUND_WAIT);
-                }
-                if seed_round_open && !s.finishing && seed_defers_lookahead(d, chunk, unseeded) {
-                    s.awaiting_lookahead = true;
-                } else {
-                    dispatch_to(s, d, chunk, i == designate)?;
-                }
-            }
-            if seed_round_open
-                && seed_round_due(
-                    states.iter().map(|s| s.seeded || s.dead),
-                    seed_round_deadline,
-                    std::time::Instant::now(),
-                )
-            {
-                seed_round_open = false;
-                release_lookahead(&mut states, d, chunk, designate, stopping)?;
-            }
+            seed_new_workers(
+                d,
+                &mut states,
+                total_items,
+                designate,
+                stopping,
+                &mut seed_round_open,
+                &mut seed_round_deadline,
+            )?;
         }
 
-        // Requeued items (a rerun, or a stopped worker's leftovers) must also
-        // reach idle workers: a worker with nothing outstanding sends no
-        // ItemDone to refill on, so the queue would never drain and the run
-        // would hang. Two dispatches, as for the serial phase: the first item
-        // needs a successor or a NoMoreItems to start.
         if let Some(d) = dispatch.as_mut().filter(|_| !stopping) {
-            let chunk = chunk_size(total_items, states.len());
-            for (i, s) in states.iter_mut().enumerate() {
-                if d.requeued.is_empty() {
-                    break;
-                }
-                if s.seeded
-                    && !s.dead
-                    && !s.ended
-                    && !s.awaiting_lookahead
-                    && s.outstanding.is_empty()
-                {
-                    dispatch_to(s, d, chunk, i == designate)?;
-                    dispatch_to(s, d, chunk, i == designate)?;
-                }
-            }
-            // Items reclaimed from a worker that died for good have no
-            // replacement to seed, and an idle survivor sends no ItemDone to
-            // trigger a refill: kick it (twice, as when seeding, so a lone
-            // item is released). A busy survivor refills on its next ItemDone.
-            if !stopping && !d.requeued.is_empty() {
-                for (i, s) in states.iter_mut().enumerate() {
-                    if d.requeued.is_empty() {
-                        break;
-                    }
-                    if s.seeded && !s.dead && !s.ended && !s.stopped && s.outstanding.is_empty() {
-                        dispatch_to(s, d, chunk, i == designate)?;
-                        dispatch_to(s, d, chunk, i == designate)?;
-                    }
-                }
-            }
+            kick_idle_for_requeued(d, &mut states, total_items, designate)?;
         }
 
         if let Some(d) = dispatch.as_ref() {
@@ -1408,6 +1341,98 @@ pub fn run_pool(
         lazy: false,
         exiting,
     })
+}
+
+/// Seeding: any verified-collected worker is seeded once the dispatch
+/// queue exists. Two dispatches each: a worker only RUNS an item once it
+/// knows the successor, so a lone pending item never starts. During the
+/// initial round the second may wait until every worker has its first
+/// (see `seed_round_open`), so long poles, affinity groups and tiny
+/// suites spread one per worker instead of pairing up on the earliest.
+fn seed_new_workers(
+    d: &mut Dispatch,
+    states: &mut [WorkerState],
+    total_items: usize,
+    designate: usize,
+    stopping: bool,
+    seed_round_open: &mut bool,
+    seed_round_deadline: &mut Option<std::time::Instant>,
+) -> Result<()> {
+    let chunk = chunk_size(total_items, states.len());
+    let mut unseeded = states.iter().filter(|s| !s.seeded && !s.dead).count();
+    for (i, s) in states
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
+    {
+        s.seeded = true;
+        unseeded -= 1;
+        if stopping {
+            // Late collector during a global stop: end it cleanly.
+            let _ = s.worker.send(&proto::Command::EndSession);
+            s.ended = true;
+            continue;
+        }
+        dispatch_to(s, d, chunk, i == designate)?;
+        if *seed_round_open {
+            seed_round_deadline.get_or_insert_with(|| std::time::Instant::now() + SEED_ROUND_WAIT);
+        }
+        if *seed_round_open && !s.finishing && seed_defers_lookahead(d, chunk, unseeded) {
+            s.awaiting_lookahead = true;
+        } else {
+            dispatch_to(s, d, chunk, i == designate)?;
+        }
+    }
+    if *seed_round_open
+        && seed_round_due(
+            states.iter().map(|s| s.seeded || s.dead),
+            *seed_round_deadline,
+            std::time::Instant::now(),
+        )
+    {
+        *seed_round_open = false;
+        release_lookahead(states, d, chunk, designate, stopping)?;
+    }
+    Ok(())
+}
+
+/// Requeued items (a rerun, or a stopped worker's leftovers) must also
+/// reach idle workers: a worker with nothing outstanding sends no
+/// ItemDone to refill on, so the queue would never drain and the run
+/// would hang. Two dispatches, as for the serial phase: the first item
+/// needs a successor or a NoMoreItems to start. Callers skip this while the run is stopping.
+fn kick_idle_for_requeued(
+    d: &mut Dispatch,
+    states: &mut [WorkerState],
+    total_items: usize,
+    designate: usize,
+) -> Result<()> {
+    let chunk = chunk_size(total_items, states.len());
+    for (i, s) in states.iter_mut().enumerate() {
+        if d.requeued.is_empty() {
+            break;
+        }
+        if s.seeded && !s.dead && !s.ended && !s.awaiting_lookahead && s.outstanding.is_empty() {
+            dispatch_to(s, d, chunk, i == designate)?;
+            dispatch_to(s, d, chunk, i == designate)?;
+        }
+    }
+    // Items reclaimed from a worker that died for good have no
+    // replacement to seed, and an idle survivor sends no ItemDone to
+    // trigger a refill: kick it (twice, as when seeding, so a lone
+    // item is released). A busy survivor refills on its next ItemDone.
+    if !d.requeued.is_empty() {
+        for (i, s) in states.iter_mut().enumerate() {
+            if d.requeued.is_empty() {
+                break;
+            }
+            if s.seeded && !s.dead && !s.ended && !s.stopped && s.outstanding.is_empty() {
+                dispatch_to(s, d, chunk, i == designate)?;
+                dispatch_to(s, d, chunk, i == designate)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `--shard K/N`: this bucket's indices. Under an affinity dist mode the
