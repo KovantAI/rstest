@@ -24,7 +24,7 @@ use anyhow::Result;
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
-use crate::scheduling::orchestrator;
+use crate::scheduling::orchestrator::{self, Dedup};
 use crate::scheduling::pool::PoolOutcome;
 use crate::scheduling::proto::{self, Event};
 use crate::scheduling::worker::Worker;
@@ -357,40 +357,23 @@ pub fn run_lazy_pool(
                     orchestrator::stop_all(&mut states);
                 }
             }
-            Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
-            Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
-            Ok(Event::FixtureLeaks { leaks }) => run.add_fixture_leaks(leaks),
-            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
-            Ok(Event::JunitSuite {
-                name,
-                timestamp,
-                hostname,
-                properties,
-                extra,
-            }) => run
-                .junit
-                .record_suite(name, timestamp, hostname, properties, extra),
-            Ok(Event::Warnings { entries }) => {
-                // Files are disjoint across lazy workers, so collect and
-                // runtest warnings are each seen once; only config-phase
-                // warnings repeat per session - count those from gw0.
-                warnings.extend(
-                    entries
-                        .into_iter()
-                        .filter(|e| idx == 0 || e.when != "config"),
-                );
-            }
-            Ok(Event::CollectSkip { path }) => {
-                // A skipped directory (conftest `importorskip`) is reported
-                // again for every file below it, on whichever worker collects
-                // it: count each collector once, as directory collection does.
-                if collect_skipped.insert(path) {
-                    run.collect_skips += 1;
-                }
-            }
-            Ok(Event::LfRecollected { path, ids }) => {
-                run.lf_recollected.insert(path, ids);
-            }
+            Ok(e @ (Event::DoctorFixtures { .. }
+            | Event::ScopeCosts { .. }
+            | Event::FixtureLeaks { .. }
+            | Event::JunitCase { .. }
+            | Event::JunitSuite { .. }
+            | Event::Warnings { .. }
+            | Event::CollectSkip { .. }
+            | Event::LfRecollected { .. })) => orchestrator::fold_bookkeeping(
+                e,
+                Dedup::Lazy {
+                    idx,
+                    skipped: &mut collect_skipped,
+                },
+                &mut run,
+                &mut fixtures,
+                &mut warnings,
+            ),
             Ok(Event::LazyReady {
                 cache_dir: cd,
                 rootdir,

@@ -36,7 +36,7 @@ use anyhow::{bail, Result};
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
-use crate::scheduling::orchestrator;
+use crate::scheduling::orchestrator::{self, Dedup};
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
@@ -661,41 +661,20 @@ pub fn run_pool(
                     sink.emit_collect_error(&path, &longrepr);
                 }
             }
-            Ok(Event::DoctorFixtures { fixtures: fx }) => fixtures.extend(fx),
-            Ok(Event::ScopeCosts { costs }) => run.add_scope_costs(costs),
-            Ok(Event::FixtureLeaks { leaks }) => run.add_fixture_leaks(leaks),
-            Ok(Event::JunitCase { nodeid, cases }) => run.junit.record_case(nodeid, cases),
-            Ok(Event::JunitSuite {
-                name,
-                timestamp,
-                hostname,
-                properties,
-                extra,
-            }) => run
-                .junit
-                .record_suite(name, timestamp, hostname, properties, extra),
-            Ok(Event::Warnings { entries }) => {
-                // Per-test warnings are disjoint across workers; config and
-                // collection warnings repeat in every session, so count those
-                // from worker 0 only.
-                warnings.extend(
-                    entries
-                        .into_iter()
-                        .filter(|e| idx == 0 || e.when == "runtest"),
-                );
-            }
-            Ok(Event::CollectSkip { .. }) => {
-                // Counted once per skipped collector; workers all see the
-                // same skip (identical sessions) so attribute from worker 0
-                // only to avoid N-fold counting.
-                if idx == 0 {
-                    run.collect_skips += 1;
-                }
-            }
-            Ok(Event::LfRecollected { path, ids }) => {
-                // Every worker collects the same tree; the map dedups.
-                run.lf_recollected.insert(path, ids);
-            }
+            Ok(e @ (Event::DoctorFixtures { .. }
+            | Event::ScopeCosts { .. }
+            | Event::FixtureLeaks { .. }
+            | Event::JunitCase { .. }
+            | Event::JunitSuite { .. }
+            | Event::Warnings { .. }
+            | Event::CollectSkip { .. }
+            | Event::LfRecollected { .. })) => orchestrator::fold_bookkeeping(
+                e,
+                Dedup::Eager { idx },
+                &mut run,
+                &mut fixtures,
+                &mut warnings,
+            ),
             Ok(Event::CollectionDone {
                 count,
                 hash,
