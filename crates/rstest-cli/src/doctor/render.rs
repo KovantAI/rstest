@@ -42,6 +42,30 @@ fn fixture_advice(f: &FixtureEntry) -> FixtureAdvice {
     }
 }
 
+/// Fixtures worth a hotspot row: at least 0.5s in total, first 8.
+fn hotspot_fixtures(r: &DoctorReport) -> Vec<&FixtureEntry> {
+    r.fixtures
+        .iter()
+        .filter(|f| f.total_seconds >= 0.5)
+        .take(8)
+        .collect()
+}
+
+/// Verified value-constant fixtures, biggest projected saving first; listed
+/// even below the hotspot threshold.
+fn promotion_candidates(r: &DoctorReport) -> Vec<&FixtureEntry> {
+    let mut candidates: Vec<&FixtureEntry> = r
+        .fixtures
+        .iter()
+        .filter(|f| is_promotion_candidate(f))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.projected_saving_seconds
+            .total_cmp(&a.projected_saving_seconds)
+    });
+    candidates
+}
+
 /// The doctor analysis as GitHub-flavored markdown, shaped for a job
 /// summary: same signals as the terminal report, tables instead of
 /// aligned columns.
@@ -130,12 +154,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         }
     }
 
-    let interesting: Vec<&FixtureEntry> = r
-        .fixtures
-        .iter()
-        .filter(|f| f.total_seconds >= 0.5)
-        .take(8)
-        .collect();
+    let interesting = hotspot_fixtures(r);
     if !interesting.is_empty() {
         let _ = writeln!(md, "### Fixture hotspots ({})\n", fixture_time_label(r));
         md.push_str("| Fixture | Scope | Runs | Total | |\n|---|---|---:|---:|---|\n");
@@ -162,15 +181,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md.push('\n');
     }
 
-    let mut candidates: Vec<&FixtureEntry> = r
-        .fixtures
-        .iter()
-        .filter(|f| is_promotion_candidate(f))
-        .collect();
-    candidates.sort_by(|a, b| {
-        b.projected_saving_seconds
-            .total_cmp(&a.projected_saving_seconds)
-    });
+    let candidates = promotion_candidates(r);
     if !candidates.is_empty() {
         md.push_str("### Scope-promotion candidates\n\n");
         md.push_str(
@@ -470,12 +481,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         ));
     }
 
-    let interesting: Vec<&FixtureEntry> = r
-        .fixtures
-        .iter()
-        .filter(|f| f.total_seconds >= 0.5)
-        .take(8)
-        .collect();
+    let interesting = hotspot_fixtures(r);
     if !interesting.is_empty() {
         sink.out_line(&format!("\nFIXTURE HOTSPOTS ({}):", fixture_time_label(r)));
         for f in interesting {
@@ -499,17 +505,7 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         }
     }
 
-    // Scope-promotion advisor: candidates verified value-constant, listed even
-    // when below the hotspot threshold, sorted by projected saving.
-    let mut candidates: Vec<&FixtureEntry> = r
-        .fixtures
-        .iter()
-        .filter(|f| is_promotion_candidate(f))
-        .collect();
-    candidates.sort_by(|a, b| {
-        b.projected_saving_seconds
-            .total_cmp(&a.projected_saving_seconds)
-    });
+    let candidates = promotion_candidates(r);
     if !candidates.is_empty() {
         sink.out_line(
             "\nSCOPE-PROMOTION CANDIDATES (same value every call; promote to session scope):",
@@ -722,7 +718,7 @@ fn plural(n: i64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::report;
+    use super::super::tests::testutil::report;
     use super::*;
 
     #[test]

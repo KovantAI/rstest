@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::explain::{ago, glyph, median};
-use crate::reporting::history::{Entry, History, RunMeta};
+use crate::reporting::history::{is_fail, is_pass, Entry, History, RunMeta};
 use crate::reporting::html::{esc, CSS};
 use crate::reporting::sink::Sink;
 
@@ -26,14 +26,6 @@ pub const FILE: &str = "report.html";
 const TOP: usize = 20;
 /// Outcomes per test in the flaky table's strip.
 const STRIP: usize = 20;
-
-fn is_fail(o: &str) -> bool {
-    matches!(o, "failed" | "errors" | "crashed" | "quarantined")
-}
-
-fn is_pass(o: &str) -> bool {
-    matches!(o, "passed" | "flaky")
-}
 
 /// One recorded run, from the entries that still point at it.
 #[derive(Debug, PartialEq)]
