@@ -19,6 +19,7 @@ use crate::cli::{
 };
 use crate::reporting::sink::Sink;
 use crate::reporting::{color, flakes, progress, report};
+use crate::scheduling::orchestrator::{self, Dedup};
 use crate::scheduling::{durations, lazy, pool, proto, shard, warm, worker};
 use crate::{
     collect, config, cov_scope, coverage_skip, discover, doctor, incremental, migrate, mono,
@@ -3135,28 +3136,15 @@ fn fold_run_event(
             run.collect_error(path, longrepr);
             None
         }
-        proto::Event::CollectSkip { .. } => {
-            run.collect_skips += 1;
-            None
-        }
-        proto::Event::LfRecollected { path, ids } => {
-            run.lf_recollected.insert(path, ids);
-            None
-        }
-        proto::Event::DoctorFixtures { fixtures: fx } => {
-            fixtures.extend(fx);
-            None
-        }
-        proto::Event::ScopeCosts { costs } => {
-            run.add_scope_costs(costs);
-            None
-        }
-        proto::Event::FixtureLeaks { leaks } => {
-            run.add_fixture_leaks(leaks);
-            None
-        }
-        proto::Event::Warnings { entries } => {
-            warnings.extend(entries);
+        e @ (proto::Event::DoctorFixtures { .. }
+        | proto::Event::ScopeCosts { .. }
+        | proto::Event::FixtureLeaks { .. }
+        | proto::Event::JunitCase { .. }
+        | proto::Event::JunitSuite { .. }
+        | proto::Event::Warnings { .. }
+        | proto::Event::CollectSkip { .. }
+        | proto::Event::LfRecollected { .. }) => {
+            orchestrator::fold_bookkeeping(e, Dedup::Single, run, fixtures, warnings);
             None
         }
         proto::Event::CollectionDone {
@@ -3183,21 +3171,6 @@ fn fold_run_event(
         | proto::Event::StoppedIds { .. }
         // Read by the dispatch loop (`SingleWorkerInterrupts`).
         | proto::Event::Interrupted {} => None,
-        proto::Event::JunitCase { nodeid, cases } => {
-            run.junit.record_case(nodeid, cases);
-            None
-        }
-        proto::Event::JunitSuite {
-            name,
-            timestamp,
-            hostname,
-            properties,
-            extra,
-        } => {
-            run.junit
-                .record_suite(name, timestamp, hostname, properties, extra);
-            None
-        }
         proto::Event::Done { exitstatus, .. } => Some(exitstatus),
     }
 }
