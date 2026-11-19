@@ -80,7 +80,7 @@ import tomllib
 
 # Executed as `python corpus/bench.py`, so this dir is on sys.path and the
 # corpus machinery (Suite/prepare/diff) imports directly — no duplication.
-from procmem import linear_fit, run_measured, suspended
+from procmem import linear_fit, require_psutil, run_measured, suspended
 from run import HERE, PYTEST_PIN, REPO, Suite, diff, log
 
 BENCH = HERE / "bench.json"
@@ -714,6 +714,8 @@ def main():
         help="hard gate: fail if any measured suite's parity is below this",
     )
     args = ap.parse_args()
+    if args.memory:
+        require_psutil()  # before the spectrum: the memory phase runs last
     global COLD
     COLD = args.cold
     if args.xdist_dist:

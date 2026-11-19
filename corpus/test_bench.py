@@ -430,6 +430,37 @@ def test_suspended_ignores_clock_noise():
     assert suspended(85.3, 85.0) is False
 
 
+def test_memory_sampling_without_psutil_exits(tmp_path, monkeypatch):
+    # R60: without psutil a sampled run returned peak_tree_rss None and the
+    # bench still exited 0, publishing a memory table with no tree totals.
+    import procmem
+    import pytest
+
+    monkeypatch.setattr(procmem, "psutil", None)
+    with pytest.raises(SystemExit, match="needs psutil"):
+        procmem.run_measured([sys.executable, "-c", "pass"], tmp_path, sample=0.1)
+    # Timing alone never needs it.
+    assert procmem.run_measured([sys.executable, "-c", "pass"], tmp_path)["rc"] == 0
+
+
+def test_bench_memory_without_psutil_exits_before_any_run(tmp_path, monkeypatch):
+    # The memory phase runs after the spectrum and sweeps: the check must come
+    # first, not hours in.
+    import bench
+    import procmem
+    import pytest
+
+    def ran(*a, **k):
+        raise AssertionError("a timed run started")
+
+    monkeypatch.setattr(procmem, "psutil", None)
+    monkeypatch.setattr(bench, "bench_suite", ran)
+    with pytest.raises(SystemExit, match="needs psutil"):
+        _run_main(
+            tmp_path, monkeypatch, ["--only", "fastapi", "--sweep", "", "--memory", "fastapi"]
+        )
+
+
 # ---- Suite command lines -------------------------------------------------------
 
 

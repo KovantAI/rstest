@@ -51,7 +51,7 @@ REPO = HERE.parent.parent
 CORPUS = REPO / "corpus"
 sys.path.insert(0, str(CORPUS))
 
-from procmem import linear_fit, run_measured  # noqa: E402
+from procmem import linear_fit, require_psutil, run_measured  # noqa: E402
 from run import diff  # noqa: E402  # the corpus parity diff, unchanged
 
 CACHE = HERE / ".rstest_cache"
@@ -487,6 +487,8 @@ def main():
     ap.add_argument("--strict-load", action="store_true", help="refuse to run above --max-load")
     ap.add_argument("--json", type=Path, default=RESULTS, help="raw results file")
     args = ap.parse_args()
+    if args.memory:
+        require_psutil()
 
     if args.workers is None:
         if args.max_workers:
