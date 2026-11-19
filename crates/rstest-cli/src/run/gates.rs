@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 use super::{PostRun, RunConfig};
 use crate::cli::Cli;
+use crate::reporting::absorbed::{self, AbsorbedWait};
 use crate::reporting::ci::{
     buildkite_flaky_annotate, print_azure_annotations, print_github_annotations,
 };
@@ -524,6 +525,7 @@ pub(super) fn run_post_gates(
     if !passthrough && has_cov {
         (exitstatus, fresh_index) = gate_coverage(cfg, cli, post, outcome, args, want_diff, sink);
     }
+    let culprits = absorbed_waits(&mut outcome.run, &mut history, post.run_uid, want_doctor);
     let doctor_gate_failed = want_doctor
         && gate_doctor(
             cfg,
@@ -532,6 +534,7 @@ pub(super) fn run_post_gates(
             suite_wall,
             fresh_index,
             &mut history,
+            &culprits,
             sink,
         )?;
     if gate_leaks(cfg, cli, outcome, sink) && exitstatus == 0 {
@@ -690,8 +693,36 @@ fn gate_coverage(
     (exitstatus, fresh_index)
 }
 
+/// Absorbed-wait culprits from the run history and the replay journals, and
+/// the tests in this run that carried one's wait, marked on the run so the
+/// duration cache learns their fast time and `--durations-regress` skips them.
+/// Read only when the doctor reports them or this run wrote a journal.
+fn absorbed_waits(
+    run: &mut report::Run,
+    history: &mut history::RunHistory,
+    run_uid: &str,
+    want_doctor: bool,
+) -> Vec<AbsorbedWait> {
+    let orders = crate::replay::recent_orders();
+    let this_run = orders.get(run_uid);
+    if this_run.is_none() && !want_doctor {
+        return Vec::new();
+    }
+    let culprits = absorbed::absorbed_waits(history.get(), &orders);
+    if let Some(order) = this_run {
+        let calls: std::collections::HashMap<&str, f64> =
+            run.durations().map(|(id, d)| (id.as_str(), d)).collect();
+        let carried = absorbed::absorbed_in_run(history.get(), &culprits, order, &calls);
+        for (test, culprit, fast) in carried {
+            run.mark_absorbed(&test, &culprit, fast);
+        }
+    }
+    culprits
+}
+
 /// The doctor report (`--doctor`, `--doctor-json`, `--doctor-md`, the CI
 /// summary) and the `--doctor-fail-on` gate. Returns whether the gate breached.
+#[allow(clippy::too_many_arguments)]
 fn gate_doctor(
     cfg: &RunConfig,
     cli: &Cli,
@@ -699,6 +730,7 @@ fn gate_doctor(
     suite_wall: f64,
     fresh_index: bool,
     history: &mut history::RunHistory,
+    culprits: &[AbsorbedWait],
     sink: &mut Sink,
 ) -> Result<bool> {
     let RunConfig {
@@ -730,7 +762,7 @@ fn gate_doctor(
         coverage_index.as_ref().zip(project.as_ref()),
     )
     .with_history(&outcome.run, history.get())
-    .with_absorbed(&outcome.run, history.get(), &crate::replay::recent_orders())
+    .with_absorbed(&outcome.run, culprits)
     .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
     .with_warm(outcome.warm.clone());
     // In json mode stdout is a pure NDJSON stream, so the doctor's human
@@ -861,6 +893,18 @@ fn gate_durations_regress(
     sink: &mut Sink,
 ) -> usize {
     let palette = sink.palette();
+    let absorbed: Vec<String> = run
+        .absorbed()
+        .map(|(test, culprit)| format!("{test} (after {culprit})"))
+        .collect();
+    if !absorbed.is_empty() {
+        sink.warn(&format!(
+            "rstest: --durations-regress: not judging {} test(s) that waited out work the test \
+             before them left running: {}",
+            absorbed.len(),
+            absorbed.join(", ")
+        ));
+    }
     let baseline = durations::load_baseline();
     if baseline.is_empty() {
         sink.warn(

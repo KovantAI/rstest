@@ -60,6 +60,15 @@ part of a test's duration. A function fixture that went from 0.1s to 2s does
 not trip this gate; the suite-level gate below catches that. Tests with no
 baseline entry (new or renamed) are skipped, never flagged.
 
+A test that ran right after one the doctor lists under
+[ABSORBED WAITS](doctor.md#absorbed-waits), and was slow by that test's
+leftover wait, is not judged either: the wait was not its own. rstest names
+it on stderr and caches the test's fastest recorded time instead:
+
+```text
+rstest: --durations-regress: not judging 1 test(s) that waited out work the test before them left running: tests/test_api.py::test_list (after tests/test_api.py::test_timeout)
+```
+
 ## Where the baseline comes from
 
 Two files under `.rstest_cache/` feed it:

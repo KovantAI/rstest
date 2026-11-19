@@ -370,6 +370,13 @@ is merely noisy doesn't qualify: its slow runs don't keep following the same
 test. Only parallel runs (`-n 2` or more) write journals, so a suite run
 single-worker only never shows this section. Top 10, largest lump first.
 
+Once a test is listed, a parallel run also corrects for it, with or without
+`--doctor`: a test that ran right after it on the same worker and carried the
+wait has its fastest recorded time saved to the duration cache (so the next
+run doesn't schedule it as a long pole), and
+[`--durations-regress`](slowdowns.md#what-counts-as-a-regression) doesn't
+judge it. The run history keeps the real time.
+
 ### startup
 
 A one-line summary under the header reports how long spawning the worker pool

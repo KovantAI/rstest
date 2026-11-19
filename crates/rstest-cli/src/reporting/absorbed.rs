@@ -46,18 +46,7 @@ pub fn absorbed_waits(
     history: &History,
     orders: &HashMap<String, Vec<Vec<String>>>,
 ) -> Vec<AbsorbedWait> {
-    let fastest: HashMap<&str, f64> = history
-        .tests
-        .iter()
-        .filter_map(|(id, entries)| {
-            entries
-                .iter()
-                .filter(|e| is_pass(e.outcome_name()))
-                .filter_map(|e| e.call.map(f64::from))
-                .min_by(f64::total_cmp)
-                .map(|m| (id.as_str(), m))
-        })
-        .collect();
+    let fastest = fastest(history);
 
     #[derive(Default)]
     struct Seen<'a> {
@@ -83,7 +72,7 @@ pub fn absorbed_waits(
             };
             let s = seen.entry(culprit).or_default();
             s.of_runs += 1;
-            if call - fast >= LUMP_MIN_SECONDS && call >= LUMP_FACTOR * fast {
+            if is_lump(call, fast) {
                 s.lumps.push(call - fast);
                 s.victims.push((run.epoch, next));
             }
@@ -117,6 +106,52 @@ pub fn absorbed_waits(
             .then_with(|| a.culprit.cmp(&b.culprit))
     });
     out
+}
+
+/// This run's tests that sat right after a known culprit on their worker and
+/// carried its wait: (test, culprit, the test's fastest recorded passing
+/// call). `order` is this run's per-worker order; `calls` its call times.
+pub fn absorbed_in_run(
+    history: &History,
+    culprits: &[AbsorbedWait],
+    order: &[Vec<String>],
+    calls: &HashMap<&str, f64>,
+) -> Vec<(String, String, f64)> {
+    if culprits.is_empty() {
+        return Vec::new();
+    }
+    let fastest = fastest(history);
+    order
+        .iter()
+        .flat_map(|w| w.windows(2))
+        .filter(|pair| culprits.iter().any(|c| c.culprit == pair[0]))
+        .filter_map(|pair| {
+            let next = pair[1].as_str();
+            let (&call, &fast) = (calls.get(next)?, fastest.get(next)?);
+            is_lump(call, fast).then(|| (next.to_string(), pair[0].clone(), fast))
+        })
+        .collect()
+}
+
+/// Each test's fastest recorded passing call.
+fn fastest(history: &History) -> HashMap<&str, f64> {
+    history
+        .tests
+        .iter()
+        .filter_map(|(id, entries)| {
+            entries
+                .iter()
+                .filter(|e| is_pass(e.outcome_name()))
+                .filter_map(|e| e.call.map(f64::from))
+                .min_by(f64::total_cmp)
+                .map(|m| (id.as_str(), m))
+        })
+        .collect()
+}
+
+/// Whether a call time carries a lump over the test's fastest one.
+fn is_lump(call: f64, fast: f64) -> bool {
+    call - fast >= LUMP_MIN_SECONDS && call >= LUMP_FACTOR * fast
 }
 
 /// Median of an ascending, non-empty slice.
@@ -207,6 +242,38 @@ mod tests {
         assert!((w.lump_seconds - 9.98).abs() < 0.01, "{w:?}");
         // Most recent first.
         assert_eq!(w.absorbed_by, ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn marks_this_runs_test_that_followed_a_culprit() {
+        let h = history(
+            2,
+            &[
+                ("timeout", &[Some(0.1), Some(0.1)]),
+                ("a", &[Some(0.25), Some(0.25)]),
+                ("b", &[Some(0.03), Some(0.03)]),
+            ],
+        );
+        let culprits = [AbsorbedWait {
+            culprit: "timeout".into(),
+            lump_seconds: 10.0,
+            runs: 3,
+            of_runs: 3,
+            absorbed_by: Vec::new(),
+        }];
+        let order: Vec<Vec<String>> = vec![
+            vec!["timeout".into(), "a".into()],
+            vec!["x".into(), "b".into()],
+        ];
+        // Both slow; only `a` sat right after the culprit.
+        let calls = HashMap::from([("a", 10.0), ("b", 10.0), ("timeout", 0.1)]);
+        assert_eq!(
+            absorbed_in_run(&h, &culprits, &order, &calls),
+            [("a".to_string(), "timeout".to_string(), 0.25)]
+        );
+        // Fast this time: nothing absorbed.
+        let calls = HashMap::from([("a", 0.3)]);
+        assert_eq!(absorbed_in_run(&h, &culprits, &order, &calls), []);
     }
 
     #[test]

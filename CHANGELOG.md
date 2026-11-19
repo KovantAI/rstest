@@ -15,7 +15,11 @@ between 0.x releases and are listed here.
   `--doctor-json` as `absorbed_waits`, and in the markdown report) names the
   test that leaves the wait, its typical size, and the tests that absorbed
   it, from the run history and the replay journals of recent parallel runs.
-  See [Doctor: absorbed waits](docs/guides/doctor.md#absorbed-waits).
+  A test that carried such a wait no longer pays for it later: its fastest
+  recorded time goes to the duration cache, so the next run doesn't schedule
+  it as a long pole, and `--durations-regress` doesn't judge it (it says so
+  on stderr). See
+  [Doctor: absorbed waits](docs/guides/doctor.md#absorbed-waits).
 
 ### Fixes
 

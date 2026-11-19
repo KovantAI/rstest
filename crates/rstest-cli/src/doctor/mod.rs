@@ -448,18 +448,17 @@ impl DoctorReport {
         self
     }
 
-    /// Add the tests in this run whose follower absorbs a wait they leave
-    /// ([`crate::reporting::absorbed`]). `orders`: the replay journals' per-worker
-    /// order, by run uid.
+    /// Add the `culprits` in this run: tests whose follower absorbs a wait they
+    /// leave ([`crate::reporting::absorbed`]).
     pub fn with_absorbed(
         mut self,
         run: &Run,
-        history: &crate::reporting::history::History,
-        orders: &std::collections::HashMap<String, Vec<Vec<String>>>,
+        culprits: &[crate::reporting::absorbed::AbsorbedWait],
     ) -> Self {
-        self.absorbed_waits = crate::reporting::absorbed::absorbed_waits(history, orders)
-            .into_iter()
+        self.absorbed_waits = culprits
+            .iter()
             .filter(|w| run.tests().contains_key(&w.culprit))
+            .cloned()
             .collect();
         self
     }
