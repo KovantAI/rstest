@@ -3,6 +3,16 @@
 All notable changes to rstest. Pre-1.0: minor behavior changes may occur
 between 0.x releases and are listed here.
 
+## Unreleased
+
+### Fixes
+
+- **The doctor's markdown report says when a list was cut.** The GitHub job
+  summary, the Buildkite annotation and `--doctor-md` now end a shortened
+  table with `... and N more`, as the terminal report does, for worker load,
+  coverage waste, timeouts, duration drift, network access and resource
+  leaks. Before, a reader couldn't tell that rows were missing.
+
 ## 0.12.0 (2026-11-18)
 
 ### Features
