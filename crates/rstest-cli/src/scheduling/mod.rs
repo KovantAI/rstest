@@ -12,6 +12,7 @@ pub mod memory;
 pub(crate) mod orchestrator;
 pub mod pool;
 pub mod proto;
+pub(crate) mod reruns;
 pub mod shard;
 pub mod warm;
 pub mod worker;
