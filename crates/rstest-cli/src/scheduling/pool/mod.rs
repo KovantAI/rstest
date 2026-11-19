@@ -28,7 +28,7 @@ mod state;
 
 pub(crate) use dispatch::chunk_size;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -41,7 +41,7 @@ use crate::scheduling::orchestrator::{self, Dedup};
 use crate::scheduling::proto::{self, Event};
 
 use dispatch::{build_dispatch, Dispatch};
-use io::{dispatch_to, feed, release_lookahead, seed_list, spawn_into, start_into};
+use io::{dispatch_to, feed, release_lookahead, seed_each, spawn_into, start_into};
 use replay::{seed_replay, ReplayState};
 use state::WorkerState;
 
@@ -711,52 +711,7 @@ pub fn run_pool(
                         // the rest. Under an affinity dist mode we partition at
                         // group granularity so a group is never split (its contract).
                         let keep = shard.map(|(k, total)| {
-                            let idx = match dist {
-                                Dist::Loadfile | Dist::Loadscope => {
-                                    let keys: Vec<Option<String>> = ids
-                                        .iter()
-                                        .map(|id| {
-                                            Some(match dist {
-                                                Dist::Loadfile => {
-                                                    id.split("::").next().unwrap_or(id).to_string()
-                                                }
-                                                _ => id
-                                                    .rsplit_once("::")
-                                                    .map(|(head, _)| head)
-                                                    .unwrap_or(id)
-                                                    .to_string(),
-                                            })
-                                        })
-                                        .collect();
-                                    crate::scheduling::shard::shard_groups(
-                                        &ids,
-                                        &keys,
-                                        &duration_cache,
-                                        k,
-                                        total,
-                                    )
-                                }
-                                Dist::Loadgroup => {
-                                    let g = groups.as_ref();
-                                    let keys: Vec<Option<String>> = (0..ids.len())
-                                        .map(|i| g.and_then(|m| m.get(&i.to_string()).cloned()))
-                                        .collect();
-                                    crate::scheduling::shard::shard_groups(
-                                        &ids,
-                                        &keys,
-                                        &duration_cache,
-                                        k,
-                                        total,
-                                    )
-                                }
-                                // Load has no affinity: per-test split is fine.
-                                _ => crate::scheduling::shard::shard_indices(
-                                    &ids,
-                                    &duration_cache,
-                                    k,
-                                    total,
-                                ),
-                            };
+                            let idx = shard_partition(&ids, groups.as_ref(), dist, &duration_cache, k, total);
                             sink.warn(&format!(
                                 "rstest: shard {k}/{total} -> {} of {} test(s)",
                                 idx.len(),
@@ -799,16 +754,7 @@ pub fn run_pool(
                         let keep = match budget {
                             None => keep,
                             Some(b) => {
-                                let cost = ids
-                                    .iter()
-                                    .filter_map(|id| {
-                                        let call = duration_cache.get(id).copied();
-                                        let setup = b.setup.get(id).copied();
-                                        (call.is_some() || setup.is_some()).then(|| {
-                                            (id.clone(), call.unwrap_or(0.0) + setup.unwrap_or(0.0))
-                                        })
-                                    })
-                                    .collect();
+                                let cost = budget_costs(&ids, &duration_cache, b);
                                 let spent = spawn_start.elapsed().as_secs_f64();
                                 let in_keep = |i: u64| keep.as_ref().is_none_or(|k| k.contains(&i));
                                 let pick = crate::scheduling::durations::budget_select(
@@ -1193,32 +1139,7 @@ pub fn run_pool(
             }
         }
 
-        // Crash cleanup: hand each dead worker's workerinput to the lowest
-        // surviving worker so its conftest's pytest_testnodedown runs with the
-        // right idents (best-effort; a second crash mid-pipe loses it).
-        while let Some((winput, error)) = pending_downs.pop_front() {
-            match states.iter_mut().find(|s| !s.dead && !s.ended) {
-                Some(s) => {
-                    // Best-effort: the chosen worker may itself be dying (crash
-                    // event not yet processed). Re-queue and retry next event;
-                    // its death marks it dead and routing moves on.
-                    if let Err(_e) = s.worker.send(&proto::Command::NodeDown {
-                        workerinput: winput.clone(),
-                        error: error.clone(),
-                    }) {
-                        pending_downs.push_front((winput, error));
-                        break;
-                    }
-                }
-                None => {
-                    sink.warn(
-                        "rstest: no surviving worker to run pytest_testnodedown \
-                         for a crashed worker; per-worker resources may leak",
-                    );
-                    break;
-                }
-            }
-        }
+        hand_off_node_downs(&mut pending_downs, &mut states, sink);
 
         // If the designated id-carrier died before delivering ids, fall
         // back to identity order rather than stalling. Serial marks are
@@ -1296,37 +1217,14 @@ pub fn run_pool(
             // Wait for the designate's id list (unless it died without one):
             // a crash report needs it to name the test, and the id list can
             // lag another worker's CollectionDone.
-            if reference.is_some() && (ids_store.is_some() || states[0].dead) {
-                for (i, s) in states
-                    .iter_mut()
-                    .enumerate()
-                    .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
-                {
-                    s.seeded = true;
-                    if stopping {
-                        let _ = s.worker.send(&proto::Command::EndSession);
-                        s.ended = true;
-                        continue;
-                    }
-                    let indices: Vec<u64> = match each_remnant[i].take() {
-                        Some(rem) => rem,
-                        None => (0..total_items as u64).collect(),
-                    };
-                    // Fed in chunks, released once all are sent. A dying
-                    // worker's crash event re-seeds the remnant.
-                    seed_list(s, indices);
-                }
-            }
-            if stopping {
-                states.iter_mut().for_each(|s| feed(s, true));
-            }
-            for s in states
-                .iter_mut()
-                .filter(|s| s.seeded && !s.dead && !s.ended && s.outstanding.is_empty())
-            {
-                let _ = s.worker.send(&proto::Command::EndSession);
-                s.ended = true;
-            }
+            let ids_ready = reference.is_some() && (ids_store.is_some() || states[0].dead);
+            seed_each(
+                &mut states,
+                &mut each_remnant,
+                total_items,
+                ids_ready,
+                stopping,
+            );
             continue;
         }
 
@@ -1413,29 +1311,8 @@ pub fn run_pool(
             }
         }
 
-        // Session lifecycle: workers stay alive after draining so failed items
-        // can rerun anywhere. EndSession goes out only when every outcome is
-        // final (or the parallel portion is, for the serial phase wind-down).
         if let Some(d) = dispatch.as_ref() {
-            let in_flight = states.iter().any(|s| !s.dead && !s.outstanding.is_empty());
-            let parallel_resolved = if stopping {
-                !in_flight
-            } else {
-                d.cursor == d.order.len() && d.requeued.is_empty() && !in_flight
-            };
-            if parallel_resolved {
-                let serial_pending = !stopping && !d.serial.is_empty();
-                for (i, s) in states.iter_mut().enumerate() {
-                    if s.dead || s.ended || !s.seeded {
-                        continue;
-                    }
-                    if serial_pending && i == designate {
-                        continue; // held open to host the serial phase
-                    }
-                    let _ = s.worker.send(&proto::Command::EndSession);
-                    s.ended = true;
-                }
-            }
+            end_drained_sessions(d, &mut states, designate, stopping);
         }
     }
 
@@ -1531,6 +1408,125 @@ pub fn run_pool(
         lazy: false,
         exiting,
     })
+}
+
+/// `--shard K/N`: this bucket's indices. Under an affinity dist mode the
+/// partition is at group granularity, so a group is never split (its
+/// contract); `--dist load` splits per test.
+fn shard_partition(
+    ids: &[String],
+    groups: Option<&HashMap<String, String>>,
+    dist: Dist,
+    duration_cache: &HashMap<String, f64>,
+    k: usize,
+    total: usize,
+) -> Vec<u64> {
+    match dist {
+        Dist::Loadfile | Dist::Loadscope => {
+            let keys: Vec<Option<String>> = ids
+                .iter()
+                .map(|id| {
+                    Some(match dist {
+                        Dist::Loadfile => id.split("::").next().unwrap_or(id).to_string(),
+                        _ => id
+                            .rsplit_once("::")
+                            .map(|(head, _)| head)
+                            .unwrap_or(id)
+                            .to_string(),
+                    })
+                })
+                .collect();
+            crate::scheduling::shard::shard_groups(ids, &keys, duration_cache, k, total)
+        }
+        Dist::Loadgroup => {
+            let keys: Vec<Option<String>> = (0..ids.len())
+                .map(|i| groups.and_then(|m| m.get(&i.to_string()).cloned()))
+                .collect();
+            crate::scheduling::shard::shard_groups(ids, &keys, duration_cache, k, total)
+        }
+        // Load has no affinity: per-test split is fine.
+        _ => crate::scheduling::shard::shard_indices(ids, duration_cache, k, total),
+    }
+}
+
+/// `--budget`: each test's known cost, its cached call time plus its setup
+/// time. Tests with neither are left out (unknown cost).
+fn budget_costs(
+    ids: &[String],
+    duration_cache: &HashMap<String, f64>,
+    b: &Budget,
+) -> HashMap<String, f64> {
+    ids.iter()
+        .filter_map(|id| {
+            let call = duration_cache.get(id).copied();
+            let setup = b.setup.get(id).copied();
+            (call.is_some() || setup.is_some())
+                .then(|| (id.clone(), call.unwrap_or(0.0) + setup.unwrap_or(0.0)))
+        })
+        .collect()
+}
+
+/// Crash cleanup: hand each dead worker's workerinput to the lowest
+/// surviving worker so its conftest's pytest_testnodedown runs with the
+/// right idents (best-effort; a second crash mid-pipe loses it).
+fn hand_off_node_downs(
+    pending_downs: &mut VecDeque<(serde_json::Value, String)>,
+    states: &mut [WorkerState],
+    sink: &mut Sink,
+) {
+    while let Some((winput, error)) = pending_downs.pop_front() {
+        match states.iter_mut().find(|s| !s.dead && !s.ended) {
+            Some(s) => {
+                // Best-effort: the chosen worker may itself be dying (crash
+                // event not yet processed). Re-queue and retry next event;
+                // its death marks it dead and routing moves on.
+                if let Err(_e) = s.worker.send(&proto::Command::NodeDown {
+                    workerinput: winput.clone(),
+                    error: error.clone(),
+                }) {
+                    pending_downs.push_front((winput, error));
+                    break;
+                }
+            }
+            None => {
+                sink.warn(
+                    "rstest: no surviving worker to run pytest_testnodedown \
+                     for a crashed worker; per-worker resources may leak",
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Session lifecycle: workers stay alive after draining so failed items
+/// can rerun anywhere. EndSession goes out only when every outcome is
+/// final (or the parallel portion is, for the serial phase wind-down).
+fn end_drained_sessions(
+    d: &Dispatch,
+    states: &mut [WorkerState],
+    designate: usize,
+    stopping: bool,
+) {
+    let in_flight = states.iter().any(|s| !s.dead && !s.outstanding.is_empty());
+    let parallel_resolved = if stopping {
+        !in_flight
+    } else {
+        d.cursor == d.order.len() && d.requeued.is_empty() && !in_flight
+    };
+    if parallel_resolved {
+        let serial_pending = !stopping && !d.serial.is_empty();
+        for (i, s) in states.iter_mut().enumerate() {
+            if s.dead || s.ended || !s.seeded {
+                continue;
+            }
+            if serial_pending && i == designate {
+                continue; // held open to host the serial phase
+            }
+            let _ = s.worker.send(&proto::Command::EndSession);
+            s.ended = true;
+        }
+    }
 }
 
 /// pytest exit codes: 0 ok, 1 tests failed, 2 interrupted, 3 internal error,
