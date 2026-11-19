@@ -36,6 +36,12 @@ pub struct CoverageIndex {
     /// relative file path -> per-file coverage entry (hash + line map)
     #[serde(default)]
     pub files: HashMap<String, CoverageFile>,
+    /// relative file path -> lines that ran outside every test's own call
+    /// phase (import time, fixture setup/teardown). Read by `--incremental`'s
+    /// import-closure hash ([`crate::coverage_skip`]); deliberately apart from
+    /// `files`, so a file listed only here does not look covered.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub shared_lines: HashMap<String, Vec<u32>>,
 }
 
 /// Load the coverage index from the cache dir (honors `RSTEST_CACHE`), or `None`
@@ -304,6 +310,7 @@ mod tests {
     /// A warm (schema-current) index from `file -> (hash, [(line, [nodeids])])`.
     fn cov_index(files: &[FileSpec]) -> CoverageIndex {
         let mut idx = CoverageIndex {
+            shared_lines: Default::default(),
             schema: COVERAGE_INDEX_SCHEMA,
             files: HashMap::new(),
         };
@@ -427,6 +434,7 @@ mod tests {
         let cache_dir = root.join("cache");
         std::fs::create_dir_all(&cache_dir).unwrap();
         let index = CoverageIndex {
+            shared_lines: Default::default(),
             schema: COVERAGE_INDEX_SCHEMA,
             files: Default::default(),
         };

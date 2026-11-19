@@ -13,6 +13,7 @@ type FileSpec<'a> = (&'a str, &'a str, &'a [LineSpec<'a>]);
 
 fn index(files: &[FileSpec]) -> CoverageIndex {
     let mut idx = CoverageIndex {
+        shared_lines: Default::default(),
         schema: 0,
         files: HashMap::new(),
     };
@@ -73,14 +74,14 @@ fn changed_import_closure_file_is_not_skippable() {
             )
         }
     };
-    assert!(skippable(&idx, &b, live("C")).contains("t.py::test_a"));
-    assert!(skippable(&idx, &b, live("EDITED")).is_empty());
+    assert!(skippable(&idx, &b, live("C"), live("C")).contains("t.py::test_a"));
+    assert!(skippable(&idx, &b, live("EDITED"), live("EDITED")).is_empty());
     // No recorded hash for a closure file: nothing vouches for it.
     b.import_hashes.clear();
-    assert!(skippable(&idx, &b, live("C")).is_empty());
+    assert!(skippable(&idx, &b, live("C"), live("C")).is_empty());
     // No recorded closure for the test file at all: must run.
     b.test_imports.clear();
-    assert!(skippable(&idx, &b, live("C")).is_empty());
+    assert!(skippable(&idx, &b, live("C"), live("C")).is_empty());
 }
 
 /// A hash stub: test files hash to `tf`, everything else to `src`.
@@ -101,7 +102,12 @@ fn stub<'a>(src: &'a str, tf: &'a str) -> impl Fn(&str) -> Option<String> + 'a {
 fn green_and_unchanged_is_skippable() {
     // mod.py (hash H) covered by test_a; both mod.py and the test file unchanged.
     let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
-    let skip = skippable(&idx, &base(&["t.py::test_a"], "TF"), stub("H", "TF"));
+    let skip = skippable(
+        &idx,
+        &base(&["t.py::test_a"], "TF"),
+        stub("H", "TF"),
+        stub("H", "TF"),
+    );
     assert!(skip.contains("t.py::test_a"));
 }
 
@@ -113,6 +119,7 @@ fn changed_covered_file_is_not_skippable() {
         &idx,
         &base(&["t.py::test_a"], "TF"),
         stub("DIFFERENT", "TF"),
+        stub("DIFFERENT", "TF"),
     );
     assert!(skip.is_empty());
 }
@@ -121,7 +128,12 @@ fn changed_covered_file_is_not_skippable() {
 fn changed_test_file_is_not_skippable() {
     // The dependency is unchanged, but the test's OWN file was edited.
     let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
-    let skip = skippable(&idx, &base(&["t.py::test_a"], "TF"), stub("H", "EDITED"));
+    let skip = skippable(
+        &idx,
+        &base(&["t.py::test_a"], "TF"),
+        stub("H", "EDITED"),
+        stub("H", "EDITED"),
+    );
     assert!(skip.is_empty(), "editing the test file must force a run");
 }
 
@@ -129,14 +141,19 @@ fn changed_test_file_is_not_skippable() {
 fn non_green_test_is_not_skippable() {
     let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
     // test_a not in the green set (failed / never recorded).
-    let skip = skippable(&idx, &base(&["t.py::test_b"], "TF"), stub("H", "TF"));
+    let skip = skippable(
+        &idx,
+        &base(&["t.py::test_b"], "TF"),
+        stub("H", "TF"),
+        stub("H", "TF"),
+    );
     assert!(!skip.contains("t.py::test_a"));
 }
 
 #[test]
 fn deleted_covered_file_is_not_skippable() {
     let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
-    let skip = skippable(&idx, &base(&["t.py::test_a"], "TF"), |_| None);
+    let skip = skippable(&idx, &base(&["t.py::test_a"], "TF"), |_| None, |_| None);
     assert!(skip.is_empty());
 }
 
@@ -147,16 +164,30 @@ fn test_covering_many_files_needs_all_unchanged() {
         ("a.py", "H1", &[(1, &["t.py::test_a"])]),
         ("b.py", "H2", &[(2, &["t.py::test_a"])]),
     ]);
-    let skip = skippable(&idx, &base(&["t.py::test_a"], "TF"), |rel| {
-        Some(
-            match rel {
-                "a.py" => "CHANGED",
-                "b.py" => "H2",
-                _ => "TF", // the test file
-            }
-            .to_string(),
-        )
-    });
+    let skip = skippable(
+        &idx,
+        &base(&["t.py::test_a"], "TF"),
+        |rel| {
+            Some(
+                match rel {
+                    "a.py" => "CHANGED",
+                    "b.py" => "H2",
+                    _ => "TF", // the test file
+                }
+                .to_string(),
+            )
+        },
+        |rel| {
+            Some(
+                match rel {
+                    "a.py" => "CHANGED",
+                    "b.py" => "H2",
+                    _ => "TF", // the test file
+                }
+                .to_string(),
+            )
+        },
+    );
     assert!(skip.is_empty(), "one changed dependency must force a run");
 }
 
@@ -217,13 +248,21 @@ fn record_keeps_unrun_green_tests_of_a_subset_run() {
         ids(&[&ta, &tb, &tc]),
         HashMap::new(),
         &ids(&[&ta, &tb, &tc]),
+        None,
     );
     // A subset run executes only test_b (green). test_a and test_c were not
     // run: kept. test_c's file was edited meanwhile, so it keeps the hash
     // it was recorded under (never the new content's), which busts its skip.
     let c_old = current_sha256(Path::new(&c)).unwrap();
     std::fs::write(&c, "def test_c(): assert 1\n").unwrap();
-    record(&scope, &cfg("A"), ids(&[&tb]), HashMap::new(), &ids(&[&tb]));
+    record(
+        &scope,
+        &cfg("A"),
+        ids(&[&tb]),
+        HashMap::new(),
+        &ids(&[&tb]),
+        None,
+    );
     let b1 = load(&scope, "A");
     assert_eq!(b1.green, ids(&[&ta, &tb, &tc]));
     assert_eq!(b1.test_file_hashes.get(&c), Some(&c_old));
@@ -237,6 +276,7 @@ fn record_keeps_unrun_green_tests_of_a_subset_run() {
         ids(&[&tb2]),
         HashMap::new(),
         &ids(&[&tb2]),
+        None,
     );
     let b2 = load(&scope, "A").green;
     assert!(b2.contains(&tb2) && !b2.contains(&tb), "{b2:?}");
@@ -247,6 +287,7 @@ fn record_keeps_unrun_green_tests_of_a_subset_run() {
         ids(&[&tb]),
         HashMap::new(),
         &ids(&[&ta, &tb]),
+        None,
     );
     assert!(!load(&scope, "A").green.contains(&ta));
     // A different config fingerprint carries nothing over.
@@ -256,8 +297,16 @@ fn record_keeps_unrun_green_tests_of_a_subset_run() {
         ids(&[&ta, &tb]),
         HashMap::new(),
         &ids(&[&ta, &tb]),
+        None,
     );
-    record(&scope, &cfg("B"), ids(&[&tb]), HashMap::new(), &ids(&[&tb]));
+    record(
+        &scope,
+        &cfg("B"),
+        ids(&[&tb]),
+        HashMap::new(),
+        &ids(&[&tb]),
+        None,
+    );
     assert_eq!(load(&scope, "B").green, ids(&[&tb]));
     let _ = std::fs::remove_dir_all(&scope);
 }
@@ -419,7 +468,7 @@ fn helper_change_busts_but_test_module_change_does_not() {
         index_cov_args: Some(Vec::new()),
         index_cov_cwd: None,
     };
-    assert!(skippable_now(&idx, &b, &state).is_empty());
+    assert!(skippable_now(&idx, &b, &state, None).is_empty());
 }
 
 /// A fresh git repo at a temp path (hold the PATH lock: git is spawned).
@@ -828,7 +877,7 @@ fn record_and_read_round_trip_with_config_gate() {
         index_cov_args: Some(vec!["--cov=pkg".to_string()]),
         index_cov_cwd: None,
     };
-    record(&scope, &cfg("cfg-A"), green, lines, &HashSet::new());
+    record(&scope, &cfg("cfg-A"), green, lines, &HashSet::new(), None);
     let b = load(&scope, "cfg-A");
     assert!(b.green.contains("t.py::test_a"));
     // The def line round-trips for restoring a cached entry next run.
@@ -868,7 +917,7 @@ fn skippable_empty_green_baseline_skips_nothing() {
     // when the index and hashes would otherwise match.
     let idx = index(&[("mod.py", "H", &[(1, &["t.py::test_a"])])]);
     let empty = Baseline::default();
-    assert!(skippable(&idx, &empty, stub("H", "TF")).is_empty());
+    assert!(skippable(&idx, &empty, stub("H", "TF"), stub("H", "TF")).is_empty());
 }
 
 #[test]
@@ -900,12 +949,12 @@ fn skippable_now_hashes_live_files() {
         index_cov_args: Some(Vec::new()),
         ..ConfigState::default()
     };
-    assert!(skippable_now(&idx, &baseline, &cfg).contains(&id));
+    assert!(skippable_now(&idx, &baseline, &cfg, None).contains(&id));
     // An index of unknown coverage scope is never trusted.
-    assert!(skippable_now(&idx, &baseline, &ConfigState::default()).is_empty());
+    assert!(skippable_now(&idx, &baseline, &ConfigState::default(), None).is_empty());
     // Editing the covered file busts it.
     std::fs::write(&modf, b"x = 2\n").unwrap();
-    assert!(skippable_now(&idx, &baseline, &cfg).is_empty());
+    assert!(skippable_now(&idx, &baseline, &cfg, None).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

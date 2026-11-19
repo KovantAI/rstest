@@ -206,7 +206,7 @@ pub(super) fn resolve_incremental(
         coverage_skip::Baseline::default()
     };
     let skip_ids = if active {
-        coverage_skip::skippable_now(&prev_index, &baseline, &config)
+        coverage_skip::skippable_now(&prev_index, &baseline, &config, Some(&cfg.python))
     } else {
         std::collections::HashSet::new()
     };

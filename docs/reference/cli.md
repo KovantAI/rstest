@@ -464,9 +464,17 @@ in [`--report-json`](report-json.md).
   `-n 0/1`, another `--dist`, `--collect lazy`, `--shard` or `--shuffle`,
   rstest warns and runs everything.
 - A test also reruns when any first-party module its test file imports,
-  directly or transitively (package `__init__.py` included), changed: this
-  catches import-time code (a module-level constant) that coverage records
-  under no test.
+  directly or transitively (package `__init__.py` included), changed at
+  module level: this catches import-time code (a module-level constant) that
+  coverage records under no test. Module level means everything outside
+  function bodies (module and class statements, decorators, `def` lines with
+  their defaults), plus the bodies of functions that ran outside a test's own
+  call phase: at import, or in a fixture's setup or teardown, which every
+  test using that fixture shares. Editing any other function body re-runs
+  only the tests whose coverage includes it. This needs coverage to have
+  seen the module imported: a module imported before coverage starts (by a
+  `conftest.py` or a plugin) or not measured at all is still compared
+  whole, so any edit to it re-runs every test that imports it.
 - A config-file change (conftest, pytest config) or a change to any
   **git-tracked non-Python file** (a JSON fixture, a template, a golden file)
   disables skipping for that run. Untracked and ignored files are not watched,

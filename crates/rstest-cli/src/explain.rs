@@ -665,6 +665,7 @@ mod tests {
             },
         );
         CoverageIndex {
+            shared_lines: Default::default(),
             schema: COVERAGE_INDEX_SCHEMA,
             files,
         }
@@ -745,6 +746,7 @@ mod tests {
     #[test]
     fn footprint_none_on_empty_index() {
         let idx = CoverageIndex {
+            shared_lines: Default::default(),
             schema: COVERAGE_INDEX_SCHEMA,
             files: HashMap::new(),
         };
