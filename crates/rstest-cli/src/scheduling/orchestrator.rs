@@ -519,6 +519,46 @@ pub(crate) fn fold_bookkeeping(
     }
 }
 
+/// What every handler of a pool's event loop (eager or lazy) reads or flips.
+pub(crate) struct PoolCtl<'a> {
+    /// Items collected so far: the reference collection (eager) or the sum
+    /// over collected files (lazy).
+    pub(crate) total_items: usize,
+    /// Serial-phase designate: lowest alive index.
+    pub(crate) designate: usize,
+    /// Global -x/--maxfail: once tripped, dispatch halts and every alive
+    /// worker is told stop_run: it finishes the test in flight and starts
+    /// nothing more, its queued items (held lookahead included) unrun.
+    pub(crate) stopping: bool,
+    /// Widened by the worker's report (CollectionDone / LazyReady) when
+    /// `-x`/`--maxfail` comes from ini `addopts` / PYTEST_ADDOPTS, which the
+    /// argv parse can't see.
+    pub(crate) maxfail: Option<u64>,
+    pub(crate) fail_count: MaxfailCount<'a>,
+}
+
+impl<'a> PoolCtl<'a> {
+    pub(crate) fn new(maxfail: Option<u64>, quarantine: Option<&'a Quarantine>) -> Self {
+        Self {
+            total_items: 0,
+            designate: 0,
+            stopping: false,
+            maxfail,
+            fail_count: MaxfailCount::new(quarantine),
+        }
+    }
+
+    /// Once `-x` / `--maxfail` is reached, stop the run: every alive worker
+    /// finishes its test in flight and starts nothing more.
+    pub(crate) fn trip_maxfail(&mut self, run: &mut Run, states: &mut [impl Slot]) {
+        if self.maxfail.is_some_and(|limit| self.fail_count.n >= limit) && !self.stopping {
+            self.stopping = true;
+            run.stopped_after = Some(self.fail_count.n);
+            stop_all(states);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

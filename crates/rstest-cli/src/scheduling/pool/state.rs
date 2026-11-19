@@ -4,8 +4,6 @@
 
 use std::collections::VecDeque;
 
-use crate::reporting::report::Run;
-use crate::scheduling::orchestrator::{self, MaxfailCount, Quarantine};
 use crate::scheduling::proto;
 use crate::scheduling::worker::Worker;
 
@@ -100,44 +98,6 @@ impl WorkerState {
             attempt: Vec::new(),
             attempt_failed: false,
             node_input: None,
-        }
-    }
-}
-
-/// What every handler of the eager pool's event loop reads or flips.
-pub(super) struct PoolCtl<'a> {
-    /// Items in the reference collection (0 until the first CollectionDone).
-    pub(super) total_items: usize,
-    /// Serial-phase designate: lowest alive index.
-    pub(super) designate: usize,
-    /// Global -x/--maxfail: once tripped, dispatch halts and every alive
-    /// worker is told stop_run: it finishes the test in flight and starts
-    /// nothing more, its queued items (held lookahead included) unrun.
-    pub(super) stopping: bool,
-    /// Widened by the designate's CollectionDone when `-x`/`--maxfail` comes
-    /// from ini `addopts` / PYTEST_ADDOPTS, which the argv parse can't see.
-    pub(super) maxfail: Option<u64>,
-    pub(super) fail_count: MaxfailCount<'a>,
-}
-
-impl<'a> PoolCtl<'a> {
-    pub(super) fn new(maxfail: Option<u64>, quarantine: Option<&'a Quarantine>) -> Self {
-        Self {
-            total_items: 0,
-            designate: 0,
-            stopping: false,
-            maxfail,
-            fail_count: MaxfailCount::new(quarantine),
-        }
-    }
-
-    /// Once `-x` / `--maxfail` is reached, stop the run: every alive worker
-    /// finishes its test in flight and starts nothing more.
-    pub(super) fn trip_maxfail(&mut self, run: &mut Run, states: &mut [WorkerState]) {
-        if self.maxfail.is_some_and(|limit| self.fail_count.n >= limit) && !self.stopping {
-            self.stopping = true;
-            run.stopped_after = Some(self.fail_count.n);
-            orchestrator::stop_all(states);
         }
     }
 }

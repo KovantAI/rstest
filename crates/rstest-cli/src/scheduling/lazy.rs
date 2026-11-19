@@ -24,9 +24,10 @@ use anyhow::Result;
 use crate::reporting::progress::Progress;
 use crate::reporting::report::Run;
 use crate::reporting::sink::Sink;
-use crate::scheduling::orchestrator::{self, Dedup};
+use crate::scheduling::orchestrator::{self, Dedup, PoolCtl};
 use crate::scheduling::pool::PoolOutcome;
 use crate::scheduling::proto::{self, Event};
+use crate::scheduling::reruns::Reruns;
 use crate::scheduling::worker::Worker;
 
 struct WorkerState {
@@ -212,8 +213,6 @@ pub fn run_lazy_pool(
         // -x / --maxfail count.
         quarantine,
     } = cfg;
-    // Widened by LazyReady when `-x`/`--maxfail` comes from ini `addopts`.
-    let mut maxfail = maxfail;
     let (tx, rx) = mpsc::channel::<(usize, Result<Event>)>();
     // Fork-prewarm the initial pool off one warm zygote when asked (Unix);
     // otherwise n independent spawns. Each worker then gets its lazy-session
@@ -259,21 +258,14 @@ pub fn run_lazy_pool(
     let mut warm_record = crate::scheduling::warm::Record::default();
     let mut cache_dir: Option<String> = None;
     let mut sources = crate::scheduling::durations::Collected::default();
-    let mut total_items = 0usize;
     let mut requeued: VecDeque<String> = VecDeque::new();
     let mut serial: VecDeque<String> = VecDeque::new();
     let mut serial_active = false;
-    let mut flaky_budget: HashMap<String, u32> = HashMap::new();
-    let mut rerun_used: HashMap<String, u32> = HashMap::new();
-    let budget_of = |flaky: &HashMap<String, u32>, id: &str| -> u32 {
-        flaky.get(id).copied().unwrap_or(reruns)
-    };
-    let mut fail_count = orchestrator::MaxfailCount::new(quarantine);
-    let mut stopping = false;
+    let mut retry: Reruns<String> = Reruns::new(reruns, only_rerun, known_flaky);
+    let mut ctl = PoolCtl::new(maxfail, quarantine);
     let mut collect_aborted = false;
     let mut done_workers = 0usize;
     let mut restarts_left = n.max(4);
-    let mut designate = 0usize;
     // A worker died with the restart budget spent: its work moved to
     // survivors, and anything left unrun at the end is reported as not run.
     let mut lost_worker = false;
@@ -323,23 +315,17 @@ pub fn run_lazy_pool(
         match event {
             Ok(Event::Report(r)) => {
                 if let Some(id) = &states[idx].running {
-                    if budget_of(&flaky_budget, id) > 0 {
+                    if retry.budget(id) > 0 {
                         states[idx].attempt_failed |= r.outcome == "failed";
                         states[idx].attempt.push(r);
                         continue;
                     }
                 }
-                fail_count.record(&r);
+                ctl.fail_count.record(&r);
                 prog.on_report(sink, Some(idx), &r);
                 sink.emit_report(Some(idx), &r);
                 run.record(Some(idx), r);
-                if let Some(limit) = maxfail {
-                    if !stopping && fail_count.n >= limit {
-                        stopping = true;
-                        run.stopped_after = Some(fail_count.n);
-                        orchestrator::stop_all(&mut states);
-                    }
-                }
+                ctl.trip_maxfail(&mut run, &mut states);
             }
             Ok(Event::CollectError { path, longrepr }) => {
                 // A file collected again elsewhere (steal / redistribution)
@@ -348,12 +334,12 @@ pub fn run_lazy_pool(
                     prog.on_collect_error(sink, &path, &longrepr);
                     sink.emit_collect_error(&path, &longrepr);
                 }
-                if !continue_on_collect_errors && !stopping {
+                if !continue_on_collect_errors && !ctl.stopping {
                     // pytest aborts on collection errors; in lazy mode the
                     // error can surface mid-run - stop dispatching and wind
                     // down (already-final outcomes stay reported).
                     collect_aborted = true;
-                    stopping = true;
+                    ctl.stopping = true;
                     orchestrator::stop_all(&mut states);
                 }
             }
@@ -383,7 +369,7 @@ pub fn run_lazy_pool(
                 // `addopts` / PYTEST_ADDOPTS) is authoritative; every worker
                 // reports the same value before its first RunFiles.
                 if reported_maxfail.is_some() {
-                    maxfail = reported_maxfail;
+                    ctl.maxfail = reported_maxfail;
                 }
                 if let Some(cd) = cd {
                     cache_dir.get_or_insert(cd);
@@ -401,8 +387,8 @@ pub fn run_lazy_pool(
                 deselected,
             }) => {
                 run.deselected += deselected;
-                total_items += ids.len();
-                prog.set_total(total_items);
+                ctl.total_items += ids.len();
+                prog.set_total(ctl.total_items);
                 sources.record(&ids);
                 let s = &mut states[idx];
                 if let Some(pos) = s.uncollected_files.iter().position(|f| *f == path) {
@@ -414,16 +400,12 @@ pub fn run_lazy_pool(
                 s.own_queue
                     .extend(ids.iter().filter(|i| !ser_set.contains(i)).cloned());
                 serial.extend(ser);
-                flaky_budget.extend(flaky);
+                retry.marked.extend(flaky);
                 // Every file collected: the run's test count is final, so the
                 // auto-quarantine cap can settle the held failures.
                 if file_queue.is_empty() && states.iter().all(|s| s.uncollected_files.is_empty()) {
-                    fail_count.set_total(total_items);
-                    if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
-                        stopping = true;
-                        run.stopped_after = Some(fail_count.n);
-                        orchestrator::stop_all(&mut states);
-                    }
+                    ctl.fail_count.set_total(ctl.total_items);
+                    ctl.trip_maxfail(&mut run, &mut states);
                 }
             }
             Ok(Event::ItemStartId { id, timeout }) => {
@@ -436,51 +418,17 @@ pub fn run_lazy_pool(
                 prog.item_started(sink, idx, id);
             }
             Ok(Event::ItemDoneId { id }) => {
-                prog.item_finished(sink, idx);
-                let s = &mut states[idx];
-                s.running = None;
-                s.running_since = None;
-                s.running_watchdog = None;
-                if let Some(pos) = s.outstanding.iter().position(|x| *x == id) {
-                    s.outstanding.remove(pos);
-                }
-                let item_budget = budget_of(&flaky_budget, &id);
-                if item_budget > 0 {
-                    let rerun_allowed = orchestrator::rerun_allowed(only_rerun, &s.attempt);
-                    // --reruns-only-known-flaky: id IS the nodeid in lazy mode.
-                    let known_flaky_ok = known_flaky
-                        .is_none_or(|set| flaky_budget.contains_key(&id) || set.contains(&id));
-                    let used = rerun_used.entry(id.clone()).or_insert(0);
-                    if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {
-                        *used += 1;
-                        s.attempt.clear();
-                        s.attempt_failed = false;
-                        requeued.push_back(id);
-                    } else {
-                        let attempts = *used;
-                        let failed_now = s.attempt_failed;
-                        let attempt = std::mem::take(&mut s.attempt);
-                        s.attempt_failed = false;
-                        orchestrator::finalize_attempt(
-                            sink,
-                            &mut run,
-                            &mut prog,
-                            &mut fail_count,
-                            idx,
-                            orchestrator::FinishedAttempt {
-                                attempts_used: attempts,
-                                reports: attempt,
-                                failed: failed_now,
-                                flaky_key: Some(id),
-                            },
-                        );
-                        if maxfail.is_some_and(|limit| fail_count.n >= limit) && !stopping {
-                            stopping = true;
-                            run.stopped_after = Some(fail_count.n);
-                            orchestrator::stop_all(&mut states);
-                        }
-                    }
-                }
+                on_item_done_id(
+                    idx,
+                    id,
+                    &mut states,
+                    &mut ctl,
+                    &mut retry,
+                    &mut requeued,
+                    &mut run,
+                    &mut prog,
+                    sink,
+                );
             }
             Ok(Event::StoppedIds { unrun }) => {
                 let s = &mut states[idx];
@@ -490,7 +438,7 @@ pub fn run_lazy_pool(
                         s.outstanding.remove(pos);
                     }
                 }
-                if !stopping {
+                if !ctl.stopping {
                     // The worker's own session stopped (not a global stop):
                     // it left its run loop and takes no more ids or files.
                     // What it still had comes back at its Done.
@@ -511,8 +459,8 @@ pub fn run_lazy_pool(
                 }
                 run.session_exit
                     .get_or_insert(crate::reporting::report::SessionExit { reason, returncode });
-                if !stopping {
-                    stopping = true;
+                if !ctl.stopping {
+                    ctl.stopping = true;
                     orchestrator::stop_all(&mut states);
                 }
             }
@@ -538,7 +486,7 @@ pub fn run_lazy_pool(
                 let left = std::mem::take(&mut s.outstanding);
                 let own: Vec<String> = s.own_queue.drain(..).collect();
                 let files = std::mem::take(&mut s.uncollected_files);
-                if !stopping {
+                if !ctl.stopping {
                     requeued.extend(left);
                     requeued.extend(own);
                     for f in files.into_iter().rev() {
@@ -585,19 +533,7 @@ pub fn run_lazy_pool(
                     file_queue.push_front(f);
                 }
                 let restartable = states[idx].ready && restarts_left > 0;
-                // The crashed id retries only when BOTH the rerun and the
-                // restart budgets allow (segfault-loop guard).
-                let mut report_crash = crashed;
-                if let (true, Some(id)) = (restartable, &report_crash) {
-                    let known_ok = known_flaky
-                        .is_none_or(|set| flaky_budget.contains_key(id) || set.contains(id));
-                    let used = rerun_used.entry(id.clone()).or_insert(0);
-                    if *used < budget_of(&flaky_budget, id) && known_ok {
-                        *used += 1;
-                        requeued.push_back(id.clone());
-                        report_crash = None;
-                    }
-                }
+                let report_crash = retry_crashed(crashed, restartable, &mut retry, &mut requeued);
                 if let Some(id) = report_crash {
                     let fab = orchestrator::fabricate_crash_report(id, killed_by, idx, &e);
                     orchestrator::record_fabricated(sink, &mut run, &mut prog, Some(idx), fab);
@@ -636,11 +572,11 @@ pub fn run_lazy_pool(
                     // wait(). The slot stays in the vec, so reap in place.
                     states[idx].worker.reap();
                     done_workers += 1;
-                    if idx == designate {
+                    if idx == ctl.designate {
                         // Promote the lowest worker still listening; with none
                         // left the serial ids are swept up after the loop.
                         if let Some(next) = states.iter().position(|s| !s.dead && !s.ended) {
-                            designate = next;
+                            ctl.designate = next;
                         }
                     }
                     if done_workers == states.len() {
@@ -650,157 +586,29 @@ pub fn run_lazy_pool(
             }
         }
 
-        let chunk = crate::scheduling::pool::chunk_size(total_items.max(1), states.len());
+        let chunk = crate::scheduling::pool::chunk_size(ctl.total_items.max(1), states.len());
 
         // File assignment: a worker takes a batch of files (see
         // `file_batch`) when `wants_files`.
-        if !stopping {
-            let workers = states.len();
-            for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
-                if wants_files(
-                    s.uncollected_files.len(),
-                    s.own_queue.len(),
-                    s.outstanding.len(),
-                    chunk,
-                ) {
-                    let take = file_batch(&file_queue, &file_weights, workers);
-                    let paths: Vec<String> = file_queue.drain(..take).collect();
-                    if !paths.is_empty() {
-                        s.uncollected_files.extend(paths.iter().cloned());
-                        // Best-effort, as in the eager pool: a worker that died
-                        // (EPIPE) is handled by its reader's error, which puts
-                        // the files back on the queue.
-                        let _ = s.worker.send(&proto::Command::RunFiles { paths });
-                        s.finishing = false;
-                    }
-                }
-            }
+        if !ctl.stopping {
+            assign_files(&mut states, &mut file_queue, &file_weights, chunk);
         }
 
         // Id dispatch: top up any worker below the refill threshold. Sources
         // in order: requeued (reruns/redistribution), the worker's own
         // queue, then STEAL from the longest queue (only when no files left).
-        if !stopping {
-            for i in 0..states.len() {
-                if !states[i].ready || states[i].dead || states[i].ended {
-                    continue;
-                }
-                // Top up safely above the hold threshold: the worker holds
-                // its last item (nextitem lookahead) and no event triggers a
-                // refill, so an under-threshold dispatch deadlocks it alone.
-                loop {
-                    if states[i].outstanding.len() > (chunk / 2).max(1) {
-                        break;
-                    }
-                    let mut ids: Vec<String> = Vec::new();
-                    while ids.len() < chunk {
-                        if let Some(id) = requeued.pop_front() {
-                            ids.push(id);
-                            continue;
-                        }
-                        if let Some(id) = states[i].own_queue.pop_front() {
-                            ids.push(id);
-                            continue;
-                        }
-                        if !steal || !file_queue.is_empty() {
-                            break; // affinity mode, or more files coming
-                        }
-                        // Steal HALF the longest queue's remainder: one
-                        // re-collection buys sustained balance, whereas tiny
-                        // steals would re-collect the file per chunk.
-                        let victim = (0..states.len())
-                            .filter(|&j| j != i)
-                            .max_by_key(|&j| states[j].own_queue.len());
-                        match victim {
-                            Some(j) if !states[j].own_queue.is_empty() => {
-                                let take = (states[j].own_queue.len() / 2)
-                                    .max(chunk.min(states[j].own_queue.len()));
-                                let at = states[j].own_queue.len() - take;
-                                ids.extend(states[j].own_queue.split_off(at));
-                                break;
-                            }
-                            _ => break,
-                        }
-                    }
-                    if ids.is_empty() {
-                        break;
-                    }
-                    let s = &mut states[i];
-                    s.outstanding.extend(ids.iter().cloned());
-                    // Best-effort: a dead worker's `outstanding` is requeued
-                    // when its reader reports the death.
-                    let _ = s.worker.send(&proto::Command::RunIds { ids });
-                    s.finishing = false;
-                }
-            }
+        if !ctl.stopping {
+            dispatch_ids(&mut states, &mut requeued, &file_queue, steal, chunk);
         }
 
-        let ids_left = !requeued.is_empty() || states.iter().any(|s| !s.own_queue.is_empty());
-
-        // Serial phase: once every non-designate worker is Done, the held
-        // designate runs the serial ids exclusively.
-        if !stopping
-            && !serial_active
-            && !serial.is_empty()
-            && file_queue.is_empty()
-            && !ids_left
-            && states
-                .iter()
-                .enumerate()
-                .all(|(i, s)| i == designate || s.dead)
-            && !states[designate].dead
-        {
-            serial_active = true;
-            let ids: Vec<String> = serial.drain(..).collect();
-            let s = &mut states[designate];
-            s.outstanding.extend(ids.iter().cloned());
-            // Best-effort, as above.
-            let _ = s.worker.send(&proto::Command::RunIds { ids });
-            s.finishing = false;
-        }
-
-        // Release workers whose queue is exhausted FOR NOW. A collection in
-        // flight ANYWHERE blocks release: its ids may be stolen by a drained
-        // worker whose fixtures were torn down (premature NoMoreItems = re-setup).
-        let collecting = states
-            .iter()
-            .any(|s| !s.dead && !s.uncollected_files.is_empty());
-        let queue_empty = file_queue.is_empty() && !ids_left && !collecting;
-        if queue_empty || stopping {
-            for s in states
-                .iter_mut()
-                .filter(|s| s.ready && !s.dead && !s.finishing && s.uncollected_files.is_empty())
-            {
-                s.finishing = true;
-                let _ = s.worker.send(&proto::Command::NoMoreItems);
-            }
-        }
-        let in_flight = states.iter().any(|s| !s.dead && !s.outstanding.is_empty());
-        let parallel_resolved = if stopping {
-            !in_flight
-        } else {
-            queue_empty
-                && !in_flight
-                && states
-                    .iter()
-                    .all(|s| s.dead || s.uncollected_files.is_empty())
-        };
-        if parallel_resolved {
-            let serial_pending = !stopping && (!serial.is_empty() || serial_active && in_flight);
-            for (i, s) in states.iter_mut().enumerate() {
-                // Gate on `ready` (sent LazyReady), NOT "was assigned a file":
-                // a collection error can trip `stopping` before a ready worker
-                // gets one, and skipping it hangs the run (done_workers < n).
-                if s.dead || s.ended || !s.ready {
-                    continue;
-                }
-                if serial_pending && i == designate {
-                    continue;
-                }
-                let _ = s.worker.send(&proto::Command::EndSession);
-                s.ended = true;
-            }
-        }
+        release_or_end(
+            &mut states,
+            &ctl,
+            &mut serial,
+            &mut serial_active,
+            &requeued,
+            &file_queue,
+        );
     }
 
     // Work left after the last worker ended (every worker able to run it died
@@ -810,7 +618,7 @@ pub fn run_lazy_pool(
     // named as a collection error. Not after a -x/--maxfail or
     // collection-error stop, where unrun is expected. On a clean finish
     // every queue is empty and this records nothing.
-    if !stopping {
+    if !ctl.stopping {
         let reason = if lost_worker {
             orchestrator::LOST_NO_WORKER
         } else {
@@ -858,7 +666,7 @@ pub fn run_lazy_pool(
     );
     // -x can stop the run before every file is collected, leaving the count
     // unsettled: the collected files still bound it better than what reported.
-    run.cap_total = Some(fail_count.total.unwrap_or(total_items));
+    run.cap_total = Some(ctl.fail_count.total.unwrap_or(ctl.total_items));
     // pytest.exit(): its returncode is the run's exit code, as under pytest.
     let exitstatus = run
         .session_exit
@@ -876,7 +684,7 @@ pub fn run_lazy_pool(
             args.to_vec(),
             None,
             if fully_collected {
-                total_items as u64
+                ctl.total_items as u64
             } else {
                 0
             },
@@ -909,6 +717,258 @@ pub fn run_lazy_pool(
         lazy: true,
         exiting,
     })
+}
+
+/// File assignment: a worker takes a batch of files (see
+/// `file_batch`) when `wants_files`.
+fn assign_files(
+    states: &mut [WorkerState],
+    file_queue: &mut VecDeque<String>,
+    file_weights: &HashMap<String, f64>,
+    chunk: usize,
+) {
+    let workers = states.len();
+    for s in states.iter_mut().filter(|s| s.ready && !s.dead && !s.ended) {
+        if wants_files(
+            s.uncollected_files.len(),
+            s.own_queue.len(),
+            s.outstanding.len(),
+            chunk,
+        ) {
+            let take = file_batch(file_queue, file_weights, workers);
+            let paths: Vec<String> = file_queue.drain(..take).collect();
+            if !paths.is_empty() {
+                s.uncollected_files.extend(paths.iter().cloned());
+                // Best-effort, as in the eager pool: a worker that died
+                // (EPIPE) is handled by its reader's error, which puts
+                // the files back on the queue.
+                let _ = s.worker.send(&proto::Command::RunFiles { paths });
+                s.finishing = false;
+            }
+        }
+    }
+}
+
+/// Id dispatch: top up any worker below the refill threshold. Sources
+/// in order: requeued (reruns/redistribution), the worker's own
+/// queue, then STEAL from the longest queue (only when no files left).
+fn dispatch_ids(
+    states: &mut [WorkerState],
+    requeued: &mut VecDeque<String>,
+    file_queue: &VecDeque<String>,
+    steal: bool,
+    chunk: usize,
+) {
+    for i in 0..states.len() {
+        if !states[i].ready || states[i].dead || states[i].ended {
+            continue;
+        }
+        // Top up safely above the hold threshold: the worker holds
+        // its last item (nextitem lookahead) and no event triggers a
+        // refill, so an under-threshold dispatch deadlocks it alone.
+        loop {
+            if states[i].outstanding.len() > (chunk / 2).max(1) {
+                break;
+            }
+            let mut ids: Vec<String> = Vec::new();
+            while ids.len() < chunk {
+                if let Some(id) = requeued.pop_front() {
+                    ids.push(id);
+                    continue;
+                }
+                if let Some(id) = states[i].own_queue.pop_front() {
+                    ids.push(id);
+                    continue;
+                }
+                if !steal || !file_queue.is_empty() {
+                    break; // affinity mode, or more files coming
+                }
+                // Steal HALF the longest queue's remainder: one
+                // re-collection buys sustained balance, whereas tiny
+                // steals would re-collect the file per chunk.
+                let victim = (0..states.len())
+                    .filter(|&j| j != i)
+                    .max_by_key(|&j| states[j].own_queue.len());
+                match victim {
+                    Some(j) if !states[j].own_queue.is_empty() => {
+                        let take = (states[j].own_queue.len() / 2)
+                            .max(chunk.min(states[j].own_queue.len()));
+                        let at = states[j].own_queue.len() - take;
+                        ids.extend(states[j].own_queue.split_off(at));
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            if ids.is_empty() {
+                break;
+            }
+            let s = &mut states[i];
+            s.outstanding.extend(ids.iter().cloned());
+            // Best-effort: a dead worker's `outstanding` is requeued
+            // when its reader reports the death.
+            let _ = s.worker.send(&proto::Command::RunIds { ids });
+            s.finishing = false;
+        }
+    }
+}
+
+/// A worker finished `id`: retry it if its attempt failed with budget left
+/// (and the `--only-rerun` / known-flaky gates allow), else record the final
+/// attempt.
+#[allow(clippy::too_many_arguments)]
+fn on_item_done_id(
+    idx: usize,
+    id: String,
+    states: &mut [WorkerState],
+    ctl: &mut PoolCtl,
+    retry: &mut Reruns<String>,
+    requeued: &mut VecDeque<String>,
+    run: &mut Run,
+    prog: &mut Progress,
+    sink: &mut Sink,
+) {
+    prog.item_finished(sink, idx);
+    let s = &mut states[idx];
+    s.running = None;
+    s.running_since = None;
+    s.running_watchdog = None;
+    if let Some(pos) = s.outstanding.iter().position(|x| *x == id) {
+        s.outstanding.remove(pos);
+    }
+    let item_budget = retry.budget(&id);
+    if item_budget > 0 {
+        let rerun_allowed = orchestrator::rerun_allowed(retry.only_rerun, &s.attempt);
+        // --reruns-only-known-flaky: id IS the nodeid in lazy mode.
+        let known_flaky_ok = retry.known_flaky_ok(&id, Some(&id));
+        let used = retry.used.entry(id.clone()).or_insert(0);
+        if s.attempt_failed && *used < item_budget && rerun_allowed && known_flaky_ok {
+            *used += 1;
+            s.attempt.clear();
+            s.attempt_failed = false;
+            requeued.push_back(id);
+        } else {
+            let attempts = *used;
+            let failed_now = s.attempt_failed;
+            let attempt = std::mem::take(&mut s.attempt);
+            s.attempt_failed = false;
+            orchestrator::finalize_attempt(
+                sink,
+                run,
+                prog,
+                &mut ctl.fail_count,
+                idx,
+                orchestrator::FinishedAttempt {
+                    attempts_used: attempts,
+                    reports: attempt,
+                    failed: failed_now,
+                    flaky_key: Some(id),
+                },
+            );
+            ctl.trip_maxfail(run, states);
+        }
+    }
+}
+
+/// The crashed id retries only when BOTH the rerun and the restart budgets
+/// allow (segfault-loop guard). Returns the id to report as crashed, if any.
+fn retry_crashed(
+    crashed: Option<String>,
+    restartable: bool,
+    retry: &mut Reruns<String>,
+    requeued: &mut VecDeque<String>,
+) -> Option<String> {
+    let mut report_crash = crashed;
+    if let (true, Some(id)) = (restartable, &report_crash) {
+        let known_ok = retry.known_flaky_ok(id, Some(id));
+        let budget = retry.budget(id);
+        let used = retry.used.entry(id.clone()).or_insert(0);
+        if *used < budget && known_ok {
+            *used += 1;
+            requeued.push_back(id.clone());
+            report_crash = None;
+        }
+    }
+    report_crash
+}
+
+/// After each event: start the serial phase once only the designate is left,
+/// release workers whose queue is exhausted for now (NoMoreItems), and end
+/// every session once the parallel portion is resolved.
+fn release_or_end(
+    states: &mut [WorkerState],
+    ctl: &PoolCtl,
+    serial: &mut VecDeque<String>,
+    serial_active: &mut bool,
+    requeued: &VecDeque<String>,
+    file_queue: &VecDeque<String>,
+) {
+    let ids_left = !requeued.is_empty() || states.iter().any(|s| !s.own_queue.is_empty());
+
+    // Serial phase: once every non-designate worker is Done, the held
+    // designate runs the serial ids exclusively.
+    if !ctl.stopping
+        && !*serial_active
+        && !serial.is_empty()
+        && file_queue.is_empty()
+        && !ids_left
+        && states
+            .iter()
+            .enumerate()
+            .all(|(i, s)| i == ctl.designate || s.dead)
+        && !states[ctl.designate].dead
+    {
+        *serial_active = true;
+        let ids: Vec<String> = serial.drain(..).collect();
+        let s = &mut states[ctl.designate];
+        s.outstanding.extend(ids.iter().cloned());
+        // Best-effort, as above.
+        let _ = s.worker.send(&proto::Command::RunIds { ids });
+        s.finishing = false;
+    }
+
+    // Release workers whose queue is exhausted FOR NOW. A collection in
+    // flight ANYWHERE blocks release: its ids may be stolen by a drained
+    // worker whose fixtures were torn down (premature NoMoreItems = re-setup).
+    let collecting = states
+        .iter()
+        .any(|s| !s.dead && !s.uncollected_files.is_empty());
+    let queue_empty = file_queue.is_empty() && !ids_left && !collecting;
+    if queue_empty || ctl.stopping {
+        for s in states
+            .iter_mut()
+            .filter(|s| s.ready && !s.dead && !s.finishing && s.uncollected_files.is_empty())
+        {
+            s.finishing = true;
+            let _ = s.worker.send(&proto::Command::NoMoreItems);
+        }
+    }
+    let in_flight = states.iter().any(|s| !s.dead && !s.outstanding.is_empty());
+    let parallel_resolved = if ctl.stopping {
+        !in_flight
+    } else {
+        queue_empty
+            && !in_flight
+            && states
+                .iter()
+                .all(|s| s.dead || s.uncollected_files.is_empty())
+    };
+    if parallel_resolved {
+        let serial_pending = !ctl.stopping && (!serial.is_empty() || *serial_active && in_flight);
+        for (i, s) in states.iter_mut().enumerate() {
+            // Gate on `ready` (sent LazyReady), NOT "was assigned a file":
+            // a collection error can trip `stopping` before a ready worker
+            // gets one, and skipping it hangs the run (done_workers < n).
+            if s.dead || s.ended || !s.ready {
+                continue;
+            }
+            if serial_pending && i == ctl.designate {
+                continue;
+            }
+            let _ = s.worker.send(&proto::Command::EndSession);
+            s.ended = true;
+        }
+    }
 }
 
 /// Respawn path: one fresh, independently spawned lazy worker. The initial pool
