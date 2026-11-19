@@ -345,6 +345,40 @@ neither does a noisy but flat test. Typical causes: a table or fixture file
 that grows every run, a cache that is never cleared, a dependency that got
 slower over several releases. Top 10, largest rise first.
 
+### ABSORBED WAITS
+
+Tests that leave work running when they end, which the next test on the same
+worker then waits out. A typical case: a test asks a single-threaded test
+server (pytest-httpbin) for a slow response and gives up after a short client
+timeout, but the server keeps working on it, and the next test to call the
+server waits until it is done. That wait is recorded as the next test's
+time, so the next run schedules an innocent, fast test as a long pole.
+
+```text
+ABSORBED WAITS (a test leaves work running when it ends; the next test on its worker waits it out, and that wait is recorded as the next test's time):
+  ~  9.98s  3 of 3 runs  tests/test_requests.py::TestTimeout::test_read_timeout  -> absorbed by tests/test_requests.py::test_json, tests/test_requests.py::test_urllib3_retries
+  finish or cancel that work in the test's teardown (or give its server a short timeout); until then the next test's duration is not its own
+```
+
+The check pairs the run history with the replay journals of the same runs
+(`.rstest_cache/replay/`, the last 10 parallel runs), which record which test
+ran right after which on each worker. A test is listed when, in at least 2
+runs and in at least two thirds of the runs where it had a next test, that
+next test took at least 1 second and at least 3 times longer than its fastest
+recorded passing run. The lump is the median of that extra time. A test that
+is merely noisy doesn't qualify: its slow runs don't keep following the same
+test. Only parallel runs (`-n 2` or more) write journals, so a suite run
+single-worker only never shows this section. Top 10, largest lump first.
+
+Once a test is listed, a parallel run also corrects for it, with or without
+`--doctor`: a test that ran right after it on the same worker and carried the
+wait has its fastest recorded time saved to the duration cache (so the next
+run doesn't schedule it as a long pole), and
+[`--durations-regress`](slowdowns.md#what-counts-as-a-regression) doesn't
+judge it. The run history keeps the real time.
+[`rstest explain <nodeid>`](../reference/cli-commands.md#explain) shows either
+side for one test: the wait it leaves, or the waits it carried.
+
 ### startup
 
 A one-line summary under the header reports how long spawning the worker pool
@@ -386,8 +420,8 @@ parallel-efficiency (realized speedup and per-worker load), fixture timings
 advisor), slowest files, and the coverage-waste list (`coverage_waste`, `null`
 unless the same run collected per-test coverage with `--cov --cov-context=test`),
 the timeout advice (`timeouts`, `null` until tests have 5 passing runs in
-the run history), duration drift (`drift`, `null` unless a test drifts), and
-network access (`network`, `null` unless a test connected outside loopback).
+the run history), duration drift (`drift`, `null` unless a test drifts), absorbed waits
+(`absorbed_waits`, absent unless a test leaves one behind), and network access (`network`, `null` unless a test connected outside loopback).
 Combine with `--doctor` to also print the human report. See
 [Doctor JSON](../reference/report-json.md#doctor-json) for the full field
 schema.

@@ -292,6 +292,28 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         md_more(&mut md, d.tests.len(), d.drifting_tests);
         md.push('\n');
     }
+    if !r.absorbed_waits.is_empty() {
+        md.push_str(
+            "### Absorbed waits\n\n> A test that leaves work running when it ends (a request \
+             a test server keeps serving, a thread holding a lock) makes the next test on its \
+             worker wait it out, and that wait is recorded as the next test's time.\n\n",
+        );
+        md.push_str("| Lump | Runs | Test | Absorbed by |\n|---:|---:|---|---|\n");
+        for w in r.absorbed_waits.iter().take(ABSORBED_SHOWN) {
+            let by: Vec<String> = w.absorbed_by.iter().map(|v| format!("`{v}`")).collect();
+            let _ = writeln!(
+                md,
+                "| ~{:.2}s | {} of {} | `{}` | {} |",
+                w.lump_seconds,
+                w.runs,
+                w.of_runs,
+                w.culprit,
+                by.join(", ")
+            );
+        }
+        md_more(&mut md, ABSORBED_SHOWN, r.absorbed_waits.len());
+        md.push('\n');
+    }
     if let Some(n) = &r.network {
         let _ = writeln!(
             md,
@@ -320,6 +342,9 @@ pub fn render_markdown(r: &DoctorReport) -> String {
 
 /// After a markdown table cut at `shown` rows: count the `total - shown` left
 /// out, as the terminal report does.
+/// Absorbed-wait rows shown, in either format.
+const ABSORBED_SHOWN: usize = 10;
+
 fn md_more(md: &mut String, shown: usize, total: usize) {
     if total > shown {
         md.push_str(&format!("\n... and {} more\n", total - shown));
@@ -631,6 +656,33 @@ pub fn render(sink: &mut Sink, r: &DoctorReport) {
         );
     }
 
+    if !r.absorbed_waits.is_empty() {
+        sink.out_line(
+            "\nABSORBED WAITS (a test leaves work running when it ends; the next test on its \
+             worker waits it out, and that wait is recorded as the next test's time):",
+        );
+        for w in r.absorbed_waits.iter().take(ABSORBED_SHOWN) {
+            sink.out_line(&format!(
+                "  ~{:6.2}s  {} of {} runs  {}  -> absorbed by {}",
+                w.lump_seconds,
+                w.runs,
+                w.of_runs,
+                w.culprit,
+                w.absorbed_by.join(", ")
+            ));
+        }
+        if r.absorbed_waits.len() > ABSORBED_SHOWN {
+            sink.out_line(&format!(
+                "  ... and {} more",
+                r.absorbed_waits.len() - ABSORBED_SHOWN
+            ));
+        }
+        sink.out_line(
+            "  finish or cancel that work in the test's teardown (or give its server a \
+             short timeout); until then the next test's duration is not its own",
+        );
+    }
+
     if let Some(n) = &r.network {
         sink.out_line(&format!(
             "\nNETWORK ACCESS ({} test(s) opened outbound connections, outside loopback \
@@ -906,6 +958,43 @@ mod tests {
             "{out}"
         );
         render(&mut Sink::captured().0, &report(0)); // no timing data: early "no timing" line
+    }
+
+    #[test]
+    fn absorbed_waits_in_terminal_and_markdown() {
+        use crate::reporting::absorbed::AbsorbedWait;
+        let mut r = report(12);
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        assert!(!cap.out().contains("ABSORBED WAITS"));
+        assert!(!render_markdown(&r).contains("Absorbed waits"));
+        r.absorbed_waits = (0..12)
+            .map(|i| AbsorbedWait {
+                culprit: format!("t.py::timeout{i}"),
+                lump_seconds: 9.98,
+                runs: 3,
+                of_runs: 3,
+                absorbed_by: vec!["t.py::a".into(), "t.py::b".into()],
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(out.contains("\nABSORBED WAITS ("), "{out}");
+        assert!(
+            out.contains(
+                "  ~  9.98s  3 of 3 runs  t.py::timeout0  -> absorbed by t.py::a, t.py::b"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("  ... and 2 more\n"), "{out}");
+        let md = render_markdown(&r);
+        assert!(md.contains("### Absorbed waits"), "{md}");
+        assert!(
+            md.contains("| ~9.98s | 3 of 3 | `t.py::timeout0` | `t.py::a`, `t.py::b` |"),
+            "{md}"
+        );
+        assert!(md.contains("... and 2 more"), "{md}");
     }
 
     #[test]

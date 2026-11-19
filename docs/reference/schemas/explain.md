@@ -17,6 +17,27 @@ The merged per-nodeid dossier. `null` fields are simply absent from every cache 
 | `meta` | Meta | yes | Envelope: producer, document kind, schema version and rstest version. |
 | `nodeid` | string | yes | The node id that was explained, as given. |
 | `source_line` | integer or null | yes | Source def line (1-based) recorded on the last incremental run, if known. |
+| `waits` | Waits or null | yes | Waits left running across tests (see the doctor's absorbed waits): `null` unless this test leaves one or carried one. |
+
+### Absorbed
+
+A wait `nodeid` carried: it ran right after `culprit` on its worker and was that much slower than its fastest recorded passing call.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `culprit` | string | yes | The test before it that left the wait. |
+| `lump_seconds` | number | yes | Median extra call time over those runs, in seconds. |
+| `runs` | integer | yes | Recorded runs where it carried this culprit's wait. |
+
+### AbsorbedWait (Explain)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `absorbed_by` | array of string | yes | Tests that carried it, most recent first (up to 3). |
+| `culprit` | string | yes | The test that leaves the wait behind. |
+| `lump_seconds` | number | yes | Median extra call time of the test that ran next on its worker, in seconds (its call time minus its fastest recorded passing call). |
+| `of_runs` | integer | yes | Recorded runs where the culprit had a next test on its worker. |
+| `runs` | integer | yes | Recorded runs where the next test carried the lump. |
 
 ### Coverage
 
@@ -76,3 +97,12 @@ A commit in a suspect range (`git log <good>..<bad>`).
 | `author` | string | yes | Author name. |
 | `sha` | string | yes | Abbreviated commit hash. |
 | `subject` | string | yes | First line of the commit message. |
+
+### Waits
+
+This test's side of an absorbed wait, from the run history and the replay journals of the same runs.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `absorbs` | array of Absorbed | yes | Waits this test carried: runs where it ran right after a test that leaves one and was slower by it. |
+| `leaves` | AbsorbedWait or null | yes | Set when this test leaves work running that the next test on its worker waits out. |

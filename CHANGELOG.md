@@ -5,6 +5,23 @@ between 0.x releases and are listed here.
 
 ## Unreleased
 
+### Features
+
+- **The doctor names tests that leave a wait for the next test.** A test that
+  leaves work running when it ends (a request a single-threaded test server
+  keeps serving after the client gave up, a thread still holding a lock)
+  makes the next test on its worker wait it out, and that wait used to be
+  blamed on the next test. The new ABSORBED WAITS section (also in
+  `--doctor-json` as `absorbed_waits`, and in the markdown report) names the
+  test that leaves the wait, its typical size, and the tests that absorbed
+  it, from the run history and the replay journals of recent parallel runs.
+  A test that carried such a wait no longer pays for it later: its fastest
+  recorded time goes to the duration cache, so the next run doesn't schedule
+  it as a long pole, and `--durations-regress` doesn't judge it (it says so
+  on stderr). `rstest explain <nodeid>` shows the wait a test leaves or the
+  waits it carried (`waits` in `--json`). See
+  [Doctor: absorbed waits](docs/guides/doctor.md#absorbed-waits).
+
 ### Fixes
 
 - **The doctor's markdown report says when a list was cut.** The GitHub job

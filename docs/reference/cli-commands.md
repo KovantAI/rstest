@@ -666,7 +666,8 @@ test: tests/test_api.py::test_login
 ```
 
 Add `--json` for a schema-stamped object on stdout (`{meta, nodeid, found,
-duration_seconds, last_outcome, source_line, flakes, coverage, history}`), suitable for an
+duration_seconds, last_outcome, source_line, flakes, coverage, history,
+waits}`), suitable for an
 editor or CI step. Absent fields are `null`: a never-flaked test has no `flakes`,
 a cold coverage index yields `null` coverage. `source_line` is **1-based**, as
 an editor counts, while report-json's `lineno` is 0-based as pytest reports it:
@@ -711,6 +712,16 @@ uncommitted edits, or when the failing commit is older than the passing one
 (an earlier checkout). When git can't resolve the commits (not a checkout, a shallow clone,
 or a CI commit this clone hasn't fetched), it says so and `suspect_commits` is
 `null`.
+
+It also shows the test's side of an
+[absorbed wait](../guides/doctor.md#absorbed-waits), when there is one: a
+test that leaves work running for the next test on its worker (`leaves ~9.98s
+for the next test on its worker (3 of 3 runs); absorbed by ...`), or a test
+that ran right after such a test and was slower by its wait (`absorbed ~1.50s
+left by tests/test_api.py::test_timeout (2 run(s)), not its own time`).
+`--json` carries both under `waits` (`null` when neither applies). Like the
+doctor, it reads the replay journals in `.rstest_cache/replay/`, so it only
+knows about parallel runs.
 
 ### `flaky`
 
