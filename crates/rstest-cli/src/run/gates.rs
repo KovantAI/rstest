@@ -458,32 +458,19 @@ pub(super) fn run_post_gates(
         n,
         passthrough,
         single_worker_reruns,
-        mode,
-        doctor,
         ref doctor_gate,
         ref dist_name,
-        ref python,
         ref scope,
         ..
     } = *cfg;
-    let palette = sink.palette();
     let PostRun {
         start,
         started_epoch,
-        run_uid,
-        cache_remote,
-        shard,
-        changed_base,
-        since_green,
-        since_green_narrowed,
-        head,
-        env_fp,
-        history_commit,
         incremental_active,
-        config,
         prev_index,
         baseline,
         replay,
+        ..
     } = *post;
     // A passthrough-IO run (-s/--pdb/--co) skips doctor instrumentation, so the
     // gate can't evaluate; say so instead of a silent false green.
@@ -510,7 +497,6 @@ pub(super) fn run_post_gates(
     // the orchestrator plays the xdist-master role, so combine and report.
     // Runs BEFORE the cache-push below so this run's coverage-index slice is
     // materialized (covtool overwrites the local index) in time to be published.
-    let mut exitstatus = outcome.exitstatus;
     let has_cov = args.iter().any(|a| a == "--cov" || a.starts_with("--cov="));
     if !passthrough {
         warn_cov_only_in_addopts(
@@ -526,14 +512,6 @@ pub(super) fn run_post_gates(
     if want_diff && !has_cov && !passthrough {
         sink.warn("rstest: diff coverage needs --cov (no coverage data to score); ignoring");
     }
-    // Whether covtool rewrote the coverage index during this run (it does only
-    // under per-test contexts): the doctor's coverage-waste input.
-    let index_mtime = || {
-        std::fs::metadata(cache::file(select::COVERAGE_INDEX_FILE))
-            .and_then(|m| m.modified())
-            .ok()
-    };
-    let mut fresh_index = false;
     // covtool rewrites the index from only the tests that ran, so a subset run
     // would erase the rest of the suite's coverage and --changed would skip
     // them. --incremental snapshots the index before the run; snapshot it here
@@ -541,132 +519,269 @@ pub(super) fn run_post_gates(
     let own_prev_index =
         (!passthrough && has_cov && !incremental_active).then(remote::load_local_cov_index);
     let prev_index = own_prev_index.as_ref().unwrap_or(prev_index);
+    let mut exitstatus = outcome.exitstatus;
+    let mut fresh_index = false;
     if !passthrough && has_cov {
-        // pytest-cov's workers write their coverage data files on exit.
-        outcome.reap_workers();
-        let before = index_mtime();
-        // JSON and TAP keep stdout a pure machine stream, so covtool's table
-        // and notices go to stderr there instead.
-        let machine_out = matches!(mode, progress::Mode::Json | progress::Mode::Tap);
-        if !machine_out {
-            sink.out_line("");
-        }
-        // Diff-coverage gate: hand covtool the diff's added lines + a result
-        // path when --cov-diff-fail-under is set; covtool scores them and we
-        // gate on the percentage below.
-        let diff_paths = if want_diff {
-            build_diff_lines(sink.err(), select::changed_new_lines(changed_base))
-        } else {
-            None
-        };
-        let mut cmd = covtool_command(python, args);
-        // The in-process session (-n 0/1, pytest's own terminal) ran pytest-cov
-        // in its normal mode, which already combined, reported and gated
-        // --cov-fail-under; covtool then only builds the index and scores the
-        // diff instead of printing the table and FAIL line a second time.
-        if n <= 1 && !single_worker_reruns && mode == progress::Mode::Pytest {
-            cmd.arg("--rstest-cov-reported");
-        }
-        if let Some((lp, op)) = &diff_paths {
-            cmd.arg("--rstest-diff-lines")
-                .arg(lp)
-                .arg("--rstest-diff-out")
-                .arg(op);
-        }
-        let cov_status = if machine_out {
-            cmd.stderr(std::process::Stdio::inherit())
-                .output()
-                .map(|o| {
-                    let _ = sink.err().write_all(&o.stdout);
-                    o.status.success()
-                })
-        } else {
-            cmd.status().map(|s| s.success())
-        }
-        .map_err(|e| e.to_string());
-        // Freshness is "covtool replaced the file", not "covtool exited 0": a
-        // missed --cov-fail-under exits 1 but still writes this run's index.
-        let after = index_mtime();
-        fresh_index = after.is_some() && after != before;
-        exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
-
-        if let Some((lp, op)) = diff_paths {
-            if let Some(threshold) = cli.cov_diff_fail_under {
-                exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
-            }
-            if let Some(dst) = &cli.cov_diff_json {
-                copy_diff_cov_json(sink.err(), &op, dst);
-            }
-            let _ = std::fs::remove_file(&lp);
-            let _ = std::fs::remove_file(&op);
-        }
+        (exitstatus, fresh_index) = gate_coverage(cfg, cli, post, outcome, args, want_diff, sink);
     }
-    let mut doctor_gate_failed = false;
-    if want_doctor {
-        // Coverage waste is judged only from the index covtool wrote for THIS
-        // run: an older one (a previous run, a cache restore, --cache-pull) can
-        // describe tests or files that have since changed, and a stale "fully
-        // shared" verdict would recommend deleting a test that is now unique.
-        let coverage_index = fresh_index.then(select::load_coverage_index).flatten();
-        // Test-file patterns (`python_files`) tell test code from product code.
-        let project = coverage_index.as_ref().map(|_| {
-            crate::config::discover(
-                &std::env::current_dir().unwrap_or_default(),
-                &mut std::io::sink(),
-            )
-        });
-        let report = doctor::analyze(
-            &outcome.run,
-            &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
+    let doctor_gate_failed = want_doctor
+        && gate_doctor(
+            cfg,
+            cli,
+            outcome,
             suite_wall,
-            outcome.startup_seconds,
-            outcome.fork_prewarmed,
-            n,
-            coverage_index.as_ref().zip(project.as_ref()),
-        )
-        .with_history(&outcome.run, history.get())
-        .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
-        .with_warm(outcome.warm.clone());
-        // In json mode stdout is a pure NDJSON stream, so the doctor's human
-        // report would corrupt it; --doctor-json still writes to its file.
-        if cli.doctor && mode != progress::Mode::Json {
-            doctor::render(sink, &report);
-        }
-        if let Some(path) = &cli.doctor_json {
-            doctor::write_json(path, &report)?;
-        }
-        if let Some(path) = &cli.doctor_md {
-            doctor::write_markdown(path, &report)?;
-        }
-        doctor::append_ci_summary(sink, &report);
-        if !doctor_gate.is_empty() {
-            let gate = doctor::evaluate(&report, doctor_gate);
-            for s in &gate.skipped {
-                sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
-            }
-            if gate.breaches.is_empty() {
-                sink.warn(&format!(
-                    "rstest: --doctor-fail-on: {}",
-                    gate.pass_summary(doctor_gate.len())
-                ));
-            } else {
-                // stderr, not stdout: --output json/tap keep stdout a pure
-                // machine stream, and the failure block must not corrupt it
-                // (same reason the human doctor render is gated above).
-                sink.warn(&format!(
-                    "\n{}",
-                    palette.bold_red("=========== doctor gate failures ===========")
-                ));
-                for b in &gate.breaches {
-                    sink.warn(&format!("  {b}"));
-                }
-                doctor_gate_failed = true;
-            }
+            fresh_index,
+            &mut history,
+            sink,
+        )?;
+    if gate_leaks(cfg, cli, outcome, sink) && exitstatus == 0 {
+        exitstatus = 1;
+    }
+    // Restore cached (--incremental, not-run) entries' def line from the
+    // baseline before any artifact is written: report-json and the HTML report
+    // read it, and coverage_skip::record below carries it to the next run.
+    if incremental_active {
+        outcome.run.backfill_cached_linenos(&baseline.test_lines);
+    }
+    // Both reports get the pre-covtool wall, as they did when they ran first.
+    let report_meta = report::RunMeta {
+        duration_seconds: suite_wall,
+        ..build_run_meta(start, outcome.exitstatus, started_epoch, n)
+    };
+    write_run_reports(
+        cli.junitxml.as_deref(),
+        cli.html.as_deref(),
+        &outcome.run,
+        suite_wall,
+        &report_meta,
+        &mut history,
+    )?;
+    if let Some(cache_dir) = &outcome.cache_dir {
+        write_merged_lastfailed(cache_dir, &outcome.run);
+    }
+    let duration_regressions = match cli.durations_regress {
+        // Validated before the run (run::resolve_run_config).
+        Some(ratio) => gate_durations_regress(ratio, &mut outcome.run, &mut history, sink),
+        None => 0,
+    };
+    // Every exit-code gate is settled here, before the green records below.
+    if duration_regressions > 0 {
+        sink.warn(&format!(
+            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
+            if duration_regressions > 1 { "s" } else { "" }
+        ));
+        if exitstatus == 0 {
+            exitstatus = 1;
         }
     }
-    // --fail-on-leak: gate on any test that leaked a thread/fd. Settled before
-    // anything records this run as green (cache push, --since-green baseline).
-    // Printed on stderr so --output json/tap keep stdout a pure machine stream.
+    if doctor_gate_failed {
+        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
+        if exitstatus == 0 {
+            exitstatus = 1;
+        }
+    }
+    // Each-mode ids carry the [gwN] suffix and every test ran N times, so
+    // they would poison the duration cache used for LPT scheduling.
+    if dist_name != "each" && !replay {
+        save_run_records(cfg, cli, post, outcome, args, exitstatus, history, sink);
+    }
+    write_final_report_json(cli, post, outcome, n)?;
+    record_since_green(cli, post, exitstatus, sink)?;
+    // --incremental: persist this run's green set (tests that ran green + the
+    // carried-forward cached passes) so the next run skips what stays unchanged.
+    // Recorded regardless of exit status — failures simply aren't in the green
+    // set, so they re-run next time. Best-effort. Any other --cov run only
+    // carries the unrun tests' coverage forward.
+    if incremental_active || own_prev_index.is_some() {
+        carry_forward_coverage(scope, post, &outcome.run, prev_index, fresh_index);
+    }
+    if !replay {
+        record_green_env(cfg, cli, post, &outcome.run, args, exitstatus, sink);
+    }
+    Ok(exitstatus)
+}
+
+/// Combine and report coverage through covtool, score `--cov-diff-fail-under`,
+/// and return the exit status after both plus whether covtool wrote a fresh
+/// coverage index for this run.
+fn gate_coverage(
+    cfg: &RunConfig,
+    cli: &Cli,
+    post: &PostRun,
+    outcome: &mut pool::PoolOutcome,
+    args: &[String],
+    want_diff: bool,
+    sink: &mut Sink,
+) -> (i32, bool) {
+    let RunConfig {
+        n,
+        single_worker_reruns,
+        mode,
+        ref python,
+        ..
+    } = *cfg;
+    let changed_base = post.changed_base;
+    let exitstatus = outcome.exitstatus;
+    // Whether covtool rewrote the coverage index during this run (it does only
+    // under per-test contexts): the doctor's coverage-waste input.
+    let index_mtime = || {
+        std::fs::metadata(cache::file(select::COVERAGE_INDEX_FILE))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    // pytest-cov's workers write their coverage data files on exit.
+    outcome.reap_workers();
+    let before = index_mtime();
+    // JSON and TAP keep stdout a pure machine stream, so covtool's table
+    // and notices go to stderr there instead.
+    let machine_out = matches!(mode, progress::Mode::Json | progress::Mode::Tap);
+    if !machine_out {
+        sink.out_line("");
+    }
+    // Diff-coverage gate: hand covtool the diff's added lines + a result
+    // path when --cov-diff-fail-under is set; covtool scores them and we
+    // gate on the percentage below.
+    let diff_paths = if want_diff {
+        build_diff_lines(sink.err(), select::changed_new_lines(changed_base))
+    } else {
+        None
+    };
+    let mut cmd = covtool_command(python, args);
+    // The in-process session (-n 0/1, pytest's own terminal) ran pytest-cov
+    // in its normal mode, which already combined, reported and gated
+    // --cov-fail-under; covtool then only builds the index and scores the
+    // diff instead of printing the table and FAIL line a second time.
+    if n <= 1 && !single_worker_reruns && mode == progress::Mode::Pytest {
+        cmd.arg("--rstest-cov-reported");
+    }
+    if let Some((lp, op)) = &diff_paths {
+        cmd.arg("--rstest-diff-lines")
+            .arg(lp)
+            .arg("--rstest-diff-out")
+            .arg(op);
+    }
+    let cov_status = if machine_out {
+        cmd.stderr(std::process::Stdio::inherit())
+            .output()
+            .map(|o| {
+                let _ = sink.err().write_all(&o.stdout);
+                o.status.success()
+            })
+    } else {
+        cmd.status().map(|s| s.success())
+    }
+    .map_err(|e| e.to_string());
+    // Freshness is "covtool replaced the file", not "covtool exited 0": a
+    // missed --cov-fail-under exits 1 but still writes this run's index.
+    let after = index_mtime();
+    let fresh_index = after.is_some() && after != before;
+    let mut exitstatus = reconcile_cov_status(sink.err(), cov_status, exitstatus);
+
+    if let Some((lp, op)) = diff_paths {
+        if let Some(threshold) = cli.cov_diff_fail_under {
+            exitstatus = apply_diff_cov_gate(sink.err(), &op, threshold, exitstatus);
+        }
+        if let Some(dst) = &cli.cov_diff_json {
+            copy_diff_cov_json(sink.err(), &op, dst);
+        }
+        let _ = std::fs::remove_file(&lp);
+        let _ = std::fs::remove_file(&op);
+    }
+    (exitstatus, fresh_index)
+}
+
+/// The doctor report (`--doctor`, `--doctor-json`, `--doctor-md`, the CI
+/// summary) and the `--doctor-fail-on` gate. Returns whether the gate breached.
+fn gate_doctor(
+    cfg: &RunConfig,
+    cli: &Cli,
+    outcome: &mut pool::PoolOutcome,
+    suite_wall: f64,
+    fresh_index: bool,
+    history: &mut history::RunHistory,
+    sink: &mut Sink,
+) -> Result<bool> {
+    let RunConfig {
+        n,
+        mode,
+        ref doctor_gate,
+        ..
+    } = *cfg;
+    let palette = sink.palette();
+    // Coverage waste is judged only from the index covtool wrote for THIS
+    // run: an older one (a previous run, a cache restore, --cache-pull) can
+    // describe tests or files that have since changed, and a stale "fully
+    // shared" verdict would recommend deleting a test that is now unique.
+    let coverage_index = fresh_index.then(select::load_coverage_index).flatten();
+    // Test-file patterns (`python_files`) tell test code from product code.
+    let project = coverage_index.as_ref().map(|_| {
+        crate::config::discover(
+            &std::env::current_dir().unwrap_or_default(),
+            &mut std::io::sink(),
+        )
+    });
+    let report = doctor::analyze(
+        &outcome.run,
+        &merge_fixtures(std::mem::take(&mut outcome.fixtures)),
+        suite_wall,
+        outcome.startup_seconds,
+        outcome.fork_prewarmed,
+        n,
+        coverage_index.as_ref().zip(project.as_ref()),
+    )
+    .with_history(&outcome.run, history.get())
+    .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
+    .with_warm(outcome.warm.clone());
+    // In json mode stdout is a pure NDJSON stream, so the doctor's human
+    // report would corrupt it; --doctor-json still writes to its file.
+    if cli.doctor && mode != progress::Mode::Json {
+        doctor::render(sink, &report);
+    }
+    if let Some(path) = &cli.doctor_json {
+        doctor::write_json(path, &report)?;
+    }
+    if let Some(path) = &cli.doctor_md {
+        doctor::write_markdown(path, &report)?;
+    }
+    doctor::append_ci_summary(sink, &report);
+    if !doctor_gate.is_empty() {
+        let gate = doctor::evaluate(&report, doctor_gate);
+        for s in &gate.skipped {
+            sink.warn(&format!("rstest: --doctor-fail-on: {s}"));
+        }
+        if gate.breaches.is_empty() {
+            sink.warn(&format!(
+                "rstest: --doctor-fail-on: {}",
+                gate.pass_summary(doctor_gate.len())
+            ));
+        } else {
+            // stderr, not stdout: --output json/tap keep stdout a pure
+            // machine stream, and the failure block must not corrupt it
+            // (same reason the human doctor render is gated above).
+            sink.warn(&format!(
+                "\n{}",
+                palette.bold_red("=========== doctor gate failures ===========")
+            ));
+            for b in &gate.breaches {
+                sink.warn(&format!("  {b}"));
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// --fail-on-leak: gate on any test that leaked a thread/fd. Settled before
+/// anything records this run as green (cache push, --since-green baseline).
+/// Printed on stderr so --output json/tap keep stdout a pure machine stream.
+/// Returns whether a leak breaches the gate.
+fn gate_leaks(cfg: &RunConfig, cli: &Cli, outcome: &pool::PoolOutcome, sink: &mut Sink) -> bool {
+    let RunConfig {
+        passthrough,
+        doctor,
+        ..
+    } = *cfg;
+    let palette = sink.palette();
     if cli.fail_on_leak && passthrough {
         // Passthrough (-s/--pdb/--co) has no worker instrumentation, so no
         // deltas are measured. Warn instead of silently exiting 0 (matches the
@@ -703,223 +818,263 @@ pub(super) fn run_post_gates(
                  forked process)",
                 leaks.len()
             ));
-            if exitstatus == 0 {
-                exitstatus = 1;
-            }
+            return true;
         }
     }
-    // Restore cached (--incremental, not-run) entries' def line from the
-    // baseline before any artifact is written: report-json and the HTML report
-    // read it, and coverage_skip::record below carries it to the next run.
-    if incremental_active {
-        outcome.run.backfill_cached_linenos(&baseline.test_lines);
-    }
-    // Both reports get the pre-covtool wall, as they did when they ran first.
-    let report_meta = report::RunMeta {
-        duration_seconds: suite_wall,
-        ..build_run_meta(start, outcome.exitstatus, started_epoch, n)
-    };
-    write_run_reports(
-        cli.junitxml.as_deref(),
-        cli.html.as_deref(),
-        &outcome.run,
-        suite_wall,
-        &report_meta,
-        &mut history,
-    )?;
-    // Merged lastfailed: workers' own writes are blocked in pool mode
-    // (each knows only its failures); merge this run's outcomes into
-    // pytest's cache so a follow-up `--lf` behaves exactly as after a serial
-    // run. Like pytest, the file is written only when its content changes.
-    if let Some(cache_dir) = &outcome.cache_dir {
-        let dir = std::path::Path::new(cache_dir).join("v/cache");
-        let path = dir.join("lastfailed");
-        let prev = read_lastfailed(&path);
-        let merged = merged_lastfailed(prev.clone(), &outcome.run);
-        // Only write when serialization succeeds: a serialize error must not
-        // clobber pytest's lastfailed cache with an empty `{}`.
-        if merged != prev {
-            if let (Ok(()), Ok(bytes)) = (
-                std::fs::create_dir_all(&dir),
-                serde_json::to_vec_pretty(&merged),
-            ) {
-                // pytest's own cache setup makes the dir ignore itself; when
-                // the pool's workers never wrote it, rstest is the one creating it.
-                cache::write_supporting_files(std::path::Path::new(cache_dir));
-                let _ = cache::write_atomic(&path, &bytes);
-            }
+    false
+}
+
+/// Merged lastfailed: workers' own writes are blocked in pool mode
+/// (each knows only its failures); merge this run's outcomes into
+/// pytest's cache so a follow-up `--lf` behaves exactly as after a serial
+/// run. Like pytest, the file is written only when its content changes.
+fn write_merged_lastfailed(cache_dir: &str, run: &report::Run) {
+    let dir = std::path::Path::new(cache_dir).join("v/cache");
+    let path = dir.join("lastfailed");
+    let prev = read_lastfailed(&path);
+    let merged = merged_lastfailed(prev.clone(), run);
+    // Only write when serialization succeeds: a serialize error must not
+    // clobber pytest's lastfailed cache with an empty `{}`.
+    if merged != prev {
+        if let (Ok(()), Ok(bytes)) = (
+            std::fs::create_dir_all(&dir),
+            serde_json::to_vec_pretty(&merged),
+        ) {
+            // pytest's own cache setup makes the dir ignore itself; when
+            // the pool's workers never wrote it, rstest is the one creating it.
+            cache::write_supporting_files(std::path::Path::new(cache_dir));
+            let _ = cache::write_atomic(&path, &bytes);
         }
     }
-    // Duration regression gate: must compare BEFORE durations::save merges
-    // this run's times. Flagged tests are kept out of that save (and out of a
-    // --cache-push segment), so the baseline they regressed from survives and
-    // the gate fires again on the next identical run.
-    let mut duration_regressions = 0usize;
-    if let Some(ratio) = cli.durations_regress {
-        // Validated before the run (run::resolve_run_config).
-        let baseline = durations::load_baseline();
-        if baseline.is_empty() {
-            sink.warn(
-                "rstest: --durations-regress: no duration baseline yet \
-                 (.rstest_cache/durations.json); comparison skipped",
-            );
+}
+
+/// Duration regression gate: must compare BEFORE durations::save merges
+/// this run's times. Flagged tests are kept out of that save (and out of a
+/// --cache-push segment), so the baseline they regressed from survives and
+/// the gate fires again on the next identical run.
+/// Returns the number of regressed tests.
+fn gate_durations_regress(
+    ratio: f64,
+    run: &mut report::Run,
+    history: &mut history::RunHistory,
+    sink: &mut Sink,
+) -> usize {
+    let palette = sink.palette();
+    let baseline = durations::load_baseline();
+    if baseline.is_empty() {
+        sink.warn(
+            "rstest: --durations-regress: no duration baseline yet \
+             (.rstest_cache/durations.json); comparison skipped",
+        );
+    } else {
+        let rows = durations::regressions(run, &baseline, history.get(), ratio);
+        if rows.is_empty() {
+            sink.warn(&format!(
+                "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
+            ));
         } else {
-            let rows = durations::regressions(&outcome.run, &baseline, history.get(), ratio);
-            if rows.is_empty() {
-                sink.warn(&format!(
-                    "rstest: --durations-regress: no regressions (>= {ratio}x baseline)"
-                ));
-            } else {
-                sink.out_line(&format!(
-                    "\n{}",
-                    palette.bold_red(&format!(
-                        "=========== duration regressions (>= {ratio}x baseline) ==========="
-                    ))
-                ));
-                for r in &rows {
-                    let basis = match (r.median_runs, r.ceiling) {
-                        (Some(n), Some(c)) => {
-                            palette.dim(&format!("  (median of {n} runs, normal up to {c:.2}s)"))
-                        }
-                        (None, Some(c)) => {
-                            palette.dim(&format!("  (last recorded, normal up to {c:.2}s)"))
-                        }
-                        _ => String::new(),
-                    };
-                    sink.out_line(&format!(
-                        "  {:7.2}s -> {:7.2}s  {}{basis}",
-                        r.baseline, r.new, r.nodeid
-                    ));
-                    outcome.run.mark_duration_regressed(&r.nodeid);
-                }
-                duration_regressions = rows.len();
-            }
-        }
-    }
-    // Every exit-code gate is settled here, before the green records below.
-    if duration_regressions > 0 {
-        sink.warn(&format!(
-            "rstest: {duration_regressions} duration regression{} vs baseline (--durations-regress)",
-            if duration_regressions > 1 { "s" } else { "" }
-        ));
-        if exitstatus == 0 {
-            exitstatus = 1;
-        }
-    }
-    if doctor_gate_failed {
-        sink.warn("rstest: --doctor-fail-on: threshold breach (see doctor gate failures above)");
-        if exitstatus == 0 {
-            exitstatus = 1;
-        }
-    }
-    // Each-mode ids carry the [gwN] suffix and every test ran N times, so
-    // they would poison the duration cache used for LPT scheduling.
-    if dist_name != "each" && !replay {
-        if let Some(anchored) = crate::cache::rootdir() {
-            if let Some(real) = outcome.sources.rootdir_mismatch(anchored) {
-                sink.warn(&format!(
-                    "rstest: pytest's rootdir ({}) differs from the one rstest resolved \
-                     ({}); cached durations won't match its tests, so scheduling ignores \
-                     them. Pass --rootdir to pin it",
-                    real.display(),
-                    anchored.display()
-                ));
-            }
-        }
-        durations::save(&outcome.run, &outcome.sources);
-        durations::save_scope_costs(&outcome.run);
-        // Whole-suite wall (fixtures included) for the monorepo planner: a
-        // fixture-bound project has near-zero call time in durations.json but
-        // real elapsed cost here, so weighting by call time alone starves it
-        // to one worker on the warm run. See `mono::project_cost`.
-        durations::save_wall(start.elapsed().as_secs_f64());
-        // Per-worker whole-suite collection, auto-lazy's long-pole budget.
-        if let Some(secs) = outcome.collect_seconds {
-            durations::save_collect(secs);
-        }
-        // The wall per collection mode, so auto-lazy can stop picking lazy
-        // where it measured slower. Parallel pool runs only.
-        if n >= 2 && !passthrough {
-            durations::save_mode_wall(
-                outcome.lazy,
-                start.elapsed().as_secs_f64(),
-                n,
-                outcome.run.tests().len(),
-            );
-        }
-        // The workers' peak RSS, for the next memory-aware `-n auto`.
-        if let Some(peak) = outcome.peak_rss {
-            crate::scheduling::memory::record(peak);
-        }
-        // Flake history rides the same cadence (and the same [gwN]-key
-        // poisoning concern rules out each-mode).
-        flakes::record(&outcome.run);
-        // A parent rstest's probe runs (bisect, audit, migrate-check; the only
-        // users of --instrument-workers) pass and fail one test on purpose
-        // over and over: recorded (or pushed), those are flips that
-        // auto-quarantine the very test they found.
-        let history_slice = if cli.instrument_workers {
-            None
-        } else {
-            history::slice(&outcome.run, started_epoch, history_commit, env_fp)
-        };
-        if let Some(slice) = &history_slice {
-            history.record(slice.clone());
-        }
-        // --cache-push: publish THIS run's contribution as one immutable
-        // segment (from the in-memory Run, not the merged local cache). A push
-        // failure warns but never fails an otherwise-green run.
-        if cli.cache_push {
-            let remote = cache_remote.unwrap(); // validated at entry
-            let uid = run_uid;
-            let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
-            // This run's coverage slice (covtool wrote it just above); empty for
-            // non-coverage runs. Published as the segment's cov_index.
-            let cov = remote::load_local_cov_index();
-            // Green over the whole suite, or over one whole shard (a shard is
-            // the only narrowing allowed): the pull side calls a sharded run
-            // green once every shard of it has pushed one.
-            // A dirty tree's green proves nothing about HEAD (as `after_run`).
-            let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
-            let green = (exitstatus == 0
-                && !dirty
-                && changed_base.is_none()
-                && !since_green
-                && !incremental_active
-                && !crate::since_green::run_narrows_suite(args, scope))
-            .then(|| crate::since_green::GreenPart {
-                snapshot: crate::since_green::capture(
-                    scope,
-                    python,
-                    head.as_deref(),
-                    dirty,
-                    started_epoch,
-                ),
-                shard,
-            });
-            let seg = remote::segment_from_run(
-                format!("{uid}{shard_suffix}"),
-                started_epoch,
-                &outcome.run,
-                cov,
-                history_slice,
-                green,
-            );
-            // Build the transport once and reuse it for an optional inline
-            // auto-compaction after a successful push.
-            match remote::transport_for(remote) {
-                Ok(t) => {
-                    let result = remote::push(t.as_ref(), &seg);
-                    let pushed = result.is_ok();
-                    report_push_result(sink.err(), result, &seg, remote);
-                    if pushed {
-                        maybe_auto_compact(cli, t.as_ref(), remote, sink);
+            sink.out_line(&format!(
+                "\n{}",
+                palette.bold_red(&format!(
+                    "=========== duration regressions (>= {ratio}x baseline) ==========="
+                ))
+            ));
+            for r in &rows {
+                let basis = match (r.median_runs, r.ceiling) {
+                    (Some(n), Some(c)) => {
+                        palette.dim(&format!("  (median of {n} runs, normal up to {c:.2}s)"))
                     }
-                }
-                Err(e) => report_push_result(sink.err(), Err(e), &seg, remote),
+                    (None, Some(c)) => {
+                        palette.dim(&format!("  (last recorded, normal up to {c:.2}s)"))
+                    }
+                    _ => String::new(),
+                };
+                sink.out_line(&format!(
+                    "  {:7.2}s -> {:7.2}s  {}{basis}",
+                    r.baseline, r.new, r.nodeid
+                ));
+                run.mark_duration_regressed(&r.nodeid);
             }
+            return rows.len();
         }
     }
+    0
+}
+
+/// Save this run's durations, scope costs, walls, peak RSS, flake and run
+/// history, then publish it with `--cache-push`.
+#[allow(clippy::too_many_arguments)]
+fn save_run_records(
+    cfg: &RunConfig,
+    cli: &Cli,
+    post: &PostRun,
+    outcome: &pool::PoolOutcome,
+    args: &[String],
+    exitstatus: i32,
+    history: history::RunHistory,
+    sink: &mut Sink,
+) {
+    let RunConfig { n, passthrough, .. } = *cfg;
+    let PostRun {
+        start,
+        started_epoch,
+        history_commit,
+        env_fp,
+        ..
+    } = *post;
+    if let Some(anchored) = crate::cache::rootdir() {
+        if let Some(real) = outcome.sources.rootdir_mismatch(anchored) {
+            sink.warn(&format!(
+                "rstest: pytest's rootdir ({}) differs from the one rstest resolved \
+                 ({}); cached durations won't match its tests, so scheduling ignores \
+                 them. Pass --rootdir to pin it",
+                real.display(),
+                anchored.display()
+            ));
+        }
+    }
+    durations::save(&outcome.run, &outcome.sources);
+    durations::save_scope_costs(&outcome.run);
+    // Whole-suite wall (fixtures included) for the monorepo planner: a
+    // fixture-bound project has near-zero call time in durations.json but
+    // real elapsed cost here, so weighting by call time alone starves it
+    // to one worker on the warm run. See `mono::project_cost`.
+    durations::save_wall(start.elapsed().as_secs_f64());
+    // Per-worker whole-suite collection, auto-lazy's long-pole budget.
+    if let Some(secs) = outcome.collect_seconds {
+        durations::save_collect(secs);
+    }
+    // The wall per collection mode, so auto-lazy can stop picking lazy
+    // where it measured slower. Parallel pool runs only.
+    if n >= 2 && !passthrough {
+        durations::save_mode_wall(
+            outcome.lazy,
+            start.elapsed().as_secs_f64(),
+            n,
+            outcome.run.tests().len(),
+        );
+    }
+    // The workers' peak RSS, for the next memory-aware `-n auto`.
+    if let Some(peak) = outcome.peak_rss {
+        crate::scheduling::memory::record(peak);
+    }
+    // Flake history rides the same cadence (and the same [gwN]-key
+    // poisoning concern rules out each-mode).
+    flakes::record(&outcome.run);
+    // A parent rstest's probe runs (bisect, audit, migrate-check; the only
+    // users of --instrument-workers) pass and fail one test on purpose
+    // over and over: recorded (or pushed), those are flips that
+    // auto-quarantine the very test they found.
+    let history_slice = if cli.instrument_workers {
+        None
+    } else {
+        history::slice(&outcome.run, started_epoch, history_commit, env_fp)
+    };
+    if let Some(slice) = &history_slice {
+        history.record(slice.clone());
+    }
+    // --cache-push: publish THIS run's contribution as one immutable
+    // segment (from the in-memory Run, not the merged local cache). A push
+    // failure warns but never fails an otherwise-green run.
+    if cli.cache_push {
+        push_run(
+            cfg,
+            cli,
+            post,
+            &outcome.run,
+            history_slice,
+            exitstatus,
+            args,
+            sink,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_run(
+    cfg: &RunConfig,
+    cli: &Cli,
+    post: &PostRun,
+    run: &report::Run,
+    history_slice: Option<history::RunSlice>,
+    exitstatus: i32,
+    args: &[String],
+    sink: &mut Sink,
+) {
+    let RunConfig {
+        ref python,
+        ref scope,
+        ..
+    } = *cfg;
+    let PostRun {
+        started_epoch,
+        run_uid,
+        cache_remote,
+        shard,
+        changed_base,
+        since_green,
+        head,
+        history_commit,
+        incremental_active,
+        ..
+    } = *post;
+    let remote = cache_remote.unwrap(); // validated at entry
+    let uid = run_uid;
+    let shard_suffix = shard.map(|(k, n)| format!("-{k}of{n}")).unwrap_or_default();
+    // This run's coverage slice (covtool wrote it just above); empty for
+    // non-coverage runs. Published as the segment's cov_index.
+    let cov = remote::load_local_cov_index();
+    // Green over the whole suite, or over one whole shard (a shard is
+    // the only narrowing allowed): the pull side calls a sharded run
+    // green once every shard of it has pushed one.
+    // A dirty tree's green proves nothing about HEAD (as `after_run`).
+    let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
+    let green = (exitstatus == 0
+        && !dirty
+        && changed_base.is_none()
+        && !since_green
+        && !incremental_active
+        && !crate::since_green::run_narrows_suite(args, scope))
+    .then(|| crate::since_green::GreenPart {
+        snapshot: crate::since_green::capture(scope, python, head.as_deref(), dirty, started_epoch),
+        shard,
+    });
+    let seg = remote::segment_from_run(
+        format!("{uid}{shard_suffix}"),
+        started_epoch,
+        run,
+        cov,
+        history_slice,
+        green,
+    );
+    // Build the transport once and reuse it for an optional inline
+    // auto-compaction after a successful push.
+    match remote::transport_for(remote) {
+        Ok(t) => {
+            let result = remote::push(t.as_ref(), &seg);
+            let pushed = result.is_ok();
+            report_push_result(sink.err(), result, &seg, remote);
+            if pushed {
+                maybe_auto_compact(cli, t.as_ref(), remote, sink);
+            }
+        }
+        Err(e) => report_push_result(sink.err(), Err(e), &seg, remote),
+    }
+}
+
+/// Write `--report-json`, stamped with the sharding identity.
+fn write_final_report_json(
+    cli: &Cli,
+    post: &PostRun,
+    outcome: &pool::PoolOutcome,
+    n: usize,
+) -> Result<()> {
+    let PostRun {
+        start,
+        started_epoch,
+        shard,
+        ..
+    } = *post;
     let mut run_meta = build_run_meta(start, outcome.exitstatus, started_epoch, n);
     run_meta.warm = outcome.warm.clone();
     // Stamp the sharding identity so `rstest shard-verify` can reconcile the
@@ -934,11 +1089,22 @@ pub(super) fn run_post_gates(
         });
     }
     write_report_json(cli.report_json.as_deref(), &outcome.run, &run_meta)?;
-    // Incremental testing: a fully green run advances the baseline to the commit
-    // we ran at, so the next --since-green run only re-selects changes made after
-    // it. Recorded only on green (exitstatus 0) — a failing test keeps being
-    // selected until it passes - and only on a clean tree, since a green dirty
-    // tree says nothing about HEAD itself.
+    Ok(())
+}
+
+/// Incremental testing: a fully green run advances the baseline to the commit
+/// we ran at, so the next --since-green run only re-selects changes made after
+/// it. Recorded only on green (exitstatus 0) — a failing test keeps being
+/// selected until it passes - and only on a clean tree, since a green dirty
+/// tree says nothing about HEAD itself.
+fn record_since_green(cli: &Cli, post: &PostRun, exitstatus: i32, sink: &mut Sink) -> Result<()> {
+    let PostRun {
+        since_green,
+        since_green_narrowed,
+        head,
+        env_fp,
+        ..
+    } = *post;
     if since_green && exitstatus == 0 && since_green_narrowed {
         sink.warn(
             "rstest: --since-green: green run was narrowed (-k/-m/path/--deselect/--budget); \
@@ -956,60 +1122,92 @@ pub(super) fn run_post_gates(
             }
         }
     }
-    // --incremental: persist this run's green set (tests that ran green + the
-    // carried-forward cached passes) so the next run skips what stays unchanged.
-    // Recorded regardless of exit status — failures simply aren't in the green
-    // set, so they re-run next time. Best-effort. Any other --cov run only
-    // carries the unrun tests' coverage forward.
-    if incremental_active || own_prev_index.is_some() {
-        // Fold the prior coverage of every test this run did not execute
-        // (cached ones, and the rest of the suite on a subset run) back into
-        // the index covtool just rewrote, so they stay skippable / selectable.
-        let cached = outcome.run.cached_nodeids();
-        let ran: std::collections::HashSet<String> = outcome
-            .run
-            .tests()
-            .keys()
-            .filter(|id| !cached.contains(*id))
-            .cloned()
-            .collect();
-        if fresh_index || !cached.is_empty() {
-            let mut new_index = remote::load_local_cov_index();
-            coverage_skip::carry_forward_unrun(prev_index, &mut new_index, &ran);
-            if new_index != *prev_index || fresh_index {
-                coverage_skip::write_index(&new_index);
-            }
-        }
-        if incremental_active {
-            coverage_skip::record(
-                scope,
-                config,
-                outcome.run.green_nodeids(),
-                outcome.run.green_linenos(),
-                &ran,
-            );
+    Ok(())
+}
+
+/// Fold the prior coverage of every test this run did not execute back into
+/// the index, and record the `--incremental` green set.
+fn carry_forward_coverage(
+    scope: &std::path::Path,
+    post: &PostRun,
+    run: &report::Run,
+    prev_index: &select::CoverageIndex,
+    fresh_index: bool,
+) {
+    let PostRun {
+        incremental_active,
+        config,
+        ..
+    } = *post;
+    // Fold the prior coverage of every test this run did not execute
+    // (cached ones, and the rest of the suite on a subset run) back into
+    // the index covtool just rewrote, so they stay skippable / selectable.
+    let cached = run.cached_nodeids();
+    let ran: std::collections::HashSet<String> = run
+        .tests()
+        .keys()
+        .filter(|id| !cached.contains(*id))
+        .cloned()
+        .collect();
+    if fresh_index || !cached.is_empty() {
+        let mut new_index = remote::load_local_cov_index();
+        coverage_skip::carry_forward_unrun(prev_index, &mut new_index, &ran);
+        if new_index != *prev_index || fresh_index {
+            coverage_skip::write_index(&new_index);
         }
     }
-    // What changed since green: a green run records its environment, a red
-    // one says what differs from the last green. On the final exit code, so
-    // a gate that turned the run red counts. Not on `replay`: a diagnostic
-    // re-run of an old schedule is no baseline. Only a whole-suite run may
-    // record one: a passing `-k`/shard/cached/--changed/--budget subset proves
-    // nothing.
-    if !replay {
-        let full_suite = !passthrough
-            && shard.is_none()
-            && !since_green
-            && changed_base.is_none()
-            && cli.budget.is_none()
-            && !cli.watch
-            && outcome.run.cached_nodeids().is_empty()
-            && !crate::since_green::run_narrows_suite(args, scope);
-        let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
-        let now = crate::since_green::capture(scope, python, head.as_deref(), dirty, started_epoch);
-        crate::since_green::after_run(sink, exitstatus, full_suite, &now);
+    if incremental_active {
+        coverage_skip::record(
+            scope,
+            config,
+            run.green_nodeids(),
+            run.green_linenos(),
+            &ran,
+        );
     }
-    Ok(exitstatus)
+}
+
+/// What changed since green: a green run records its environment, a red
+/// one says what differs from the last green. On the final exit code, so
+/// a gate that turned the run red counts. Not on `replay`: a diagnostic
+/// re-run of an old schedule is no baseline. Only a whole-suite run may
+/// record one: a passing `-k`/shard/cached/--changed/--budget subset proves
+/// nothing.
+fn record_green_env(
+    cfg: &RunConfig,
+    cli: &Cli,
+    post: &PostRun,
+    run: &report::Run,
+    args: &[String],
+    exitstatus: i32,
+    sink: &mut Sink,
+) {
+    let RunConfig {
+        passthrough,
+        ref python,
+        ref scope,
+        ..
+    } = *cfg;
+    let PostRun {
+        started_epoch,
+        shard,
+        changed_base,
+        since_green,
+        head,
+        history_commit,
+        ..
+    } = *post;
+    let full_suite = !passthrough
+        && shard.is_none()
+        && !since_green
+        && changed_base.is_none()
+        && cli.budget.is_none()
+        && !cli.watch
+        && run.cached_nodeids().is_empty()
+        && !crate::since_green::run_narrows_suite(args, scope);
+    let dirty = history_commit.is_some_and(|c| c.ends_with("-dirty"));
+    let now = crate::since_green::capture(scope, python, head.as_deref(), dirty, started_epoch);
+    crate::since_green::after_run(sink, exitstatus, full_suite, &now);
 }
 
 pub(super) fn finalize_output(
@@ -1258,140 +1456,15 @@ fn print_warnings_summary(
     );
 }
 
-pub(super) use crate::scheduling::orchestrator::Quarantine;
-
-impl Quarantine {
-    /// Matcher for the post-run demotion, and whether it includes the auto
-    /// set. When more auto-set tests failed
-    /// this run than `max_pct` percent of the run's tests (at least one),
-    /// the environment is the likelier culprit: warn and demote only the
-    /// file's tests, so those failures count as usual.
-    pub(super) fn demotion_matcher(
-        &self,
-        run: &report::Run,
-        sink: &mut Sink,
-    ) -> (&regex::RegexSet, bool) {
-        let failed = run
-            .tests()
-            .iter()
-            .filter(|(id, e)| {
-                e.any_phase_failed() && self.auto.contains(*id) && !self.file.is_match(id)
-            })
-            .count();
-        let total = run.cap_total.unwrap_or_else(|| run.tests().len());
-        let cap = crate::scheduling::orchestrator::auto_quarantine_cap(total, self.max_pct);
-        if failed <= cap {
-            return (&self.all, true);
-        }
-        sink.warn(&format!(
-            "rstest: --auto-quarantine: {failed} auto-quarantined test(s) failed, over the cap \
-             of {cap} ({}% of {total} tests in this run); quarantining none of them, the \
-             environment looks broken (raise the cap with --auto-quarantine-max=PCT)",
-            self.max_pct
-        ));
-        (&self.file, false)
-    }
-
-    /// The auto-quarantined nodeids (from the history; empty when off).
-    pub(super) fn auto(&self) -> &std::collections::HashSet<String> {
-        &self.auto
-    }
-}
-
-/// Build the run's [`Quarantine`], announcing the auto set on stderr (the run
-/// log is the audit trail, there is no committed list). `None` when nothing
-/// can be quarantined.
-pub(super) fn quarantine_set(
-    file: Option<&std::path::Path>,
-    auto: u32,
-    max_pct: u32,
-    history: &mut crate::reporting::history::RunHistory,
-    sink: &mut Sink,
-) -> Result<Option<Quarantine>> {
-    let file_patterns = match file {
-        Some(p) => quarantine_patterns(p, sink)?,
-        None => Vec::new(),
-    };
-    let ids = if auto == 0 {
-        Vec::new()
-    } else {
-        history.get().flippers(auto)
-    };
-    if file.is_none() && ids.is_empty() {
-        return Ok(None);
-    }
-    if !ids.is_empty() {
-        sink.warn(&format!(
-            "rstest: --auto-quarantine: {} test(s) flipped pass/fail {auto}+ times in recent history:\n  {}",
-            ids.len(),
-            ids.join("\n  ")
-        ));
-    }
-    let all = file_patterns
-        .iter()
-        .cloned()
-        .chain(ids.iter().map(|id| format!("^{}$", regex::escape(id))));
-    Ok(Some(Quarantine {
-        all: regex::RegexSet::new(all)?,
-        file: regex::RegexSet::new(file_patterns)?,
-        auto: ids.into_iter().collect(),
-        max_pct,
-    }))
-}
-
-/// The --quarantine file as anchored regexes: exact nodeids or `*` globs,
-/// one per line, `#` comments and blanks skipped. A trailing comment
-/// (whitespace then `#`, e.g. `test_a  # JIRA-1`) is stripped too.
-fn quarantine_patterns(path: &std::path::Path, sink: &mut Sink) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("--quarantine: cannot read {}: {e}", path.display()))?;
-    let patterns: Vec<String> = text
-        .lines()
-        .map(strip_quarantine_comment)
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            format!(
-                "^{}$",
-                l.split('*')
-                    .map(regex::escape)
-                    .collect::<Vec<_>>()
-                    .join(".*")
-            )
-        })
-        .collect();
-    if patterns.is_empty() {
-        sink.warn(&format!(
-            "rstest: --quarantine: {} lists no patterns",
-            path.display()
-        ));
-    }
-    Ok(patterns)
-}
-
-/// One quarantine line without its comment: a leading `#` blanks the line,
-/// and a `#` preceded by whitespace ends the pattern. A `#` glued to the
-/// nodeid (a param id like `test_a[#1]`) stays part of the pattern.
-fn strip_quarantine_comment(line: &str) -> &str {
-    let line = line.trim();
-    if line.starts_with('#') {
-        return "";
-    }
-    let end = line
-        .char_indices()
-        .find(|&(i, c)| c == '#' && line[..i].ends_with(char::is_whitespace))
-        .map_or(line.len(), |(i, _)| i);
-    line[..end].trim_end()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         apply_diff_cov_gate, build_diff_lines, build_run_meta, copy_diff_cov_json, covtool_command,
         diff_cov_gate, finalize_output, maybe_auto_compact, merge_fixtures, merged_lastfailed,
-        print_warnings_summary, quarantine_note, quarantine_set, reconcile_cov_status,
-        report_push_result, resolve_compact_threshold, results_bar_line, stopping_banner,
-        validate_regress_ratio, warn_cov_only_in_addopts, warn_doctor_gate_passthrough,
-        write_report_json, write_run_reports, write_teamcity_flaky,
+        print_warnings_summary, quarantine_note, reconcile_cov_status, report_push_result,
+        resolve_compact_threshold, results_bar_line, stopping_banner, validate_regress_ratio,
+        warn_cov_only_in_addopts, warn_doctor_gate_passthrough, write_report_json,
+        write_run_reports, write_teamcity_flaky,
     };
     use crate::reporting::color::Palette;
     use crate::reporting::progress;
@@ -1641,278 +1714,6 @@ mod tests {
         b.fingerprint = Some("mod_b".into());
         let per_worker = merge_fixtures(vec![a, b]);
         assert!(!per_worker[0].constant);
-    }
-
-    fn write_quarantine(suffix: &str, body: &str) -> std::path::PathBuf {
-        // Unique per-test name (pid + suffix) so parallel tests never collide.
-        let path = std::env::temp_dir().join(format!(
-            "rstest-quarantine-test-{}-{suffix}.txt",
-            std::process::id()
-        ));
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    fn quarantine_matcher(
-        path: &std::path::Path,
-        sink: &mut Sink,
-    ) -> anyhow::Result<regex::RegexSet> {
-        let none = crate::reporting::history::History::default();
-        quarantine_set(Some(path), 0, 5, &mut none.into(), sink).map(|s| s.unwrap().all)
-    }
-
-    /// History where `id` has outcomes `outcomes`, one run each.
-    fn history_of(tests: &[(&str, &[&str])]) -> crate::reporting::history::History {
-        use crate::reporting::history::{outcome_code, Entry, History, RunMeta};
-        let mut h = History::default();
-        let runs = tests.iter().map(|(_, o)| o.len()).max().unwrap_or(0);
-        for seq in 0..runs as u64 {
-            h.runs.push(RunMeta {
-                seq,
-                id: format!("r{seq}"),
-                epoch: 0,
-                // One clean commit: pass->fail flips only count within one.
-                commit: Some("c".into()),
-                env: String::new(),
-            });
-        }
-        for (id, outcomes) in tests {
-            h.tests.insert(
-                id.to_string(),
-                outcomes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, o)| Entry {
-                        run: i as u64,
-                        outcome: outcome_code(o).unwrap(),
-                        call: None,
-                        setup: 0.0,
-                    })
-                    .collect(),
-            );
-        }
-        h
-    }
-
-    #[test]
-    fn quarantine_set_unions_file_with_auto_flippers() {
-        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
-        let broke: &[&str] = &["passed", "failed", "failed", "failed"];
-        // `[1]` would be a regex class if the nodeid were not escaped.
-        let h = history_of(&[("a.py::flap[1]", flap), ("a.py::broke", broke)]);
-        let path = write_quarantine("auto", "b.py::*\n");
-
-        let (mut sink, cap) = Sink::captured();
-        let set = quarantine_set(Some(&path), 3, 100, &mut h.clone().into(), &mut sink)
-            .unwrap()
-            .unwrap()
-            .all;
-        assert!(set.is_match("a.py::flap[1]"));
-        assert!(!set.is_match("a.py::flap1"));
-        assert!(!set.is_match("a.py::broke")); // steady regression still fails
-        assert!(set.is_match("b.py::test_x")); // file patterns kept
-        let err = cap.err();
-        assert!(err.contains("--auto-quarantine: 1 test(s)"), "{err}");
-        assert!(err.contains("a.py::flap[1]"), "{err}");
-
-        // Auto alone, below threshold or off: nothing to match, no banner.
-        for auto in [4, 0] {
-            let (mut sink, cap) = Sink::captured();
-            assert!(
-                quarantine_set(None, auto, 100, &mut h.clone().into(), &mut sink)
-                    .unwrap()
-                    .is_none()
-            );
-            assert_eq!(cap.err(), "");
-        }
-        // Off: the history file is never read (a large suite's costs a few
-        // hundred milliseconds per run).
-        let mut unread = crate::reporting::history::RunHistory::default();
-        assert!(
-            quarantine_set(None, 0, 100, &mut unread, &mut Sink::captured().0)
-                .unwrap()
-                .is_none()
-        );
-        assert!(!unread.is_loaded());
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn auto_quarantine_cap_counts_this_runs_failures() {
-        use crate::reporting::report::Run;
-        use crate::scheduling::proto::Report;
-        let rep = |nodeid: &str, when: &str, outcome: &str| Report {
-            nodeid: nodeid.into(),
-            when: when.into(),
-            outcome: outcome.into(),
-            duration: 0.1,
-            longrepr: None,
-            wasxfail: false,
-            skip_reason: None,
-            cpu: None,
-            sections: Vec::new(),
-            lineno: None,
-            thread_delta: None,
-            fd_delta: None,
-            subtest: false,
-            crash: None,
-            cause: None,
-            xfail_reason: None,
-            skip_location: None,
-            network: Vec::new(),
-            marker_timeout: None,
-            no_rerun: false,
-            subtest_desc: None,
-            subtest_shown: false,
-        };
-        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
-        let h = history_of(&[("t.py::f1", flap), ("t.py::f2", flap), ("t.py::f3", flap)]);
-        let path = write_quarantine("capfile", "t.py::f1\n");
-        let q = quarantine_set(
-            Some(&path),
-            3,
-            5,
-            &mut h.clone().into(),
-            &mut Sink::captured().0,
-        )
-        .unwrap()
-        .unwrap();
-        let run_of = |failing: &[&str], passing: usize| {
-            let mut run = Run::default();
-            for id in failing {
-                run.record(None, rep(id, "call", "failed"));
-            }
-            for i in 0..passing {
-                run.record(None, rep(&format!("t.py::ok{i}"), "call", "passed"));
-            }
-            run
-        };
-
-        // 40 tests, 5% cap = 2: f2 + f3 failing is at the cap -> all demoted.
-        // f1 is in the file and never counts toward the cap.
-        let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 37);
-        let (mut sink, cap) = Sink::captured();
-        let (m, auto) = q.demotion_matcher(&run, &mut sink);
-        assert!(auto && m.is_match("t.py::f2") && m.is_match("t.py::f3"));
-        assert_eq!(cap.err(), "");
-
-        // Same failures in a 20-test run: cap = 1, over it -> none of the auto
-        // set is demoted, the file's test still is.
-        let run = run_of(&["t.py::f1", "t.py::f2", "t.py::f3"], 17);
-        let (mut sink, cap) = Sink::captured();
-        let (m, auto) = q.demotion_matcher(&run, &mut sink);
-        assert!(!auto && m.is_match("t.py::f1"));
-        assert!(!m.is_match("t.py::f2") && !m.is_match("t.py::f3"));
-        let err = cap.err();
-        assert!(
-            err.contains("2 auto-quarantined test(s) failed, over the cap of 1 (5% of 20"),
-            "{err}"
-        );
-
-        // Passing auto-set tests don't count: a tiny run with one failure is
-        // under the floor of one test.
-        let run = run_of(&["t.py::f2"], 1);
-        assert!(q
-            .demotion_matcher(&run, &mut Sink::captured().0)
-            .0
-            .is_match("t.py::f2"));
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// `-x` cut the run short: the in-run count held the auto failures against
-    /// a cap from the collected total, so the post-run demotion must use that
-    /// same total, not the handful of tests that got to report.
-    #[test]
-    fn auto_quarantine_cap_uses_the_in_run_total_after_an_early_stop() {
-        use crate::reporting::report::Run;
-        use crate::scheduling::proto::Report;
-        let rep = |nodeid: String, outcome: &str| Report {
-            nodeid,
-            when: "call".into(),
-            outcome: outcome.into(),
-            duration: 0.1,
-            longrepr: None,
-            wasxfail: false,
-            skip_reason: None,
-            cpu: None,
-            sections: Vec::new(),
-            lineno: None,
-            thread_delta: None,
-            fd_delta: None,
-            subtest: false,
-            crash: None,
-            xfail_reason: None,
-            skip_location: None,
-            network: Vec::new(),
-            marker_timeout: None,
-            no_rerun: false,
-            subtest_desc: None,
-            subtest_shown: false,
-            cause: None,
-        };
-        let flap: &[&str] = &["passed", "failed", "passed", "failed", "passed", "failed"];
-        let ids = ["t.py::f1", "t.py::f2", "t.py::f3", "t.py::f4"];
-        let h = history_of(&ids.map(|id| (id, flap)));
-        let q = quarantine_set(None, 3, 5, &mut h.clone().into(), &mut Sink::captured().0)
-            .unwrap()
-            .unwrap();
-        // 1000 collected, stopped after 41 reported: in-run cap 50, not 3.
-        let mut run = Run::default();
-        for id in ids {
-            run.record(None, rep(id.into(), "failed"));
-        }
-        for i in 0..37 {
-            run.record(None, rep(format!("t.py::ok{i}"), "passed"));
-        }
-        run.cap_total = Some(1000);
-        let (mut sink, cap) = Sink::captured();
-        let (m, _) = q.demotion_matcher(&run, &mut sink);
-        assert!(ids.iter().all(|id| m.is_match(id)));
-        assert_eq!(cap.err(), "");
-    }
-
-    #[test]
-    fn quarantine_matcher_handles_exact_globs_comments_blanks() {
-        let path = write_quarantine(
-            "mixed",
-            "# a comment\n\ntest_foo.py::test_a\ntest_bar.py::*\n",
-        );
-        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
-        assert_eq!(set.len(), 2); // comment + blank line skipped
-        assert!(set.is_match("test_foo.py::test_a")); // exact
-        assert!(!set.is_match("test_foo.py::test_ab")); // anchored: no substring match
-        assert!(set.is_match("test_bar.py::test_z")); // glob
-        assert!(!set.is_match("other.py::test_a"));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn quarantine_matcher_strips_trailing_comments() {
-        let path = write_quarantine(
-            "trailing",
-            "test_foo.py::test_a  # JIRA-1\ntest_bar.py::*\t# flaky on CI\ntest_p.py::test_b[#1]\n",
-        );
-        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
-        assert_eq!(set.len(), 3);
-        assert!(set.is_match("test_foo.py::test_a"));
-        assert!(set.is_match("test_bar.py::test_z"));
-        assert!(set.is_match("test_p.py::test_b[#1]")); // glued `#` is not a comment
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn quarantine_matcher_empty_when_only_comments() {
-        let path = write_quarantine("empty", "# nothing here\n\n");
-        let set = quarantine_matcher(&path, &mut Sink::captured().0).unwrap();
-        assert_eq!(set.len(), 0);
-        assert!(!set.is_match("test_foo.py::test_a"));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn quarantine_matcher_errors_on_missing_file() {
-        let path = std::env::temp_dir().join("rstest-quarantine-does-not-exist-xyz.txt");
-        assert!(quarantine_matcher(&path, &mut Sink::captured().0).is_err());
     }
 
     #[test]
