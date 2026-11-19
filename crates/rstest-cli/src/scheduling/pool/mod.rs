@@ -914,25 +914,8 @@ pub fn run_pool(
                     .filter(|&i| Some(i) != crashed)
                     .collect();
                 let restartable = states[idx].collected && restarts_left > 0;
-                // The crashed item retries only when BOTH the rerun and the
-                // restart budgets allow (segfault-loop guard); otherwise it is
-                // reported failed, not retried.
-                let mut report_crash = crashed;
-                if let (true, Some(i)) = (restartable, crashed) {
-                    // Same known-flaky gate as the ItemDone path: a crash of a
-                    // non-known-flaky, unmarked test is not retried when
-                    // --reruns-only-known-flaky is on.
-                    let known_ok = retry.known_flaky_ok(&ids_store, i);
-                    let budget = retry.budget(i);
-                    let used = retry.used.entry(i).or_insert(0);
-                    if *used < budget && known_ok {
-                        *used += 1;
-                        if let Some(d) = dispatch.as_mut() {
-                            d.requeued.push_back(i);
-                        }
-                        report_crash = None;
-                    }
-                }
+                let report_crash =
+                    retry_crashed(crashed, restartable, &mut retry, &ids_store, &mut dispatch);
                 if let Some(i) = report_crash {
                     let fab = orchestrator::fabricate_crash_report(
                         report_nodeid(&ids_store, dist, idx, i),
@@ -983,28 +966,15 @@ pub fn run_pool(
                     // survivor is left to run is swept up after the loop.
                     if dist == Dist::Each || pinned.is_some() {
                         let held = replay.serial_held[idx].take().unwrap_or_default();
-                        let reason = format!(
-                            "worker gw{idx} crashed and the restart budget was spent; \
-                             under {} its tests cannot move to another worker",
-                            if dist == Dist::Each {
-                                "--dist each"
-                            } else {
-                                "replay"
-                            }
+                        report_slot_lost(
+                            idx,
+                            rest.into_iter().chain(held),
+                            dist,
+                            &ids_store,
+                            &mut run,
+                            &mut prog,
+                            sink,
                         );
-                        for i in rest.into_iter().chain(held) {
-                            let fab = orchestrator::fabricate_lost_report(
-                                report_nodeid(&ids_store, dist, idx, i),
-                                &reason,
-                            );
-                            orchestrator::record_fabricated(
-                                sink,
-                                &mut run,
-                                &mut prog,
-                                Some(idx),
-                                fab,
-                            );
-                        }
                     } else if let Some(d) = dispatch.as_mut() {
                         d.requeued.extend(rest);
                     }
@@ -1240,6 +1210,63 @@ pub fn run_pool(
         lazy: false,
         exiting,
     })
+}
+
+/// The crashed item retries only when BOTH the rerun and the restart budgets
+/// allow (segfault-loop guard); otherwise it is reported failed, not retried.
+/// Returns the item to report as crashed, if any.
+fn retry_crashed(
+    crashed: Option<u64>,
+    restartable: bool,
+    retry: &mut Reruns,
+    ids_store: &Option<Vec<String>>,
+    dispatch: &mut Option<Dispatch>,
+) -> Option<u64> {
+    let mut report_crash = crashed;
+    if let (true, Some(i)) = (restartable, crashed) {
+        // Same known-flaky gate as the ItemDone path: a crash of a
+        // non-known-flaky, unmarked test is not retried when
+        // --reruns-only-known-flaky is on.
+        let known_ok = retry.known_flaky_ok(ids_store, i);
+        let budget = retry.budget(i);
+        let used = retry.used.entry(i).or_insert(0);
+        if *used < budget && known_ok {
+            *used += 1;
+            if let Some(d) = dispatch.as_mut() {
+                d.requeued.push_back(i);
+            }
+            report_crash = None;
+        }
+    }
+    report_crash
+}
+
+/// A worker died for good under `--dist each` or replay: its items are bound
+/// to its slot (each worker runs its own copy; replay pins the recorded
+/// worker), so they cannot move to a survivor. Report them as not run.
+fn report_slot_lost(
+    idx: usize,
+    items: impl Iterator<Item = u64>,
+    dist: Dist,
+    ids_store: &Option<Vec<String>>,
+    run: &mut Run,
+    prog: &mut Progress,
+    sink: &mut Sink,
+) {
+    let reason = format!(
+        "worker gw{idx} crashed and the restart budget was spent; \
+         under {} its tests cannot move to another worker",
+        if dist == Dist::Each {
+            "--dist each"
+        } else {
+            "replay"
+        }
+    );
+    for i in items {
+        let fab =
+            orchestrator::fabricate_lost_report(report_nodeid(ids_store, dist, idx, i), &reason);
+        orchestrator::record_fabricated(sink, run, prog, Some(idx), fab);
+    }
 }
 
 /// A worker finished item `index`: retry it if its attempt failed with budget
