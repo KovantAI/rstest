@@ -376,6 +376,8 @@ wait has its fastest recorded time saved to the duration cache (so the next
 run doesn't schedule it as a long pole), and
 [`--durations-regress`](slowdowns.md#what-counts-as-a-regression) doesn't
 judge it. The run history keeps the real time.
+[`rstest explain <nodeid>`](../reference/cli-commands.md#explain) shows either
+side for one test: the wait it leaves, or the waits it carried.
 
 ### startup
 

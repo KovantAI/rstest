@@ -18,7 +18,8 @@ between 0.x releases and are listed here.
   A test that carried such a wait no longer pays for it later: its fastest
   recorded time goes to the duration cache, so the next run doesn't schedule
   it as a long pole, and `--durations-regress` doesn't judge it (it says so
-  on stderr). See
+  on stderr). `rstest explain <nodeid>` shows the wait a test leaves or the
+  waits it carried (`waits` in `--json`). See
   [Doctor: absorbed waits](docs/guides/doctor.md#absorbed-waits).
 
 ### Fixes

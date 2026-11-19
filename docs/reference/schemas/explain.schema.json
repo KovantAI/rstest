@@ -76,6 +76,17 @@
       ],
       "format": "uint64",
       "minimum": 0
+    },
+    "waits": {
+      "description": "Waits left running across tests (see the doctor's absorbed waits):\n`null` unless this test leaves one or carried one.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Waits"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -87,9 +98,76 @@
     "source_line",
     "flakes",
     "coverage",
-    "history"
+    "history",
+    "waits"
   ],
   "definitions": {
+    "Absorbed": {
+      "description": "A wait `nodeid` carried: it ran right after `culprit` on its worker and\nwas that much slower than its fastest recorded passing call.",
+      "type": "object",
+      "properties": {
+        "culprit": {
+          "description": "The test before it that left the wait.",
+          "type": "string"
+        },
+        "lump_seconds": {
+          "description": "Median extra call time over those runs, in seconds.",
+          "type": "number",
+          "format": "double"
+        },
+        "runs": {
+          "description": "Recorded runs where it carried this culprit's wait.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "culprit",
+        "lump_seconds",
+        "runs"
+      ]
+    },
+    "AbsorbedWait": {
+      "type": "object",
+      "properties": {
+        "absorbed_by": {
+          "description": "Tests that carried it, most recent first (up to 3).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "culprit": {
+          "description": "The test that leaves the wait behind.",
+          "type": "string"
+        },
+        "lump_seconds": {
+          "description": "Median extra call time of the test that ran next on its worker, in\nseconds (its call time minus its fastest recorded passing call).",
+          "type": "number",
+          "format": "double"
+        },
+        "of_runs": {
+          "description": "Recorded runs where the culprit had a next test on its worker.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "runs": {
+          "description": "Recorded runs where the next test carried the lump.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "culprit",
+        "lump_seconds",
+        "runs",
+        "of_runs",
+        "absorbed_by"
+      ]
+    },
     "Coverage": {
       "description": "The coverage footprint of one test: the source files it covered and the\ntotal number of covered lines across them.",
       "type": "object",
@@ -314,6 +392,34 @@
         "sha",
         "author",
         "subject"
+      ]
+    },
+    "Waits": {
+      "description": "This test's side of an absorbed wait, from the run history and the replay\njournals of the same runs.",
+      "type": "object",
+      "properties": {
+        "absorbs": {
+          "description": "Waits this test carried: runs where it ran right after a test that\nleaves one and was slower by it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Absorbed"
+          }
+        },
+        "leaves": {
+          "description": "Set when this test leaves work running that the next test on its\nworker waits out.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsorbedWait"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "leaves",
+        "absorbs"
       ]
     }
   }

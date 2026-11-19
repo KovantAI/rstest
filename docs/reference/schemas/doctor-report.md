@@ -28,7 +28,7 @@ Source: `--doctor-json`
 | `wall_seconds` | number | yes | Wall-clock time of the whole run, in seconds. |
 | `workers` | integer | yes | Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run. |
 
-### AbsorbedWait
+### AbsorbedWait (Doctor report)
 
 | Field | Type | Required | Description |
 |---|---|---|---|

@@ -133,6 +133,71 @@ pub fn absorbed_in_run(
         .collect()
 }
 
+/// A wait `nodeid` carried: it ran right after `culprit` on its worker and
+/// was that much slower than its fastest recorded passing call.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub struct Absorbed {
+    /// The test before it that left the wait.
+    pub culprit: String,
+    /// Median extra call time over those runs, in seconds.
+    pub lump_seconds: f64,
+    /// Recorded runs where it carried this culprit's wait.
+    pub runs: usize,
+}
+
+/// Across the journaled history runs: the waits `nodeid` carried from known
+/// `culprits`, one row per culprit, most runs first.
+pub fn absorbed_by(
+    history: &History,
+    culprits: &[AbsorbedWait],
+    orders: &HashMap<String, Vec<Vec<String>>>,
+    nodeid: &str,
+) -> Vec<Absorbed> {
+    let Some(&fast) = fastest(history).get(nodeid) else {
+        return Vec::new();
+    };
+    let mut lumps: HashMap<&str, Vec<f64>> = HashMap::new();
+    for run in &history.runs {
+        let Some(workers) = orders.get(&run.id) else {
+            continue;
+        };
+        let call = history
+            .tests
+            .get(nodeid)
+            .and_then(|entries| entries.iter().find(|e| e.run == run.seq))
+            .filter(|e| is_pass(e.outcome_name()))
+            .and_then(|e| e.call.map(f64::from));
+        let Some(call) = call.filter(|&c| is_lump(c, fast)) else {
+            continue;
+        };
+        let before = workers
+            .iter()
+            .flat_map(|w| w.windows(2))
+            .find(|pair| pair[1] == nodeid)
+            .map(|pair| pair[0].as_str());
+        if let Some(c) = before.and_then(|b| culprits.iter().find(|c| c.culprit == b)) {
+            lumps
+                .entry(c.culprit.as_str())
+                .or_default()
+                .push(call - fast);
+        }
+    }
+    let mut out: Vec<Absorbed> = lumps
+        .into_iter()
+        .map(|(culprit, mut l)| {
+            l.sort_by(f64::total_cmp);
+            Absorbed {
+                culprit: culprit.to_string(),
+                lump_seconds: (median(&l) * 1e4).round() / 1e4,
+                runs: l.len(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.runs.cmp(&a.runs).then_with(|| a.culprit.cmp(&b.culprit)));
+    out
+}
+
 /// Each test's fastest recorded passing call.
 fn fastest(history: &History) -> HashMap<&str, f64> {
     history
@@ -274,6 +339,40 @@ mod tests {
         // Fast this time: nothing absorbed.
         let calls = HashMap::from([("a", 0.3)]);
         assert_eq!(absorbed_in_run(&h, &culprits, &order, &calls), []);
+    }
+
+    #[test]
+    fn lists_the_waits_one_test_carried() {
+        let h = history(
+            3,
+            &[
+                ("timeout", &[Some(0.1), Some(0.1), Some(0.1)]),
+                ("a", &[Some(10.0), Some(0.25), Some(9.0)]),
+            ],
+        );
+        let culprits = [AbsorbedWait {
+            culprit: "timeout".into(),
+            lump_seconds: 9.5,
+            runs: 2,
+            of_runs: 2,
+            absorbed_by: Vec::new(),
+        }];
+        let o = orders(&[
+            &[&["timeout", "a"]],
+            &[&["timeout", "a"]],
+            // Slow again, but after another test: not this culprit's wait.
+            &[&["x", "a"], &["timeout"]],
+        ]);
+        let got = absorbed_by(&h, &culprits, &o, "a");
+        assert_eq!(
+            got,
+            [Absorbed {
+                culprit: "timeout".into(),
+                lump_seconds: 9.75,
+                runs: 1,
+            }]
+        );
+        assert_eq!(absorbed_by(&h, &culprits, &o, "timeout"), []);
     }
 
     #[test]
