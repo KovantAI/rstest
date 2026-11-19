@@ -631,12 +631,61 @@ pub fn analyze(
     let cpu_time: f64 = durations.iter().filter_map(|(_, _, c)| *c).sum();
     let n_cpu = durations.iter().filter(|(_, _, c)| c.is_some()).count();
 
-    // -- Wait-bound: wall vs cpu ---------------------------------------
+    // Wait: test time not spent on cpu, as seconds and a share of test time.
     let measured_wait = (n_cpu > 0).then(|| {
         let wait = (test_time - cpu_time).max(0.0);
         (wait, 100.0 * wait / test_time.max(f64::EPSILON))
     });
-    let wait_bound = if let Some((wait, pct)) = measured_wait {
+    let wait_bound = wait_bound(&durations, measured_wait);
+
+    // Slowest first, for the long pole and the parallel floor.
+    durations.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let long_pole = durations.first().map(|(_, d, _)| *d);
+    let parallel_floor = parallel_floor(&durations, test_time, workers);
+
+    let parallel_efficiency =
+        parallel_efficiency(run, workers, test_time, wall, long_pole.unwrap_or(0.0));
+
+    let fx = fixture_entries(fixtures);
+    let files = slowest_files(&durations, test_time);
+    let coverage_waste = coverage_waste_of(run, &durations, coverage);
+
+    let leaks = detect_leaks(run);
+
+    DoctorReport {
+        schema: SCHEMA_VERSION,
+        rstest_version: env!("CARGO_PKG_VERSION"),
+        workers,
+        wall_seconds: wall,
+        startup_seconds: startup,
+        fork_prewarm,
+        warm: None,
+        tests: durations.len(),
+        test_time_seconds: test_time,
+        cpu_time_seconds: cpu_time,
+        wait_bound,
+        measured_wait,
+        long_pole_seconds: long_pole,
+        parallel_floor,
+        parallel_efficiency,
+        fixtures: fx,
+        fixture_grouping: None,
+        slowest_files: files,
+        coverage_waste,
+        timeouts: None,
+        drift: None,
+        network: network_access(run),
+        leaks,
+    }
+}
+
+/// Wait-bound: a run whose test time is mostly waiting (wall vs cpu), with
+/// the tests that wait the most.
+fn wait_bound(
+    durations: &[(&String, f64, Option<f64>)],
+    measured_wait: Option<(f64, f64)>,
+) -> Option<WaitBound> {
+    if let Some((wait, pct)) = measured_wait {
         if pct >= 20.0 && wait >= 1.0 {
             let mut waiters: Vec<WaitTest> = durations
                 .iter()
@@ -661,12 +710,17 @@ pub fn analyze(
         }
     } else {
         None
-    };
+    }
+}
 
-    // -- Parallel floor --------------------------------------------------
-    durations.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let long_pole = durations.first().map(|(_, d, _)| *d);
-    let parallel_floor = durations.first().and_then(|&(_, longest, _)| {
+/// Parallel floor: the longest tests when one outlasts a worker's even share.
+/// `durations` is sorted slowest first.
+fn parallel_floor(
+    durations: &[(&String, f64, Option<f64>)],
+    test_time: f64,
+    workers: usize,
+) -> Option<ParallelFloor> {
+    durations.first().and_then(|&(_, longest, _)| {
         let ideal = test_time / workers.max(1) as f64;
         // A test only gates the wall when it clearly outlasts a worker's even
         // share: N equal tests on N workers sit exactly at the share, and
@@ -685,12 +739,21 @@ pub fn analyze(
                 })
                 .collect(),
         })
-    });
+    })
+}
 
-    // -- Parallel efficiency (realized speedup + worker load balance) ------
-    // Multi-worker only. Groups already-collected per-test durations by
-    // recorded worker to expose load imbalance without new timeline data.
-    let parallel_efficiency = (workers > 1 && test_time > 0.0).then(|| {
+/// Parallel efficiency: realized speedup and worker load balance.
+/// Multi-worker only. Groups already-collected per-test durations by
+/// recorded worker to expose load imbalance without new timeline data.
+fn parallel_efficiency(
+    run: &Run,
+    workers: usize,
+    test_time: f64,
+    wall: f64,
+    long_pole: f64,
+) -> Option<ParallelEfficiency> {
+    let tests = run.tests();
+    (workers > 1 && test_time > 0.0).then(|| {
         let mut by_worker: BTreeMap<&str, (f64, usize)> = BTreeMap::new();
         for e in tests.values() {
             if let Some(d) = e.protocol_seconds() {
@@ -730,11 +793,13 @@ pub fn analyze(
             efficiency_pct: 100.0 * realized / workers as f64,
             workers_busy,
             imbalance_pct,
-            long_pole_seconds: long_pole.unwrap_or(0.0),
+            long_pole_seconds: long_pole,
         }
-    });
+    })
+}
 
-    // -- Fixtures ----------------------------------------------------------
+/// The fixture rows: the 50 costliest fixtures, with their promotion saving.
+fn fixture_entries(fixtures: &[FixtureStat]) -> Vec<FixtureEntry> {
     let mut fx: Vec<FixtureEntry> = fixtures
         .iter()
         .map(|f| {
@@ -758,10 +823,13 @@ pub fn analyze(
         .collect();
     fx.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
     fx.truncate(50);
+    fx
+}
 
-    // -- Slowest files ------------------------------------------------------
+/// The 20 slowest test files by summed protocol time.
+fn slowest_files(durations: &[(&String, f64, Option<f64>)], test_time: f64) -> Vec<FileEntry> {
     let mut by_file: BTreeMap<&str, f64> = BTreeMap::new();
-    for (id, d, _) in &durations {
+    for (id, d, _) in durations {
         let file = crate::text::nodeid_file(id);
         *by_file.entry(file).or_default() += d;
     }
@@ -775,13 +843,20 @@ pub fn analyze(
         .collect();
     files.sort_by(|a, b| b.total_seconds.total_cmp(&a.total_seconds));
     files.truncate(20);
+    files
+}
 
-    // -- Coverage waste (slow tests adding no unique coverage) --------------
-    // `coverage` is this run's own per-test index (see run_post_gates), so its
-    // nodeids and line numbers describe the code as it is now. Only PASSED tests
-    // count: a skipped or failed test's call time says nothing about what it
-    // covers, and it is no stand-in for a test that did run.
-    let coverage_waste = coverage.and_then(|(index, project)| {
+/// Coverage waste: slow tests adding no unique coverage.
+/// `coverage` is this run's own per-test index (see run_post_gates), so its
+/// nodeids and line numbers describe the code as it is now. Only PASSED tests
+/// count: a skipped or failed test's call time says nothing about what it
+/// covers, and it is no stand-in for a test that did run.
+fn coverage_waste_of(
+    run: &Run,
+    durations: &[(&String, f64, Option<f64>)],
+    coverage: Option<(&CoverageIndex, &ProjectConfig)>,
+) -> Option<CoverageWaste> {
+    coverage.and_then(|(index, project)| {
         let passed = run.green_nodeids();
         let duration_of: HashMap<&str, f64> = durations
             .iter()
@@ -791,35 +866,7 @@ pub fn analyze(
         coverage_waste(&duration_of, index, WASTE_MIN_SECONDS, |file| {
             crate::collect::is_test_file(std::path::Path::new(file), project)
         })
-    });
-
-    let leaks = detect_leaks(run);
-
-    DoctorReport {
-        schema: SCHEMA_VERSION,
-        rstest_version: env!("CARGO_PKG_VERSION"),
-        workers,
-        wall_seconds: wall,
-        startup_seconds: startup,
-        fork_prewarm,
-        warm: None,
-        tests: durations.len(),
-        test_time_seconds: test_time,
-        cpu_time_seconds: cpu_time,
-        wait_bound,
-        measured_wait,
-        long_pole_seconds: long_pole,
-        parallel_floor,
-        parallel_efficiency,
-        fixtures: fx,
-        fixture_grouping: None,
-        slowest_files: files,
-        coverage_waste,
-        timeouts: None,
-        drift: None,
-        network: network_access(run),
-        leaks,
-    }
+    })
 }
 
 /// Slow tests that can be deleted TOGETHER without losing any covered line -
