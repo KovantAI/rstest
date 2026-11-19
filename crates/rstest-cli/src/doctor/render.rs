@@ -722,7 +722,7 @@ fn plural(n: i64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::report;
+    use super::super::tests::testutil::report;
     use super::*;
 
     #[test]

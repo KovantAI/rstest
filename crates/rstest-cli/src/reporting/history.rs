@@ -337,12 +337,17 @@ pub fn is_fail(outcome: &str) -> bool {
     matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
 }
 
+/// A passing outcome (a flaky pass counts).
+pub fn is_pass(outcome: &str) -> bool {
+    matches!(outcome, "passed" | "flaky")
+}
+
 /// The latest 3 pass/fail results (oldest-first `outcomes`) all failed: it
 /// broke and isn't flapping now.
 pub fn failing_now<'a>(outcomes: impl DoubleEndedIterator<Item = &'a str>) -> bool {
     let tail: Vec<&str> = outcomes
         .rev()
-        .filter(|o| is_fail(o) || matches!(*o, "passed" | "flaky"))
+        .filter(|o| is_fail(o) || is_pass(o))
         .take(3)
         .collect();
     tail.len() == 3 && tail.iter().all(|o| is_fail(o))

@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::reporting::color::Palette;
 use crate::reporting::flakes::FlakeStats;
-use crate::reporting::history::{failing_now, Entry, RunMeta};
+use crate::reporting::history::{failing_now, is_fail, is_pass, Entry, RunMeta};
 use crate::reporting::sink::Sink;
 use crate::select::{CoverageIndex, COVERAGE_INDEX_FILE, COVERAGE_INDEX_SCHEMA};
 
@@ -137,14 +137,6 @@ pub(crate) struct ExplainReport {
     coverage: Option<Coverage>,
     /// Recent runs, if the per-test history has any.
     history: Option<HistorySummary>,
-}
-
-fn is_pass(outcome: &str) -> bool {
-    matches!(outcome, "passed" | "flaky")
-}
-
-fn is_fail(outcome: &str) -> bool {
-    matches!(outcome, "failed" | "errors" | "crashed" | "quarantined")
 }
 
 fn is_neutral(outcome: &str) -> bool {
