@@ -730,6 +730,7 @@ fn gate_doctor(
         coverage_index.as_ref().zip(project.as_ref()),
     )
     .with_history(&outcome.run, history.get())
+    .with_absorbed(&outcome.run, history.get(), &crate::replay::recent_orders())
     .with_fixture_groups(&outcome.run, &outcome.fixture_groups)
     .with_warm(outcome.warm.clone());
     // In json mode stdout is a pure NDJSON stream, so the doctor's human
@@ -918,6 +919,7 @@ fn save_run_records(
     let PostRun {
         start,
         started_epoch,
+        run_uid,
         history_commit,
         env_fp,
         ..
@@ -968,7 +970,15 @@ fn save_run_records(
     let history_slice = if cli.instrument_workers {
         None
     } else {
-        history::slice(&outcome.run, started_epoch, history_commit, env_fp)
+        // Keyed by this run's uid, which also names its replay journal (the
+        // doctor's absorbed-wait check pairs the two). A uid handed down
+        // through RSTEST_RUN_UID (monorepo children, probe runs) can repeat,
+        // and history dedupes runs by id, so those get a fresh one.
+        let id = match std::env::var_os("RSTEST_RUN_UID") {
+            Some(_) => crate::run::new_run_uid(),
+            None => run_uid.to_string(),
+        };
+        history::slice(&outcome.run, id, started_epoch, history_commit, env_fp)
     };
     if let Some(slice) = &history_slice {
         history.record(slice.clone());

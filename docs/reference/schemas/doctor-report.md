@@ -6,6 +6,7 @@ Source: `--doctor-json`
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `absorbed_waits` | array of AbsorbedWait | no | Tests that leave a wait behind for whichever test runs next on their worker (the follower's call time carries the lump), from the run history paired with the replay journals. Empty unless one recurs. |
 | `coverage_waste` | CoverageWaste or null | yes | Slow tests whose every covered line is also covered by another test - delete/merge candidates. `None` unless a per-test coverage index was warm (`--cov --cov-context=test`) and at least one test qualified. |
 | `cpu_time_seconds` | number | yes | Sum of whole-protocol CPU time (the worker process plus child processes it waited for), over tests where it was measured. |
 | `drift` | Drift or null | yes | Tests whose typical call time crept up across their recorded runs, in steps too small for `--durations-regress`. `null` unless one did. |
@@ -26,6 +27,16 @@ Source: `--doctor-json`
 | `wait_bound` | WaitBound or null | yes | Present only when waiting is a notable share (>= 20% and >= 1s); `--doctor-fail-on` gates `wait_*` on the measured values regardless. |
 | `wall_seconds` | number | yes | Wall-clock time of the whole run, in seconds. |
 | `workers` | integer | yes | Workers that ran tests: 1 for a single-worker (`-n 0` / `-n 1`) run. |
+
+### AbsorbedWait
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `absorbed_by` | array of string | yes | Tests that carried it, most recent first (up to 3). |
+| `culprit` | string | yes | The test that leaves the wait behind. |
+| `lump_seconds` | number | yes | Median extra call time of the test that ran next on its worker, in seconds (its call time minus its fastest recorded passing call). |
+| `of_runs` | integer | yes | Recorded runs where the culprit had a next test on its worker. |
+| `runs` | integer | yes | Recorded runs where the next test carried the lump. |
 
 ### CoverageWaste
 

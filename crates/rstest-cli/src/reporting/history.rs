@@ -516,7 +516,13 @@ pub fn load_from(path: &std::path::Path) -> History {
 /// fresh per process, never `RSTEST_RUN_UID`: CI shards, monorepo projects and
 /// an exported uid all share that one, and [`History::merged`] would keep only
 /// the first of them.
-pub fn slice(run: &Run, epoch: u64, commit: Option<&str>, env: &str) -> Option<RunSlice> {
+pub fn slice(
+    run: &Run,
+    id: String,
+    epoch: u64,
+    commit: Option<&str>,
+    env: &str,
+) -> Option<RunSlice> {
     let tests: HashMap<String, Entry> = run
         .tests()
         .iter()
@@ -528,7 +534,7 @@ pub fn slice(run: &Run, epoch: u64, commit: Option<&str>, env: &str) -> Option<R
     Some(RunSlice {
         run: RunMeta {
             seq: 0,
-            id: crate::run::new_run_uid(),
+            id,
             epoch,
             commit: commit.map(str::to_string),
             env: env.to_string(),
@@ -1394,10 +1400,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let now = crate::time::now_epoch_secs();
         // A run with no real results writes nothing.
-        assert!(super::slice(&Run::default(), now, Some("c1"), "fp").is_none());
+        assert!(super::slice(
+            &Run::default(),
+            crate::run::new_run_uid(),
+            now,
+            Some("c1"),
+            "fp"
+        )
+        .is_none());
 
         let rec = |run: &Run, at: u64, commit: Option<&str>| {
-            RunHistory::default().record_in(&dir, super::slice(run, at, commit, "fp").unwrap(), 2);
+            RunHistory::default().record_in(
+                &dir,
+                super::slice(run, crate::run::new_run_uid(), at, commit, "fp").unwrap(),
+                2,
+            );
         };
         rec(&run_of(&[("a", "passed")]), now, Some("c1"));
         rec(&run_of(&[("a", "failed"), ("b", "passed")]), now + 1, None);
@@ -1423,8 +1440,22 @@ mod tests {
     #[test]
     fn slices_of_runs_sharing_a_run_uid_all_survive_merge() {
         let now = crate::time::now_epoch_secs();
-        let shard1 = super::slice(&run_of(&[("a", "passed")]), now, Some("c1"), "fp").unwrap();
-        let shard2 = super::slice(&run_of(&[("b", "failed")]), now, Some("c1"), "fp").unwrap();
+        let shard1 = super::slice(
+            &run_of(&[("a", "passed")]),
+            crate::run::new_run_uid(),
+            now,
+            Some("c1"),
+            "fp",
+        )
+        .unwrap();
+        let shard2 = super::slice(
+            &run_of(&[("b", "failed")]),
+            crate::run::new_run_uid(),
+            now,
+            Some("c1"),
+            "fp",
+        )
+        .unwrap();
         assert_ne!(shard1.run.id, shard2.run.id);
         let h = History::merged([shard1, shard2], 50);
         assert_eq!(h.runs.len(), 2);

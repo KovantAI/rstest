@@ -20,6 +20,7 @@
 //! interleaving stays timing-dependent, as the design intends: best-effort for
 //! genuinely time-dependent races, exact for state-ordering ones.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -158,6 +159,19 @@ pub fn write(journal: &Journal) {
     }
     let _ = cache::write_atomic(&dir.join(LATEST), &bytes);
     prune(&dir);
+}
+
+/// Each kept per-uid journal's per-worker order, keyed by run uid (the
+/// doctor's absorbed-wait check). Best-effort: unreadable files are skipped.
+pub fn recent_orders() -> HashMap<String, Vec<Vec<String>>> {
+    let Ok(rd) = std::fs::read_dir(cache::dir().join(DIR)) else {
+        return HashMap::new();
+    };
+    rd.flatten()
+        .filter(|e| e.file_name() != LATEST)
+        .filter_map(|e| serde_json::from_slice::<Journal>(&std::fs::read(e.path()).ok()?).ok())
+        .map(|j| (j.run_uid, j.assignment))
+        .collect()
 }
 
 /// Keep only the newest [`KEEP`] per-uid journals (by modified time), deleting

@@ -3,6 +3,13 @@
   "title": "DoctorReport",
   "type": "object",
   "properties": {
+    "absorbed_waits": {
+      "description": "Tests that leave a wait behind for whichever test runs next on their\nworker (the follower's call time carries the lump), from the run\nhistory paired with the replay journals. Empty unless one recurs.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AbsorbedWait"
+      }
+    },
     "coverage_waste": {
       "description": "Slow tests whose every covered line is also covered by another test -\ndelete/merge candidates. `None` unless a per-test coverage index was\nwarm (`--cov --cov-context=test`) and at least one test qualified.",
       "anyOf": [
@@ -181,6 +188,46 @@
     "network"
   ],
   "definitions": {
+    "AbsorbedWait": {
+      "type": "object",
+      "properties": {
+        "absorbed_by": {
+          "description": "Tests that carried it, most recent first (up to 3).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "culprit": {
+          "description": "The test that leaves the wait behind.",
+          "type": "string"
+        },
+        "lump_seconds": {
+          "description": "Median extra call time of the test that ran next on its worker, in\nseconds (its call time minus its fastest recorded passing call).",
+          "type": "number",
+          "format": "double"
+        },
+        "of_runs": {
+          "description": "Recorded runs where the culprit had a next test on its worker.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "runs": {
+          "description": "Recorded runs where the next test carried the lump.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "culprit",
+        "lump_seconds",
+        "runs",
+        "of_runs",
+        "absorbed_by"
+      ]
+    },
     "CoverageWaste": {
       "description": "Slow tests that add no unique coverage: every line each one executes is also\nexecuted by some other test, so it can be deleted or merged without dropping\nany covered line. Pure suite bloat on the time axis.",
       "type": "object",

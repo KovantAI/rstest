@@ -775,6 +775,7 @@ pub(crate) mod testutil {
                 }],
             }),
             leaks: Vec::new(),
+            absorbed_waits: Vec::new(),
         }
     }
 
