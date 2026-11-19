@@ -317,7 +317,7 @@ fn report_push_result(w: &mut dyn Write, result: Result<()>, seg: &remote::Segme
 /// Resolve the auto-compaction threshold: the `--cache-compact-threshold` flag,
 /// else `RSTEST_CACHE_COMPACT_THRESHOLD`, else `None` (feature off). An
 /// unparseable env is an `Err`, never a silent `None` — matching
-/// [`super::resolve_retention_policy`], so a typo'd threshold is surfaced (as a
+/// [`super::cache::resolve_retention_policy`], so a typo'd threshold is surfaced (as a
 /// non-fatal warning on the best-effort push path) rather than quietly
 /// disabling auto-compaction.
 fn resolve_compact_threshold(cli: &Cli) -> Result<Option<usize>> {
@@ -364,7 +364,7 @@ fn maybe_auto_compact(cli: &Cli, t: &dyn remote::Transport, remote: &str, sink: 
         return;
     }
     // Retention window comes from env on the push path (no per-run flags).
-    let policy = match super::resolve_retention_policy(None, None) {
+    let policy = match super::cache::resolve_retention_policy(None, None) {
         Ok(p) => p,
         Err(e) => {
             sink.warn(&format!(
