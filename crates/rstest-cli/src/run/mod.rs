@@ -4,7 +4,8 @@
 //! `--collect-only` discovery doc in [`discovery`]. Worker-count sizing is in
 //! [`workers`], `--incremental` in [`incremental`], the lazy-collection choice
 //! in [`lazy`], cache maintenance in [`cache`], and the hand-off of a resolved
-//! run to its execution path in [`dispatch`].
+//! run to its execution path in [`dispatch`], and `--quarantine` in
+//! [`quarantine`].
 
 mod cache;
 pub(crate) mod discovery;
@@ -13,9 +14,9 @@ mod gates;
 mod incremental;
 mod lazy;
 mod monorepo;
+mod quarantine;
 mod workers;
 
-use std::io::Write;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -763,7 +764,7 @@ pub(crate) fn execute_inner(
     let quarantine = if passthrough {
         None
     } else {
-        gates::quarantine_set(
+        quarantine::quarantine_set(
             cli.quarantine.as_deref().or(settings.quarantine.as_deref()),
             if pinned.is_some() {
                 0
@@ -872,7 +873,7 @@ pub(crate) fn execute_inner(
         )?;
     }
 
-    apply_quarantine(
+    quarantine::apply_quarantine(
         cli,
         quarantine.as_ref(),
         &mut outcome,
@@ -1243,75 +1244,6 @@ fn network_guard(settings: &config::RstestSettings, record: bool) -> Option<work
     })
 }
 
-/// Apply `--quarantine` BEFORE any output or exit-code consumer: classification,
-/// counts, junit, report-json, and the sessionfinish envelope must all see the
-/// demoted outcomes consistently. Inert under passthrough (no aggregate Run).
-fn apply_quarantine(
-    cli: &Cli,
-    quarantine: Option<&gates::Quarantine>,
-    outcome: &mut pool::PoolOutcome,
-    passthrough: bool,
-    sink: &mut Sink,
-) -> Result<()> {
-    if passthrough {
-        // Only the explicit flag warns: a [tool.rstest] key would nag every -s run.
-        if cli.quarantine.is_some() {
-            warn_quarantine_passthrough(sink.err());
-        }
-        return Ok(());
-    }
-    let Some(q) = quarantine else {
-        return Ok(());
-    };
-    let (matcher, auto_applied) = q.demotion_matcher(&outcome.run, sink);
-    let demoted = outcome.run.quarantine(|id| matcher.is_match(id));
-    if auto_applied {
-        // The run's auto-quarantined tests (passing ones included), for the
-        // HTML report.
-        let ran: std::collections::BTreeSet<String> = q
-            .auto()
-            .iter()
-            .filter(|id| outcome.run.tests().contains_key(*id))
-            .cloned()
-            .collect();
-        outcome.run.auto_quarantined = ran;
-    }
-    outcome.exitstatus = quarantined_exit(
-        outcome.exitstatus,
-        !demoted.is_empty(),
-        outcome.run.all_passed(),
-        outcome.run.stopped_after.is_some(),
-        !auto_applied,
-    );
-    Ok(())
-}
-
-/// The exit status once quarantined failures are demoted.
-fn quarantined_exit(
-    status: i32,
-    demoted: bool,
-    all_passed: bool,
-    stopped: bool,
-    over_cap: bool,
-) -> i32 {
-    // A session's own count skips quarantined failures, so the single-session
-    // path can report 0 over the auto set's failures the demotion then keeps
-    // (over its cap): those still fail the run. Any other 0 is the session's
-    // own call (`pytest.exit(returncode=0)`, a plugin), kept as under pytest.
-    if status == 0 && over_cap && !all_passed {
-        return 1;
-    }
-    // pytest exit 1 = tests failed; if every failure was quarantined the run is
-    // green by policy. Exit codes 2+ (usage/internal errors) are never touched.
-    // A run -x / --maxfail cut short stays failed: demoted failures never
-    // count toward the limit (auto ones count only past the cap, when none is
-    // demoted), so a real failure tripped it.
-    if demoted && status == 1 && all_passed && !stopped {
-        return 0;
-    }
-    status
-}
-
 /// A pointer at the interpreter when a run failed on missing imports and
 /// discovery passed over the project's `.venv` (pre-commit's `language:
 /// python` hooks set `VIRTUAL_ENV` to the hook env, which has rstest and pytest
@@ -1478,15 +1410,6 @@ fn reject_looponfail(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Note (to `w`) that `--quarantine` is inert under passthrough IO (-s/--pdb/--co):
-/// there is no aggregate Run to demote outcomes in.
-fn warn_quarantine_passthrough(w: &mut dyn Write) {
-    let _ = writeln!(
-        w,
-        "rstest: --quarantine has no effect in passthrough mode; ignoring"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::cache::{
@@ -1506,9 +1429,8 @@ mod tests {
     };
     use super::{
         attach_stream_json, check_require_baseline, dispatch_command, head_to_none,
-        names_a_selection, print_run_banner, quarantined_exit, reject_looponfail,
-        resolve_changed_base, silent_master_plugin_warnings, warn_quarantine_passthrough,
-        warn_windows_timeout,
+        names_a_selection, print_run_banner, reject_looponfail, resolve_changed_base,
+        silent_master_plugin_warnings, warn_windows_timeout,
     };
     use crate::cli::Cli;
     use crate::config::RstestSettings;
@@ -2759,34 +2681,6 @@ mod tests {
                 allow: vec!["redis".into()]
             })
         );
-    }
-
-    #[test]
-    fn quarantined_exit_never_passes_kept_failures() {
-        // Session said 0 but the auto set went over its cap, so its failures
-        // survived the demotion: red.
-        assert_eq!(quarantined_exit(0, false, false, false, true), 1);
-        assert_eq!(quarantined_exit(0, true, false, false, true), 1);
-        // Under the cap, a 0 over a kept failure is the session's own call
-        // (pytest.exit(returncode=0), a plugin): kept, as with no quarantine.
-        assert_eq!(quarantined_exit(0, false, false, false, false), 0);
-        assert_eq!(quarantined_exit(0, true, false, false, false), 0);
-        // Every failure demoted: green, unless -x / --maxfail stopped it.
-        assert_eq!(quarantined_exit(1, true, true, false, false), 0);
-        assert_eq!(quarantined_exit(1, true, true, true, false), 1);
-        // Nothing demoted, or a severe code: untouched.
-        assert_eq!(quarantined_exit(1, false, false, false, false), 1);
-        assert_eq!(quarantined_exit(2, true, true, false, false), 2);
-        assert_eq!(quarantined_exit(0, false, true, false, false), 0);
-    }
-
-    #[test]
-    fn warn_quarantine_passthrough_writes_the_note() {
-        let mut buf = Vec::new();
-        warn_quarantine_passthrough(&mut buf);
-        assert!(String::from_utf8(buf)
-            .unwrap()
-            .contains("--quarantine has no effect in passthrough mode"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub(super) struct DispatchSelection<'a> {
     pub(super) shard: Option<(usize, usize)>,
     pub(super) budget: Option<&'a pool::Budget>,
     pub(super) lazy: bool,
-    pub(super) quarantine: Option<&'a super::gates::Quarantine>,
+    pub(super) quarantine: Option<&'a super::quarantine::Quarantine>,
     pub(super) durations: &'a DurationCache,
     pub(super) env_fp: &'a str,
 }
