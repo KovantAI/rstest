@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
