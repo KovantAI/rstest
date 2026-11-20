@@ -203,6 +203,56 @@ def test_build_index_writes_line_to_test_map(tmp_path, monkeypatch):
     assert entry["lines"] == {"1": ["mod.py::test_a"], "2": ["mod.py::test_b"]}
 
 
+def test_build_index_records_lines_run_outside_a_call_phase(tmp_path, monkeypatch):
+    # Import time (no context) and fixture setup/teardown are shared by more
+    # than the test they are credited to; a test's own call phase is not.
+    monkeypatch.chdir(tmp_path)
+    index = _index_cache(monkeypatch, tmp_path)
+    src = tmp_path / "mod.py"
+    src.write_text("a = 1\nb = 2\nc = 3\nd = 4\n")
+    helper = tmp_path / "helper.py"
+    helper.write_text("x = 1\n")
+    data = _FakeData(
+        contexts=["t.py::a|run"],
+        files=[str(src), str(helper)],
+        per_file={
+            str(src): {
+                1: [""],
+                2: ["t.py::a|run"],
+                3: ["t.py::a|setup", "t.py::b|run"],
+                4: ["t.py::a|teardown"],
+            },
+            # Only imported, no test covers it: listed under shared_lines alone.
+            str(helper): {1: [""]},
+        },
+    )
+    covtool.build_index(_FakeCov(data))
+
+    doc = json.loads(index.read_text())
+    assert doc["shared_lines"] == {"mod.py": [1, 3, 4], "helper.py": [1]}
+    assert list(doc["files"]) == ["mod.py"]
+
+
+def test_build_index_leaves_out_files_imported_before_coverage(tmp_path, monkeypatch):
+    # No line ran under no context: coverage never saw the import (a conftest
+    # imported it first), so a body run at import time can't be known. The
+    # fixture-setup line alone must not put the file in module mode.
+    monkeypatch.chdir(tmp_path)
+    index = _index_cache(monkeypatch, tmp_path)
+    src = tmp_path / "pre.py"
+    src.write_text("def f():\n    return 1\n")
+    data = _FakeData(
+        contexts=["t.py::a|run"],
+        files=[str(src)],
+        per_file={str(src): {2: ["t.py::a|setup"]}},
+    )
+    covtool.build_index(_FakeCov(data))
+
+    doc = json.loads(index.read_text())
+    assert doc["shared_lines"] == {}
+    assert list(doc["files"]) == ["pre.py"]
+
+
 def test_build_index_keys_are_relative_to_the_rootdir(tmp_path, monkeypatch):
     # A run from tests/unit/ shares the rootdir's cache: its keys must be
     # rootdir-relative (like the nodeids), not relative to the cwd.

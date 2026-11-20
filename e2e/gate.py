@@ -66,6 +66,8 @@ from gates.flaky import (
 )
 from gates.incremental import (
     gate_explain,
+    gate_incremental_closure_function_bodies,
+    gate_incremental_closure_imported_before_coverage,
     gate_incremental_dispatch_skip,
     gate_incremental_guards,
     gate_incremental_import_time_and_data,
@@ -324,6 +326,8 @@ def main():
         gate_since_green_dirty_tree,
         gate_incremental_dispatch_skip,
         gate_incremental_guards,
+        gate_incremental_closure_function_bodies,
+        gate_incremental_closure_imported_before_coverage,
         gate_incremental_import_time_and_data,
         gate_incremental_out_of_scope_source,
         gate_explain,

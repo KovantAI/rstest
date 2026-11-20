@@ -774,6 +774,7 @@ mod tests {
         let mut idx = CoverageIndex {
             schema: COVERAGE_INDEX_SCHEMA,
             files: HashMap::new(),
+            shared_lines: HashMap::new(),
         };
         for (path, hash, lines) in files {
             let lm = lines
