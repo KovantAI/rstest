@@ -784,6 +784,7 @@ mod tests {
             idx.files.insert(
                 path.to_string(),
                 CoverageFile {
+                    module: None,
                     hash: hash.to_string(),
                     lines: lm,
                 },

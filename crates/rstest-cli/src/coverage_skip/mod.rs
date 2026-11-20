@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cache;
 use crate::cov_scope::CovScope;
-use crate::select::{current_sha256, CoverageFile, CoverageIndex, COVERAGE_INDEX_FILE};
+use crate::select::{current_sha256, CoverageFile, CoverageIndex, ModuleKey, COVERAGE_INDEX_FILE};
 
 /// Filename of the per-test outcome store within the cache dir.
 pub const FILE: &str = "incremental_outcomes.json";
@@ -773,13 +773,13 @@ fn test_import_closures<'a>(
         }
     }
     let module = python.map_or_else(HashMap::new, |py| module_hashes(py, &asks));
-    for (d, (h, kept)) in module {
+    for (d, m) in module {
         if let Some((file, lines)) = fresh.remove(&d) {
-            hashes.insert(d.clone(), h);
+            hashes.insert(d.clone(), m.hash);
             keep.insert(
                 d,
                 ModuleHash {
-                    keep: kept,
+                    keep: m.keep,
                     file,
                     lines,
                 },
@@ -843,13 +843,11 @@ enum Hashing {
 }
 
 /// Module-level hashes of `files` (rootdir-relative) from the `modhash` helper
-/// run under `python`: file -> (hash, functions whose bodies it kept). A file
+/// run under `python`: file -> its [`ModuleKey`] (the hash, the functions whose
+/// bodies it kept, and every other body's span and hash). A file
 /// the helper could not hash is absent; any failure of the helper itself
 /// leaves the whole map empty.
-fn module_hashes(
-    python: &Path,
-    files: &HashMap<String, Hashing>,
-) -> HashMap<String, (String, Vec<String>)> {
+fn module_hashes(python: &Path, files: &HashMap<String, Hashing>) -> HashMap<String, ModuleKey> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     if files.is_empty() {
@@ -882,14 +880,7 @@ fn module_hashes(
     let Ok(out) = child.wait_with_output() else {
         return HashMap::new();
     };
-    #[derive(Deserialize)]
-    struct Answer {
-        hash: String,
-        keep: Vec<String>,
-    }
-    serde_json::from_slice::<HashMap<String, Answer>>(&out.stdout)
-        .map(|m| m.into_iter().map(|(f, a)| (f, (a.hash, a.keep))).collect())
-        .unwrap_or_default()
+    serde_json::from_slice::<HashMap<String, ModuleKey>>(&out.stdout).unwrap_or_default()
 }
 
 /// The current hash of each closure file in `deps`, taken the way it was
@@ -927,8 +918,8 @@ fn closure_hashes<'a>(
     }
     let module = python.map_or_else(HashMap::new, |py| module_hashes(py, &asks));
     for (d, slot) in now.iter_mut() {
-        if let Some((h, _)) = module.get(*d) {
-            *slot = Some(h.clone());
+        if let Some(m) = module.get(*d) {
+            *slot = Some(m.hash.clone());
         }
     }
     now
@@ -978,6 +969,7 @@ pub fn carry_forward(old: &CoverageIndex, new: &mut CoverageIndex, cached: &Hash
                     .or_insert_with(|| CoverageFile {
                         hash: ofile.hash.clone(),
                         lines: HashMap::new(),
+                        module: ofile.module.clone(),
                     });
                 let slot = nf.lines.entry(*line).or_default();
                 if !slot.contains(id) {
@@ -1023,6 +1015,35 @@ pub fn write_index(index: &CoverageIndex) {
     }
 }
 
+/// For a covered file with a per-function key: nodeid -> the functions whose
+/// bodies hold lines it covered. Covered lines outside every listed body are
+/// module-level (guarded by the module-level hash). `None` without a key.
+fn covered_defs(file: &CoverageFile) -> Option<HashMap<&str, HashSet<&str>>> {
+    let key = file.module.as_ref()?;
+    let mut spans: Vec<(u32, u32, &str)> = key
+        .defs
+        .iter()
+        .map(|(q, (first, last, _))| (*first, *last, q.as_str()))
+        .collect();
+    spans.sort_unstable();
+    let def_at = |line: u32| {
+        let i = spans.partition_point(|s| s.0 <= line);
+        i.checked_sub(1)
+            .map(|i| spans[i])
+            .filter(|s| line <= s.1)
+            .map(|s| s.2)
+    };
+    let mut out: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (line, ids) in &file.lines {
+        if let Some(q) = def_at(*line) {
+            for id in ids {
+                out.entry(id.as_str()).or_default().insert(q);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Invert the coverage index: nodeid -> the set of files it covered.
 fn covered_files(index: &CoverageIndex) -> HashMap<&str, HashSet<&str>> {
     let mut map: HashMap<&str, HashSet<&str>> = HashMap::new();
@@ -1046,11 +1067,27 @@ fn covered_files(index: &CoverageIndex) -> HashMap<&str, HashSet<&str>> {
 ///
 /// `hash_of` hashes a test or covered file whole; `dep_hash_of` hashes an
 /// import-closure file the way it was recorded (see [`closure_hashes`]).
+#[cfg(test)]
 pub fn skippable(
     index: &CoverageIndex,
     baseline: &Baseline,
     hash_of: impl Fn(&str) -> Option<String>,
     dep_hash_of: impl Fn(&str) -> Option<String>,
+) -> HashSet<String> {
+    skippable_keyed(index, baseline, hash_of, dep_hash_of, &HashMap::new())
+}
+
+/// [`skippable`], with per-function keys: `changed` holds the current
+/// [`ModuleKey`] of covered files whose content changed since the index. A
+/// test still skips such a file when its module-level hash and the bodies of
+/// every function the test covered there are unchanged (only other
+/// functions were edited).
+pub fn skippable_keyed(
+    index: &CoverageIndex,
+    baseline: &Baseline,
+    hash_of: impl Fn(&str) -> Option<String>,
+    dep_hash_of: impl Fn(&str) -> Option<String>,
+    changed: &HashMap<String, ModuleKey>,
 ) -> HashSet<String> {
     if baseline.green.is_empty() {
         return HashSet::new();
@@ -1077,6 +1114,29 @@ pub fn skippable(
         .map(|f| (f, dep_hash_of(f)))
         .collect();
     let live_dep = |f: &str| cur_deps.get(f).and_then(|o| o.as_deref());
+    // For each changed file with a key: test -> the functions it covered there.
+    let covered: HashMap<&str, HashMap<&str, HashSet<&str>>> = changed
+        .keys()
+        .filter_map(|f| {
+            let (k, cf) = index.files.get_key_value(f.as_str())?;
+            Some((k.as_str(), covered_defs(cf)?))
+        })
+        .collect();
+    let same_functions = |f: &str, id: &str| -> bool {
+        let (Some(rec), Some(now), Some(by_test)) = (
+            index.files.get(f).and_then(|c| c.module.as_ref()),
+            changed.get(f),
+            covered.get(f),
+        ) else {
+            return false;
+        };
+        let body = |m: &ModuleKey, q: &str| m.defs.get(q).map(|d| d.2.clone());
+        rec.hash == now.hash
+            && by_test.get(id).is_none_or(|qs| {
+                qs.iter()
+                    .all(|q| body(rec, q).is_some() && body(rec, q) == body(now, q))
+            })
+    };
 
     let mut skip = HashSet::new();
     'test: for (id, files) in &by_test {
@@ -1105,6 +1165,8 @@ pub fn skippable(
             let stored = index.files.get(*f).map(|c| c.hash.as_str());
             match (live(f), stored) {
                 (Some(l), Some(s)) if l == s => {}
+                // Changed, but only in functions this test never ran.
+                (Some(_), Some(_)) if same_functions(f, id) => {}
                 // Changed, deleted, or index missing the hash → must run it.
                 _ => continue 'test,
             }
@@ -1130,11 +1192,33 @@ pub fn skippable_now(
     }
     let deps = baseline.test_imports.values().flatten().map(String::as_str);
     let now = closure_hashes(python, deps, &baseline.import_keep, &baseline.import_hashes);
-    skippable(
+    // Covered files with a per-function key that changed since the index: ask
+    // the helper for their current key, with the recorded kept bodies.
+    let whole: HashMap<&str, Option<String>> = index
+        .files
+        .iter()
+        .filter(|(_, c)| c.module.is_some())
+        .map(|(f, _)| (f.as_str(), current_sha256(&cache::resolve(f))))
+        .collect();
+    let asks: HashMap<String, Hashing> = index
+        .files
+        .iter()
+        .filter_map(|(f, c)| {
+            let m = c.module.as_ref()?;
+            let now = whole.get(f.as_str())?.as_deref()?;
+            (now != c.hash).then(|| (f.clone(), Hashing::Keep(m.keep.clone())))
+        })
+        .collect();
+    let changed = python.map_or_else(HashMap::new, |py| module_hashes(py, &asks));
+    skippable_keyed(
         index,
         baseline,
-        |rel| current_sha256(&cache::resolve(rel)),
+        |rel| match whole.get(rel) {
+            Some(h) => h.clone(),
+            None => current_sha256(&cache::resolve(rel)),
+        },
         |rel| now.get(rel).cloned().flatten(),
+        &changed,
     )
 }
 

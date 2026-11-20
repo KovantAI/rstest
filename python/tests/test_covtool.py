@@ -670,3 +670,30 @@ def test_main_unreadable_data_file_is_a_warning_not_a_crash(tmp_path, monkeypatc
     assert covtool.main(["--cov-report=term"]) == 0
     assert "no coverage data to combine" in caplog.text
     assert "is not a database" in caplog.text
+
+
+def test_build_index_keys_covered_files_per_function(tmp_path, monkeypatch):
+    # An imported, covered file gets a per-function key; one whose import
+    # coverage never saw keeps only its whole-file hash.
+    monkeypatch.chdir(tmp_path)
+    index = _index_cache(monkeypatch, tmp_path)
+    src = tmp_path / "mod.py"
+    src.write_text("def a():\n    return 1\n\ndef b():\n    return 2\n")
+    pre = tmp_path / "pre.py"
+    pre.write_text("def c():\n    return 3\n")
+    data = _FakeData(
+        contexts=["t.py::ta|run"],
+        files=[str(src), str(pre)],
+        per_file={
+            str(src): {1: [""], 4: [""], 2: ["t.py::ta|run"]},
+            str(pre): {2: ["t.py::tc|run"]},
+        },
+    )
+    covtool.build_index(_FakeCov(data))
+
+    doc = json.loads(index.read_text())
+    module = doc["files"]["mod.py"]["module"]
+    assert module["keep"] == []
+    assert sorted(module["defs"]) == ["a", "b"]
+    assert module["defs"]["a"][:2] == [2, 2]
+    assert "module" not in doc["files"]["pre.py"]

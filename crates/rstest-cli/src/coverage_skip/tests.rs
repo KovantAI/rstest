@@ -25,6 +25,7 @@ fn index(files: &[FileSpec]) -> CoverageIndex {
         idx.files.insert(
             (*path).to_string(),
             CoverageFile {
+                module: None,
                 hash: (*hash).to_string(),
                 lines: lm,
             },
@@ -1057,4 +1058,59 @@ fn collect_fingerprint_inputs_prunes_and_descends() {
     // With no cov scope, no uncovered .py is collected (not_a_conftest.py skipped).
     assert!(out.unmeasured.is_empty());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A changed `mod.py` whose index entry has a per-function key: `a` (lines
+/// 2-3) covered by `test_a`, `b` (lines 6-7) covered by `test_b`, and a
+/// module-level line 9 covered by `test_m`.
+fn keyed_index() -> (CoverageIndex, Baseline) {
+    let mut idx = index(&[(
+        "mod.py",
+        "H",
+        &[
+            (2, &["t.py::test_a"]),
+            (6, &["t.py::test_b"]),
+            (9, &["t.py::test_m"]),
+        ],
+    )]);
+    idx.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    let b = base(&["t.py::test_a", "t.py::test_b", "t.py::test_m"], "TF");
+    (idx, b)
+}
+
+fn key(module: &str, a: &str, b: &str) -> ModuleKey {
+    ModuleKey {
+        hash: module.to_string(),
+        keep: Vec::new(),
+        defs: [
+            ("a".to_string(), (2, 3, a.to_string())),
+            ("b".to_string(), (6, 7, b.to_string())),
+        ]
+        .into(),
+    }
+}
+
+#[test]
+fn a_changed_file_skips_tests_whose_functions_did_not_change() {
+    let (idx, b) = keyed_index();
+    let skip = |changed: HashMap<String, ModuleKey>| {
+        skippable_keyed(&idx, &b, stub("H2", "TF"), stub("H2", "TF"), &changed)
+    };
+    // Only `b`'s body changed.
+    let only_b = skip([("mod.py".to_string(), key("M", "A", "B2"))].into());
+    assert!(only_b.contains("t.py::test_a"));
+    assert!(
+        only_b.contains("t.py::test_m"),
+        "module-level line, module unchanged"
+    );
+    assert!(!only_b.contains("t.py::test_b"));
+    // The module-level part changed: every test covering the file runs.
+    assert!(skip([("mod.py".to_string(), key("M2", "A", "B"))].into()).is_empty());
+    // `a` is gone now (renamed or deleted): its test runs.
+    let mut gone = key("M", "A", "B");
+    gone.defs.remove("a");
+    let without_a = skip([("mod.py".to_string(), gone)].into());
+    assert!(!without_a.contains("t.py::test_a"));
+    // No current key (no helper, unparseable): whole-file rule, all run.
+    assert!(skip(HashMap::new()).is_empty());
 }

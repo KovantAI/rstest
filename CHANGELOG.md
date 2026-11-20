@@ -22,13 +22,14 @@ between 0.x releases and are listed here.
   waits it carried (`waits` in `--json`). See
   [Doctor: absorbed waits](docs/guides/doctor.md#absorbed-waits).
 
-- **`--incremental` re-runs fewer tests after a function-body edit.** A test
-  is re-run when a module its test file imports changes at module level, not
-  on any edit to that module: function bodies that only ran inside tests are
-  left out of that check, and the tests that ran them are still re-run
-  through their coverage. Bodies that run at import time or in a fixture's
-  setup still re-run every importer, and a module imported before coverage
-  starts (for example by a `conftest.py`) is still compared whole. The first
+- **`--incremental` re-runs fewer tests after a function-body edit.** A
+  test is re-run when a function it ran changed, not on any edit to a file
+  it covered or a module it imports: an edit to one function in a file
+  re-runs the tests that ran that function, and a module-level edit (a
+  constant, a decorator, a class body) still re-runs every test that covered
+  or imports the file. Bodies that run at import time or in a fixture's
+  setup count as module-level, and a module imported before coverage starts
+  (for example by a `conftest.py`) is still compared whole. The first
   `--incremental` run after upgrading runs everything once (the stored
   outcomes format changed). See
   [`--incremental`](docs/reference/cli.md#-incremental).

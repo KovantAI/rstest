@@ -477,6 +477,108 @@ def gate_incremental_closure_imported_before_coverage(g, args, binary):
     )
 
 
+def gate_incremental_covered_function_bodies(g, args, binary):
+    """A covered file is keyed per function: a test depends on the module-level
+    part of the file and on the bodies of the functions it ran there, so an
+    edit to another function in the same file leaves it cached."""
+    print("== incremental covered file: per-function keys ==")
+    sp = g.tmp / "incrfunc"
+    core = (
+        "LIMIT = 10\n"
+        "\n"
+        "def g(x):\n"
+        "    return x * 2\n"
+        "\n"
+        "def f_a(x):\n"
+        "    return g(x) + 1\n"
+        "\n"
+        "def f_b(x):\n"
+        "    return x - 1\n"
+        "\n"
+        "def under_limit(x):\n"
+        "    return x < LIMIT\n"
+        "\n"
+        "class Box:\n"
+        "    def area(self, n):\n"
+        "        return n * n\n"
+    )
+    g.write("incrfunc/pkg/__init__.py", "")
+    g.write("incrfunc/pkg/core.py", core)
+    tests = {
+        "test_a": "assert core.f_a(1) == 3",
+        "test_b": "assert core.f_b(1) == 0",
+        "test_c": "assert core.Box().area(3) == 9",
+        "test_k": "assert core.under_limit(5)",
+    }
+    for name, body in tests.items():
+        g.write(
+            f"incrfunc/tests/{name}.py",
+            f"from pkg import core\ndef {name}():\n    {body}\n",
+        )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("tests", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    run()
+    r = run()
+    check(
+        "incremental functions: unchanged suite is all cached",
+        r.returncode == 0 and "4 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Edits change the file's size, so a same-second rewrite can't reuse a
+    # stale .pyc.
+    edits = [
+        (
+            "an edit to one function reruns only the test that ran it",
+            core.replace("return x - 1", "return x - 11"),
+            "test_b",
+            "3 of 4 test(s) unchanged",
+        ),
+        (
+            "an edit to a helper reruns the test whose function called it",
+            core.replace("return x * 2", "return x * 22"),
+            "test_a",
+            "3 of 4 test(s) unchanged",
+        ),
+        (
+            "a method edit reruns only the test that ran it",
+            core.replace("return n * n", "return n * n * 1"),
+            None,
+            "3 of 4 test(s) unchanged",
+        ),
+    ]
+    for label, text, failing, cached in edits:
+        g.write("incrfunc/pkg/core.py", text)
+        r = run()
+        ok = cached in r.stderr and (
+            (r.returncode == 1 and f"{failing} " in r.stdout and "1 failed" in r.stdout)
+            if failing
+            else r.returncode == 0
+        )
+        check(
+            f"incremental functions: {label}",
+            ok,
+            f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+        )
+        g.write("incrfunc/pkg/core.py", core)
+        run()  # settle back to green
+
+    # A module-level edit: every test that covered the file runs.
+    g.write("incrfunc/pkg/core.py", core.replace("LIMIT = 10", "LIMIT = 1"))
+    r = run()
+    check(
+        "incremental functions: a module-level edit reruns every test covering the file",
+        r.returncode == 1 and "test_k" in r.stdout and "unchanged" not in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+    )
+
+
 def gate_incremental_import_time_and_data(g, args, binary):
     """Changes per-test coverage cannot see: import-time lines run under the
     empty coverage context (no test owns them), and a data file read by a test

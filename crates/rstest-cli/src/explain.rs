@@ -650,6 +650,7 @@ mod tests {
         files.insert(
             "src/a.py".to_string(),
             CoverageFile {
+                module: None,
                 hash: "h".to_string(),
                 lines,
             },
@@ -660,6 +661,7 @@ mod tests {
         files.insert(
             "src/b.py".to_string(),
             CoverageFile {
+                module: None,
                 hash: "h2".to_string(),
                 lines: other,
             },
@@ -721,6 +723,7 @@ mod tests {
         idx.files.insert(
             "src/0_first.py".to_string(),
             CoverageFile {
+                module: None,
                 hash: "h3".to_string(),
                 lines,
             },

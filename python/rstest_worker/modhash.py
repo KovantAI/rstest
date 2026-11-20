@@ -18,7 +18,8 @@ Reads a JSON request on stdin and writes the answer on stdout:
 
     {"root": "<dir>", "files": {"<rel>": {"lines": [<shared lines>]}
                                         | {"keep": ["<qualname>", ...]}}}
-    -> {"<rel>": {"hash": "<sha256>", "keep": ["<qualname>", ...]}}
+    -> {"<rel>": {"hash": "<sha256>", "keep": ["<qualname>", ...],
+                  "defs": {"<qualname>": [<first>, <last>, "<sha256>"], ...}}}
 
 `lines` (when recording) picks the bodies to keep from the lines that ran
 outside a call phase; `keep` (when checking) reuses the recorded names. A file
@@ -44,11 +45,21 @@ def module_hash(
 ) -> tuple[str, list[str]]:
     """The module-level hash of `src` and the qualified names whose bodies it
     kept: those in `keep`, plus any function whose body holds one of `lines`."""
+    digest, kept, _ = analyze(src, keep, lines)
+    return digest, kept
+
+
+def analyze(
+    src: str, keep: set[str] | None = None, lines: set[int] | None = None
+) -> tuple[str, list[str], dict[str, tuple[int, int, str]]]:
+    """[`module_hash`], plus each left-out function body: qualified name ->
+    (first body line, last line, hash of those lines). A test that covered
+    lines in a body depends on that body's hash and the module-level hash."""
     tree = ast.parse(src)
     text = src.splitlines(keepends=True)
     keep = keep or set()
     lines = lines or set()
-    drop: list[tuple[int, int]] = []
+    drop: list[tuple[str, int, int]] = []
     kept: list[str] = []
     seen: dict[str, int] = {}
 
@@ -70,7 +81,7 @@ def module_hash(
                 if same_line or name in keep or any(first <= ln <= last for ln in lines):
                     kept.append(name)
                 else:
-                    drop.append((first, last))
+                    drop.append((name, first, last))
             elif isinstance(node, ast.ClassDef):
                 visit(node.body, f"{prefix}{node.name}.")
             elif isinstance(node, _COMPOUND):
@@ -81,13 +92,18 @@ def module_hash(
 
     visit(tree.body, "")
     cut = set()
-    for first, last in drop:
+    defs: dict[str, tuple[int, int, str]] = {}
+    for name, first, last in drop:
         cut.update(range(first, last + 1))
+        body = hashlib.sha256()
+        for line in text[first - 1 : last]:
+            body.update(line.replace("\r\n", "\n").encode())
+        defs[name] = (first, last, body.hexdigest())
     digest = hashlib.sha256()
     for n, line in enumerate(text, 1):
         if n not in cut:
             digest.update(line.replace("\r\n", "\n").encode())
-    return digest.hexdigest(), sorted(set(kept))
+    return digest.hexdigest(), sorted(set(kept)), defs
 
 
 def main() -> None:
@@ -98,10 +114,10 @@ def main() -> None:
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as fh:
                 src = fh.read()
-            digest, kept = module_hash(src, set(spec.get("keep", [])), set(spec.get("lines", [])))
+            digest, kept, defs = analyze(src, set(spec.get("keep", [])), set(spec.get("lines", [])))
         except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
             continue
-        out[rel] = {"hash": digest, "keep": kept}
+        out[rel] = {"hash": digest, "keep": kept, "defs": defs}
     json.dump(out, sys.stdout)
 
 

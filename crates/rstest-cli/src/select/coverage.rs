@@ -27,6 +27,24 @@ pub struct CoverageFile {
     /// line number -> nodeids that covered it
     #[serde(default)]
     pub lines: HashMap<u32, Vec<String>>,
+    /// Per-function key for `--incremental` (see [`ModuleKey`]); absent when
+    /// coverage never saw the file imported or it couldn't be parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<ModuleKey>,
+}
+
+/// A covered file split into its module-level part and its function bodies
+/// (`rstest_worker.modhash`). A test that covered lines in some bodies depends
+/// on those bodies and the module-level hash, not on the rest of the file.
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default, PartialEq)]
+pub struct ModuleKey {
+    /// Hash of everything outside the listed bodies.
+    pub hash: String,
+    /// Functions whose bodies stayed in `hash` (they ran outside a test's
+    /// call phase).
+    pub keep: Vec<String>,
+    /// Qualified name -> (first body line, last line, body hash).
+    pub defs: HashMap<String, (u32, u32, String)>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default, PartialEq)]
@@ -322,6 +340,7 @@ mod tests {
             idx.files.insert(
                 (*path).to_string(),
                 CoverageFile {
+                    module: None,
                     hash: (*hash).to_string(),
                     lines: lm,
                 },

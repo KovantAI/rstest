@@ -162,10 +162,28 @@ def _index_base() -> str:
     return os.environ.get("RSTEST_ROOTDIR") or os.getcwd()
 
 
+def _module_key(path: str, shared_lines: list[int]) -> dict[str, Any] | None:
+    """A covered file's per-function key for `--incremental`: its module-level
+    hash (bodies that ran outside a test's call phase kept, see `modhash`),
+    the kept names, and each other body's span and hash. A test that covered
+    lines in some bodies depends on those bodies and the module-level hash,
+    so an edit to another function in the file leaves it skippable. `None`
+    when the file can't be read or parsed (the whole-file hash still guards)."""
+    from rstest_worker.modhash import analyze
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        digest, kept, defs = analyze(src, lines=set(shared_lines))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    return {"hash": digest, "keep": kept, "defs": {k: list(v) for k, v in defs.items()}}
+
+
 def build_index(cov: Any) -> None:
     """Invert the combined per-test contexts into a line->test index:
     { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
-      "lines": { "<line>": ["<nodeid>", ...] } } },
+      "lines": { "<line>": ["<nodeid>", ...] }, "module": {...} } },
       "shared_lines": { "<rel-path>": [<line>, ...] } }.
 
     `shared_lines` are the lines that ran outside every test's own call phase:
@@ -224,6 +242,10 @@ def build_index(cov: Any) -> None:
         if digest is None:
             continue
         files[rel] = {"hash": digest, "lines": line_map}
+        if imported:
+            module = _module_key(path, shared_here)
+            if module is not None:
+                files[rel]["module"] = module
     if not files:
         return
     os.makedirs(CACHE_DIR, exist_ok=True)

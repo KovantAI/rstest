@@ -308,6 +308,7 @@ fn cov(files: &[FileSpec]) -> CoverageIndex {
         idx.files.insert(
             (*path).to_string(),
             CoverageFile {
+                module: None,
                 hash: "H".into(),
                 lines: lm,
             },

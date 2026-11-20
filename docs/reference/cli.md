@@ -452,9 +452,12 @@ is fully green**, so a failing test keeps being selected until it passes.
 
 Dispatch-level incremental testing; git is not required. rstest collects the
 whole suite, then **skips** every test that passed last run and whose covered
-source and imported modules are byte-identical now (content-addressed through
-the coverage index). Skipped tests count as passed and carry `"cached": true`
-in [`--report-json`](report-json.md).
+source and imported modules are unchanged now (content-addressed through the
+coverage index). A covered file counts as unchanged for a test when its
+module-level code and the bodies of the functions the test ran there are
+unchanged, so an edit to another function in the same file leaves the test
+skipped. Skipped tests count as passed and carry `"cached": true` in
+[`--report-json`](report-json.md).
 
 - Needs a warm coverage index (a prior `--cov --cov-context=test` run). Pass
   `--cov=.` on incremental runs too so the index keeps advancing; rstest warns

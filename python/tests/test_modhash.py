@@ -117,7 +117,24 @@ def test_main_answers_per_file_and_leaves_out_unparseable(tmp_path, monkeypatch)
     modhash.main()
     answer = json.loads(out.getvalue())
     assert list(answer) == ["a.py"]
+    digest, kept, defs = modhash.analyze(BASE, lines={8})
     assert answer["a.py"] == {
-        "hash": modhash.module_hash(BASE, lines={8})[0],
-        "keep": ["helper", "one"],
+        "hash": digest,
+        "keep": kept,
+        "defs": {k: list(v) for k, v in defs.items()},
     }
+
+
+def test_analyze_hashes_each_left_out_body_on_its_own():
+    _, kept, defs = modhash.analyze(BASE)
+    assert kept == ["one"]
+    assert sorted(defs) == ["Box.area", "helper"]
+    # Body spans start after the header (docstring included) and end the def.
+    assert defs["helper"][:2] == (7, 9)
+    assert defs["Box.area"][:2] == (17, 17)
+    # Editing one body moves only that body's hash, not the other's.
+    _, _, edited = modhash.analyze(BASE.replace("return n * n", "return n ** 2"))
+    assert edited["Box.area"][2] != defs["Box.area"][2]
+    assert edited["helper"] == defs["helper"]
+    # A body kept in the module-level hash is not listed on its own.
+    assert "helper" not in modhash.analyze(BASE, keep={"helper"})[2]
