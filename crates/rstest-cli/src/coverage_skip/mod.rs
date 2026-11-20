@@ -59,17 +59,7 @@ use crate::select::{current_sha256, CoverageFile, CoverageIndex, COVERAGE_INDEX_
 /// Filename of the per-test outcome store within the cache dir.
 pub const FILE: &str = "incremental_outcomes.json";
 
-// Schema 2 added `test_lines` (nodeid -> def line) for restoring cached entries'
-// source line; an older schema-1 store reads as absent (one full run to rebuild).
-// Schema 3 added `test_named_hashes`: a schema-2 store never guarded shared
-// test-named helpers, so it must not seed a skip.
-// Schema 4 added `import_hashes` / `test_imports` (each test file's import
-// closure): a schema-3 store never guarded import-time code, so it must not
-// seed a skip either.
-// Schema 5 hashes a measured import-closure file at module level (function
-// bodies that ran only inside a test's call phase left out, see `modhash`) and
-// adds `import_keep`: a schema-4 store's whole-file hashes would all mismatch.
-const SCHEMA: u32 = 5;
+const SCHEMA: u32 = 6;
 
 /// Config files whose change invalidates the whole skip decision: markers,
 /// addopts, and coverage config aren't reflected in per-test coverage, so a
@@ -132,11 +122,11 @@ struct Outcomes {
     /// `import_hashes`).
     #[serde(default)]
     test_imports: HashMap<String, Vec<String>>,
-    /// Import-closure file -> the functions whose bodies its module-level hash
-    /// kept. Present for a file hashed at module level; absent for one hashed
-    /// whole (not measured by coverage, or the helper couldn't parse it).
+    /// Import-closure file hashed at module level -> how (see
+    /// [`ModuleHash`]). Absent for a file hashed whole (not measured by
+    /// coverage, or the helper couldn't parse it).
     #[serde(default)]
-    import_keep: HashMap<String, Vec<String>>,
+    import_keep: HashMap<String, ModuleHash>,
     /// [`ConfigState::index_cov_args`] of the recorded run.
     #[serde(default)]
     index_cov_args: Option<Vec<String>>,
@@ -161,7 +151,21 @@ pub struct Baseline {
     /// Test file -> its import closure (see [`Outcomes::test_imports`]).
     pub test_imports: HashMap<String, Vec<String>>,
     /// How each closure file was hashed (see [`Outcomes::import_keep`]).
-    pub import_keep: HashMap<String, Vec<String>>,
+    pub import_keep: HashMap<String, ModuleHash>,
+}
+
+/// How an import-closure file's module-level hash was taken (its value is in
+/// `import_hashes`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModuleHash {
+    /// The functions whose bodies the hash kept.
+    pub keep: Vec<String>,
+    /// The whole file's hash then: while it still matches, the module-level
+    /// hash can't have moved, so a check reuses it without the helper.
+    pub file: String,
+    /// Digest of the shared lines it was taken from: a record reuses the
+    /// entry while both this and `file` are unchanged.
+    pub lines: String,
 }
 
 /// The skip-gating state computed at the start of an incremental run.
@@ -634,10 +638,11 @@ pub fn record(
     python: Option<&Path>,
 ) {
     let mut test_file_hashes = test_file_hashes(&green);
-    if let Some(prev) = read_outcomes(scope).filter(|o| o.config_fp == config.fp) {
+    let prev_store = read_outcomes(scope);
+    if let Some(prev) = prev_store.as_ref().filter(|o| o.config_fp == config.fp) {
         let prev_deps = prev.test_imports.values().flatten().map(String::as_str);
-        let prev_now = closure_hashes(python, prev_deps, &prev.import_keep);
-        for id in prev.green {
+        let prev_now = closure_hashes(python, prev_deps, &prev.import_keep, &prev.import_hashes);
+        for id in prev.green.iter().cloned() {
             if ran.contains(&id) || green.contains(&id) {
                 continue;
             }
@@ -680,7 +685,12 @@ pub fn record(
         hashes: import_hashes,
         imports: test_imports,
         keep: import_keep,
-    } = test_import_closures(test_file_hashes.keys(), python, &shared);
+    } = test_import_closures(
+        test_file_hashes.keys(),
+        python,
+        &shared,
+        prev_store.as_ref(),
+    );
     let doc = Outcomes {
         schema: SCHEMA,
         config_fp: config.fp.clone(),
@@ -715,6 +725,7 @@ fn test_import_closures<'a>(
     test_files: impl Iterator<Item = &'a String>,
     python: Option<&Path>,
     shared: &HashMap<String, Vec<u32>>,
+    prev: Option<&Outcomes>,
 ) -> Closures {
     let by_path: HashMap<PathBuf, String> = test_files
         .map(|tf| (cache::resolve(tf), tf.clone()))
@@ -738,27 +749,47 @@ fn test_import_closures<'a>(
         }
     }
     let all: HashSet<&String> = closures.values().flatten().collect();
-    let measured: HashMap<String, Hashing> = all
-        .iter()
-        .filter_map(|d| {
-            shared
-                .get(*d)
-                .map(|l| ((*d).clone(), Hashing::Lines(l.clone())))
-        })
-        .collect();
-    let module = python.map_or_else(HashMap::new, |py| module_hashes(py, &measured));
     let mut hashes: HashMap<String, String> = HashMap::new();
-    let mut keep: HashMap<String, Vec<String>> = HashMap::new();
-    for d in all {
-        match module.get(d) {
-            Some((h, kept)) => {
-                hashes.insert(d.clone(), h.clone());
-                keep.insert(d.clone(), kept.clone());
+    let mut keep: HashMap<String, ModuleHash> = HashMap::new();
+    // Measured files: reuse the previous record's module-level hash while the
+    // file and its shared lines are unchanged; ask the helper for the rest.
+    let mut asks: HashMap<String, Hashing> = HashMap::new();
+    let mut fresh: HashMap<String, (String, String)> = HashMap::new();
+    for d in &all {
+        let (Some(lines), Some(file)) = (shared.get(*d), current_sha256(&cache::resolve(d))) else {
+            continue;
+        };
+        let digest = lines_digest(lines);
+        let reused = prev.and_then(|p| reusable(p, d, &file, &digest));
+        match reused {
+            Some((h, m)) => {
+                hashes.insert((*d).clone(), h);
+                keep.insert((*d).clone(), m);
             }
             None => {
-                if let Some(h) = current_sha256(&cache::resolve(d)) {
-                    hashes.insert(d.clone(), h);
-                }
+                asks.insert((*d).clone(), Hashing::Lines(lines.clone()));
+                fresh.insert((*d).clone(), (file, digest));
+            }
+        }
+    }
+    let module = python.map_or_else(HashMap::new, |py| module_hashes(py, &asks));
+    for (d, (h, kept)) in module {
+        if let Some((file, lines)) = fresh.remove(&d) {
+            hashes.insert(d.clone(), h);
+            keep.insert(
+                d,
+                ModuleHash {
+                    keep: kept,
+                    file,
+                    lines,
+                },
+            );
+        }
+    }
+    for d in all {
+        if !hashes.contains_key(d) {
+            if let Some(h) = current_sha256(&cache::resolve(d)) {
+                hashes.insert(d.clone(), h);
             }
         }
     }
@@ -777,8 +808,30 @@ struct Closures {
     hashes: HashMap<String, String>,
     /// Test file -> its import closure.
     imports: HashMap<String, Vec<String>>,
-    /// Closure file hashed at module level -> the bodies its hash kept.
-    keep: HashMap<String, Vec<String>>,
+    /// Closure file hashed at module level -> how (see [`ModuleHash`]).
+    keep: HashMap<String, ModuleHash>,
+}
+
+/// The previous record's module-level hash of `file` and how it was taken,
+/// when the file (`whole`, its whole-file hash) and its shared lines
+/// (`digest`) are both what they were then.
+fn reusable(
+    prev: &Outcomes,
+    file: &str,
+    whole: &str,
+    digest: &str,
+) -> Option<(String, ModuleHash)> {
+    let m = prev.import_keep.get(file)?;
+    (m.file == whole && m.lines == digest).then_some(())?;
+    Some((prev.import_hashes.get(file)?.clone(), m.clone()))
+}
+
+/// A short, order-stable digest of a file's shared lines.
+fn lines_digest(lines: &[u32]) -> String {
+    let mut sorted = lines.to_vec();
+    sorted.sort_unstable();
+    let joined: Vec<String> = sorted.iter().map(u32::to_string).collect();
+    crate::incremental::hex_encode(&Sha256::digest(joined.join(",").as_bytes()))
 }
 
 /// What the `modhash` helper is asked for one file.
@@ -840,33 +893,45 @@ fn module_hashes(
 }
 
 /// The current hash of each closure file in `deps`, taken the way it was
-/// recorded: at module level for a file in `keep` (through the helper, with
-/// the recorded kept bodies), whole otherwise. `None`: it can't be hashed now
-/// (deleted, unparseable, or no helper), so its importers must run.
+/// recorded: at module level for a file in `keep`, whole otherwise. A file
+/// whose whole-file hash still matches the record keeps its recorded
+/// module-level hash (`recorded`); only changed ones go to the helper, with
+/// the recorded kept bodies. `None`: it can't be hashed now (deleted,
+/// unparseable, or no helper), so its importers must run.
 fn closure_hashes<'a>(
     python: Option<&Path>,
     deps: impl Iterator<Item = &'a str>,
-    keep: &HashMap<String, Vec<String>>,
+    keep: &HashMap<String, ModuleHash>,
+    recorded: &HashMap<String, String>,
 ) -> HashMap<&'a str, Option<String>> {
     let deps: HashSet<&str> = deps.collect();
-    let asks: HashMap<String, Hashing> = deps
-        .iter()
-        .filter_map(|d| {
-            keep.get(*d)
-                .map(|k| (d.to_string(), Hashing::Keep(k.clone())))
-        })
-        .collect();
+    let mut now: HashMap<&'a str, Option<String>> = HashMap::new();
+    let mut asks: HashMap<String, Hashing> = HashMap::new();
+    for d in deps {
+        let whole = current_sha256(&cache::resolve(d));
+        match keep.get(d) {
+            None => {
+                now.insert(d, whole);
+            }
+            Some(m) if whole.as_deref() == Some(m.file.as_str()) => {
+                now.insert(d, recorded.get(d).cloned());
+            }
+            Some(_) if whole.is_none() => {
+                now.insert(d, None);
+            }
+            Some(m) => {
+                asks.insert(d.to_string(), Hashing::Keep(m.keep.clone()));
+                now.insert(d, None);
+            }
+        }
+    }
     let module = python.map_or_else(HashMap::new, |py| module_hashes(py, &asks));
-    deps.into_iter()
-        .map(|d| {
-            let now = if keep.contains_key(d) {
-                module.get(d).map(|(h, _)| h.clone())
-            } else {
-                current_sha256(&cache::resolve(d))
-            };
-            (d, now)
-        })
-        .collect()
+    for (d, slot) in now.iter_mut() {
+        if let Some((h, _)) = module.get(*d) {
+            *slot = Some(h.clone());
+        }
+    }
+    now
 }
 
 /// Hash the source file of every green nodeid's test file, once per distinct
@@ -1064,7 +1129,7 @@ pub fn skippable_now(
         return HashSet::new();
     }
     let deps = baseline.test_imports.values().flatten().map(String::as_str);
-    let now = closure_hashes(python, deps, &baseline.import_keep);
+    let now = closure_hashes(python, deps, &baseline.import_keep, &baseline.import_hashes);
     skippable(
         index,
         baseline,

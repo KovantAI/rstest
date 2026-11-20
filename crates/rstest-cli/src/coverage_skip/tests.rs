@@ -921,6 +921,73 @@ fn skippable_empty_green_baseline_skips_nothing() {
 }
 
 #[test]
+fn an_unchanged_module_level_closure_file_needs_no_helper() {
+    // No interpreter here, so the helper can't run: an unchanged file must
+    // reuse its recorded module-level hash, an edited one can't be vouched for.
+    let dir = std::env::temp_dir().join(format!("rstest-modcache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dep = dir.join("dep.py");
+    let testf = dir.join("t.py");
+    std::fs::write(&dep, b"def f():\n    return 1\n").unwrap();
+    std::fs::write(&testf, b"import dep\ndef test_a(): pass\n").unwrap();
+    let deprel = dep.to_string_lossy().to_string();
+    let testrel = testf.to_string_lossy().to_string();
+    let id = format!("{testrel}::test_a");
+    let test_hash = current_sha256(&testf).unwrap();
+    let idx = index(&[(testrel.as_str(), test_hash.as_str(), &[(2, &[id.as_str()])])]);
+    let baseline = Baseline {
+        green: [id.clone()].into_iter().collect(),
+        test_file_hashes: [(testrel.clone(), test_hash.clone())].into(),
+        test_imports: [(testrel, vec![deprel.clone()])].into(),
+        import_hashes: [(deprel.clone(), "MODULE-LEVEL".to_string())].into(),
+        import_keep: [(
+            deprel,
+            ModuleHash {
+                keep: Vec::new(),
+                file: current_sha256(&dep).unwrap(),
+                lines: "L".to_string(),
+            },
+        )]
+        .into(),
+        ..Baseline::default()
+    };
+    let state = ConfigState {
+        index_cov_args: Some(Vec::new()),
+        ..ConfigState::default()
+    };
+    assert!(skippable_now(&idx, &baseline, &state, None).contains(&id));
+    std::fs::write(&dep, b"def f():\n    return 2\n").unwrap();
+    assert!(skippable_now(&idx, &baseline, &state, None).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_record_reuses_a_module_level_hash_only_while_file_and_lines_match() {
+    let m = ModuleHash {
+        keep: vec!["f".to_string()],
+        file: "W".to_string(),
+        lines: "D".to_string(),
+    };
+    let prev = Outcomes {
+        import_hashes: [("a.py".to_string(), "M".to_string())].into(),
+        import_keep: [("a.py".to_string(), m.clone())].into(),
+        ..Outcomes::default()
+    };
+    assert_eq!(
+        reusable(&prev, "a.py", "W", "D"),
+        Some(("M".to_string(), m))
+    );
+    assert_eq!(reusable(&prev, "a.py", "W2", "D"), None, "file edited");
+    assert_eq!(
+        reusable(&prev, "a.py", "W", "D2"),
+        None,
+        "shared lines moved"
+    );
+    assert_eq!(reusable(&prev, "b.py", "W", "D"), None, "not recorded");
+}
+
+#[test]
 fn skippable_now_hashes_live_files() {
     // Wire [`skippable`] to the real working tree via absolute paths (so it
     // is cwd-independent): a green test whose covered file + own file are

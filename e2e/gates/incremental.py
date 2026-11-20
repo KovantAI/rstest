@@ -384,8 +384,10 @@ def gate_incremental_closure_function_bodies(g, args, binary):
         f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
     )
 
-    # A body the module fixture calls: all six use what it returns.
-    g.write("incrbody/pkg/fix.py", fix.replace("return 5", "return 6"))
+    # A body the module fixture calls: all six use what it returns. (Edits
+    # change the file's size: a same-size rewrite in the same second as the
+    # warm runs can reuse the stale .pyc.)
+    g.write("incrbody/pkg/fix.py", fix.replace("return 5", "return 50"))
     r = run()
     check(
         "incremental bodies: a body run in fixture setup reruns every test using it",
