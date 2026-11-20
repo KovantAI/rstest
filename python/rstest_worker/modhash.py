@@ -31,13 +31,41 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
+import re
 import sys
+import tokenize
 
 _COMPOUND = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
 if sys.version_info >= (3, 11):
     _COMPOUND += (ast.TryStar,)
+
+
+_CODING = re.compile(r"^[ \t\f]*#.*?coding[:=]")
+
+
+def _code_lines(src: str, text: list[str]) -> list[str]:
+    """`text` (the lines of `src`) with comments removed and trailing
+    whitespace stripped, so an edit to a comment or to blank lines moves no
+    hash. A `#` inside a string is not a comment (tokenize knows), docstrings
+    stay, and an encoding declaration in the first two lines is kept (it
+    changes how the file decodes). If `src` can't be tokenized, `text` is
+    returned unchanged."""
+    out = [line.replace("\r\n", "\n").rstrip() for line in text]
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return [line.replace("\r\n", "\n") for line in text]
+    for tok in tokens:
+        if tok.type != tokenize.COMMENT:
+            continue
+        row, col = tok.start
+        if row <= 2 and _CODING.match(text[row - 1]):
+            continue
+        out[row - 1] = out[row - 1][:col].rstrip()
+    return out
 
 
 def module_hash(
@@ -91,18 +119,20 @@ def analyze(
                     visit(handler.body, prefix)
 
     visit(tree.body, "")
+    code = _code_lines(src, text)
     cut = set()
     defs: dict[str, tuple[int, int, str]] = {}
     for name, first, last in drop:
         cut.update(range(first, last + 1))
         body = hashlib.sha256()
-        for line in text[first - 1 : last]:
-            body.update(line.replace("\r\n", "\n").encode())
+        for line in code[first - 1 : last]:
+            if line:
+                body.update(line.encode() + b"\n")
         defs[name] = (first, last, body.hexdigest())
     digest = hashlib.sha256()
-    for n, line in enumerate(text, 1):
-        if n not in cut:
-            digest.update(line.replace("\r\n", "\n").encode())
+    for n, line in enumerate(code, 1):
+        if n not in cut and line:
+            digest.update(line.encode() + b"\n")
     return digest.hexdigest(), sorted(set(kept)), defs
 
 

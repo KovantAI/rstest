@@ -456,7 +456,11 @@ source and imported modules are unchanged now (content-addressed through the
 coverage index). A covered file counts as unchanged for a test when its
 module-level code and the bodies of the functions the test ran there are
 unchanged, so an edit to another function in the same file leaves the test
-skipped. Skipped tests count as passed and carry `"cached": true` in
+skipped. The test's own file counts the same way when coverage measured it
+(`--cov=.`): editing one test re-runs that test, while an edit to an import,
+a fixture or a decorator in the file re-runs every test in it. Comments and
+blank lines are not code: editing only them re-runs nothing. Skipped tests
+count as passed and carry `"cached": true` in
 [`--report-json`](report-json.md).
 
 - Needs a warm coverage index (a prior `--cov --cov-context=test` run). Pass

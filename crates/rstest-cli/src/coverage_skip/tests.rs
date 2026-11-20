@@ -1114,3 +1114,38 @@ fn a_changed_file_skips_tests_whose_functions_did_not_change() {
     // No current key (no helper, unparseable): whole-file rule, all run.
     assert!(skip(HashMap::new()).is_empty());
 }
+
+#[test]
+fn an_edited_test_file_reruns_only_the_tests_whose_functions_changed() {
+    // `t.py` itself is measured: `test_a` (lines 2-3) and `test_b` (5-6).
+    let mut idx = index(&[(
+        "t.py",
+        "TF",
+        &[(2, &["t.py::test_a"]), (5, &["t.py::test_b"])],
+    )]);
+    let defs = |a: &str, b: &str| -> HashMap<String, (u32, u32, String)> {
+        [
+            ("test_a".to_string(), (2, 3, a.to_string())),
+            ("test_b".to_string(), (5, 6, b.to_string())),
+        ]
+        .into()
+    };
+    let key = |module: &str, a: &str, b: &str| ModuleKey {
+        hash: module.to_string(),
+        keep: Vec::new(),
+        defs: defs(a, b),
+    };
+    idx.files.get_mut("t.py").unwrap().module = Some(key("M", "A", "B"));
+    let b = base(&["t.py::test_a", "t.py::test_b"], "TF");
+    let skip = |changed: HashMap<String, ModuleKey>| {
+        skippable_keyed(&idx, &b, stub("H", "TF2"), stub("H", "TF2"), &changed)
+    };
+    // Only test_b's body was edited.
+    let only_b = skip([("t.py".to_string(), key("M", "A", "B2"))].into());
+    assert!(only_b.contains("t.py::test_a"));
+    assert!(!only_b.contains("t.py::test_b"));
+    // A module-level edit (an import, a fixture, a new test's def line): both.
+    assert!(skip([("t.py".to_string(), key("M2", "A", "B"))].into()).is_empty());
+    // No key for the file: the whole-file rule, both run.
+    assert!(skip(HashMap::new()).is_empty());
+}

@@ -279,7 +279,8 @@ def gate_incremental_dispatch_skip(g, args, binary):
 
     # Run 3: edit a dependency of ONE test -> only that test runs; the other is
     # cached (per-test granularity).
-    g.write("incrdisp/mod_a.py", "def a():\n    return 1  # touched\n")
+    # A code change (comments move no hash), still returning 1.
+    g.write("incrdisp/mod_a.py", "def a():\n    x = 1\n    return x\n")
     r = run()
     check(
         "incremental: changed dependency reruns only the affected test",
@@ -301,7 +302,7 @@ def gate_incremental_dispatch_skip(g, args, binary):
     # proving the test-file hash gate (test files aren't always in the index).
     g.write(
         "incrdisp/test_b.py",
-        "import mod_b\ndef test_b():\n    assert mod_b.b() == 2  # touched\n",
+        "import mod_b\ndef test_b():\n    assert mod_b.b() == 1 + 1\n",
     )
     r = run()
     check(
@@ -575,6 +576,92 @@ def gate_incremental_covered_function_bodies(g, args, binary):
     check(
         "incremental functions: a module-level edit reruns every test covering the file",
         r.returncode == 1 and "test_k" in r.stdout and "unchanged" not in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+    )
+
+
+def gate_incremental_comments_and_test_files(g, args, binary):
+    """Comments and blank lines move no hash, and a measured test file is
+    keyed per function like any covered file: editing one test re-runs it,
+    not its neighbours, while an edit to a fixture or import in the file
+    (module-level) re-runs every test there."""
+    print("== incremental: comments and test files ==")
+    sp = g.tmp / "incrtf"
+    core = "def f_a(x):\n    return x + 1\n\ndef f_b(x):\n    return x - 1\n"
+    ab = (
+        "import pytest\n"
+        "from pkg import core\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def base():\n"
+        "    return 1\n"
+        "\n"
+        "def test_a(base):\n"
+        "    assert core.f_a(base) == 2\n"
+        "\n"
+        "def test_b(base):\n"
+        "    assert core.f_b(base) == 0\n"
+    )
+    g.write("incrtf/pkg/__init__.py", "")
+    g.write("incrtf/pkg/core.py", core)
+    g.write("incrtf/tests/test_ab.py", ab)
+    g.write("incrtf/tests/test_c.py", "def test_c():\n    assert True\n")
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("tests", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    def settle():
+        g.write("incrtf/pkg/core.py", core)
+        g.write("incrtf/tests/test_ab.py", ab)
+        run()
+        run()
+
+    run()
+    r = run()
+    check(
+        "incremental tests+comments: unchanged suite is all cached",
+        r.returncode == 0 and "3 of 3 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # Comments and blank lines, in a covered body, at module level and in the
+    # test file: nothing runs.
+    g.write(
+        "incrtf/pkg/core.py",
+        "# helpers\n\n" + core.replace("return x + 1", "return x + 1  # add one"),
+    )
+    g.write("incrtf/tests/test_ab.py", ab.replace("def test_a", "# the a case\ndef test_a"))
+    r = run()
+    check(
+        "incremental tests+comments: comment-only edits keep every test cached",
+        r.returncode == 0 and "3 of 3 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    settle()
+
+    # One test's body: only it runs (and fails); its neighbour stays cached.
+    g.write("incrtf/tests/test_ab.py", ab.replace("== 0", "== 100"))
+    r = run()
+    check(
+        "incremental tests+comments: editing one test reruns only that test",
+        r.returncode == 1
+        and "test_b" in r.stdout
+        and "1 failed" in r.stdout
+        and "2 of 3 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+    )
+    settle()
+
+    # A fixture in the test file is module-level: every test in the file runs.
+    g.write("incrtf/tests/test_ab.py", ab.replace("    return 1\n", "    return 10\n"))
+    r = run()
+    check(
+        "incremental tests+comments: a fixture edit reruns every test in the file",
+        r.returncode == 1 and "2 failed" in r.stdout and "1 of 3 test(s) unchanged" in r.stderr,
         f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
     )
 

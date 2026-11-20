@@ -1144,9 +1144,16 @@ pub fn skippable_keyed(
             continue;
         }
         // The test's OWN file must be tracked and unchanged (the index may not
-        // measure test files under `--cov=<pkg>`).
+        // measure test files under `--cov=<pkg>`). When coverage measured it,
+        // a change elsewhere in the file is fine: its module-level code
+        // (imports, fixtures, decorators) and the functions this test ran
+        // there must be as they were, as for any covered file.
         let tf = test_file_of(id);
-        if live(tf) != baseline.test_file_hashes.get(tf).map(String::as_str) || live(tf).is_none() {
+        let recorded = baseline.test_file_hashes.get(tf).map(String::as_str);
+        if recorded.is_none() || live(tf).is_none() {
+            continue;
+        }
+        if live(tf) != recorded && !same_functions(tf, id) {
             continue;
         }
         // Every file the test file transitively imports must be unchanged too:

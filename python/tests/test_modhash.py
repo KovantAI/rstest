@@ -64,7 +64,8 @@ def test_bodies_that_ran_outside_a_call_phase_are_kept():
     # A later check names the function instead, so moved lines don't matter.
     moved = "# a new first line\n" + edited
     assert modhash.module_hash(moved, keep={"helper"})[0] != digest
-    assert modhash.module_hash("# a new first line\n" + BASE, keep={"helper"})[0] != digest
+    # A comment line is not code: it moves lines, not the hash.
+    assert modhash.module_hash("# a new first line\n" + BASE, keep={"helper"})[0] == digest
     assert modhash.module_hash(BASE, keep={"helper"})[0] == digest
     # Methods are named through their class.
     assert "Box.area" in modhash.module_hash(BASE, lines={17})[1]
@@ -138,3 +139,30 @@ def test_analyze_hashes_each_left_out_body_on_its_own():
     assert edited["helper"] == defs["helper"]
     # A body kept in the module-level hash is not listed on its own.
     assert "helper" not in modhash.analyze(BASE, keep={"helper"})[2]
+
+
+def test_comments_and_blank_lines_move_no_hash():
+    digest, _, defs = modhash.analyze(BASE)
+    for edited in [
+        BASE.replace("    y = x + 1", "    # bump it\n    y = x + 1  # by one"),
+        BASE.replace("LIMIT = 3", "LIMIT = 3  # tuned"),
+        BASE.replace("import os\n", "import os\n\n\n# helpers below\n"),
+    ]:
+        d2, _, defs2 = modhash.analyze(edited)
+        assert d2 == digest, edited
+        assert {k: v[2] for k, v in defs2.items()} == {k: v[2] for k, v in defs.items()}
+
+
+def test_strings_docstrings_and_encoding_still_count():
+    digest, _, defs = modhash.analyze(BASE)
+    # A `#` inside a string is code.
+    assert modhash.analyze(BASE.replace("import os", "import os\nTAG = 'a#b'"))[0] != digest
+    tagged = modhash.analyze(BASE.replace("import os", "import os\nTAG = 'a#c'"))[0]
+    assert tagged != modhash.analyze(BASE.replace("import os", "import os\nTAG = 'a#b'"))[0]
+    # Docstrings stay: doctests and __doc__ read them.
+    _, _, edited = modhash.analyze(BASE.replace('"""Doc."""', '"""Other doc."""'))
+    assert edited["helper"][2] != defs["helper"][2]
+    # An encoding declaration changes how the file decodes.
+    latin = "# -*- coding: latin-1 -*-\n" + BASE
+    utf8 = "# -*- coding: utf-8 -*-\n" + BASE
+    assert modhash.analyze(latin)[0] != modhash.analyze(utf8)[0]

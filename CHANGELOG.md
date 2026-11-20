@@ -29,7 +29,10 @@ between 0.x releases and are listed here.
   constant, a decorator, a class body) still re-runs every test that covered
   or imports the file. Bodies that run at import time or in a fixture's
   setup count as module-level, and a module imported before coverage starts
-  (for example by a `conftest.py`) is still compared whole. The first
+  (for example by a `conftest.py`) is still compared whole. A test file
+  measured by coverage counts the same way, so editing one test re-runs that
+  test, not the whole file, and an edit that only touches comments or blank
+  lines re-runs nothing. The first
   `--incremental` run after upgrading runs everything once (the stored
   outcomes format changed). See
   [`--incremental`](docs/reference/cli.md#-incremental).
