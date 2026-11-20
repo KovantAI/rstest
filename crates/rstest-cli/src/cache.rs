@@ -130,21 +130,16 @@ pub fn file(name: &str) -> PathBuf {
     dir().join(name)
 }
 
-/// A named cache file inside a specific project dir's `.rstest_cache`,
-/// independent of `RSTEST_CACHE`. `project` is a run's invocation dir (its
-/// scope); for this process's own invocation dir that is the rootdir's
-/// cache, the same directory [`dir`] names.
+/// A named cache file for the project run from `project` (a run's
+/// invocation dir, its scope). For this process's own invocation dir that is
+/// [`file`]: the same directory every other cache file uses, so
+/// `RSTEST_CACHE` and a disabled cacheprovider apply to it too. Any other dir
+/// gets its own `.rstest_cache`.
 pub fn file_in(project: &Path, name: &str) -> PathBuf {
-    if let (Some(scratch), Some((inv, _))) = (SCRATCH.get(), ROOT.get()) {
-        if inv == project {
-            return scratch.join(name);
-        }
+    match ROOT.get() {
+        Some((inv, _)) if inv == project => file(name),
+        _ => project.join(DIR_NAME).join(name),
     }
-    let root = match ROOT.get() {
-        Some((inv, root)) if inv == project => root.as_path(),
-        _ => project,
-    };
-    root.join(DIR_NAME).join(name)
 }
 
 /// The `RSTEST_CACHE` a monorepo root hands the child for project `slug`:

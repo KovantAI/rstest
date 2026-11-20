@@ -549,8 +549,8 @@ fn flakes_past_retention_are_aged_out() {
 
 #[test]
 fn rstest_cache_env_redirects_the_run_scoped_caches() {
-    // Durations / flakes / coverage honour RSTEST_CACHE; the incremental
-    // outcomes are project-scoped (`<cwd>/.rstest_cache`), matching the writer.
+    // Every cache file honours RSTEST_CACHE, the incremental outcomes too: the
+    // project's own `.rstest_cache` is ignored once the cache is relocated.
     let dir = fresh_dir("envcache");
     let alt = dir.join("alt-cache");
     std::fs::create_dir_all(&alt).unwrap();
@@ -559,12 +559,18 @@ fn rstest_cache_env_redirects_the_run_scoped_caches() {
         serde_json::to_vec(&json!({ ID: 3.0 })).unwrap(),
     )
     .unwrap();
-    // The cwd cache holds a different duration that must be ignored.
+    std::fs::write(
+        alt.join("incremental_outcomes.json"),
+        serde_json::to_vec(&json!({ "schema": 5, "green": [ID] })).unwrap(),
+    )
+    .unwrap();
+    // The cwd cache holds a different duration and no green record: both
+    // must be ignored.
     write_cache(&dir, "durations.json", &json!({ ID: 99.0 }));
     write_cache(
         &dir,
         "incremental_outcomes.json",
-        &json!({ "schema": 5, "green": [ID] }),
+        &json!({ "schema": 5, "green": [] }),
     );
     let o = run_env(
         &dir,

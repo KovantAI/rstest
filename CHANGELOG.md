@@ -35,6 +35,13 @@ between 0.x releases and are listed here.
 
 ### Fixes
 
+- **`RSTEST_CACHE` now relocates the `--since-green` and `--incremental`
+  records too.** `last_green.json` and `incremental_outcomes.json` stayed in
+  the project's own `.rstest_cache` while every other cache file followed
+  `RSTEST_CACHE`, so a relocated cache (or one restored in CI) left them
+  behind. With `RSTEST_CACHE` set, the first run after upgrading has no prior
+  record and runs everything once.
+
 - **The doctor's markdown report says when a list was cut.** The GitHub job
   summary, the Buildkite annotation and `--doctor-md` now end a shortened
   table with `... and N more`, as the terminal report does, for worker load,
