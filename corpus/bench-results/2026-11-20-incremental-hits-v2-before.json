@@ -1,0 +1,2024 @@
+[
+ {
+  "suite": "itsdangerous",
+  "tests": 297,
+  "always_run": 0,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/serializer.py::load_unsafe",
+    "total": 297,
+    "needed": 12,
+    "ran": 297,
+    "excess": 285,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/serializer.py::load_unsafe",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/signer.py::_make_keys_list",
+    "total": 297,
+    "needed": 288,
+    "ran": 297,
+    "excess": 9,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/signer.py::_make_keys_list",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/encoding.py::want_bytes",
+    "total": 297,
+    "needed": 293,
+    "ran": 297,
+    "excess": 4,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/encoding.py::want_bytes",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/serializer.py::make_signer",
+    "total": 297,
+    "needed": 230,
+    "ran": 297,
+    "excess": 67,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/serializer.py::make_signer",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/signer.py::__init__",
+    "total": 297,
+    "needed": 285,
+    "ran": 297,
+    "excess": 12,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/signer.py::__init__",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/signer.py::get_signature",
+    "total": 297,
+    "needed": 263,
+    "ran": 297,
+    "excess": 34,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/signer.py::get_signature",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/signer.py::_lazy_sha1",
+    "total": 297,
+    "needed": 254,
+    "ran": 297,
+    "excess": 43,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/signer.py::_lazy_sha1",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/serializer.py::dump",
+    "total": 297,
+    "needed": 12,
+    "ran": 297,
+    "excess": 285,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/serializer.py::dump",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/signer.py::__init__",
+    "total": 297,
+    "needed": 273,
+    "ran": 297,
+    "excess": 24,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/signer.py::__init__",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/itsdangerous/serializer.py::loads_unsafe",
+    "total": 297,
+    "needed": 16,
+    "ran": 297,
+    "excess": 281,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/itsdangerous/serializer.py::loads_unsafe",
+    "total": 297,
+    "needed": 0,
+    "ran": 297,
+    "excess": 297,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_serializer.py::test_signer_kwargs",
+    "total": 297,
+    "needed": 12,
+    "ran": 297,
+    "excess": 285,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_timed.py::test_malformed_future_timestamp",
+    "total": 297,
+    "needed": 1,
+    "ran": 272,
+    "excess": 271,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 25 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_serializer.py::test_bad_payload_exception",
+    "total": 297,
+    "needed": 12,
+    "ran": 272,
+    "excess": 260,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 25 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_signer.py::test_signer",
+    "total": 297,
+    "needed": 3,
+    "ran": 289,
+    "excess": 286,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 8 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_timed.py::test_sig_error_date_signed",
+    "total": 297,
+    "needed": 1,
+    "ran": 248,
+    "excess": 247,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 49 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_serializer.py::test_changed_value",
+    "total": 297,
+    "needed": 48,
+    "ran": 272,
+    "excess": 224,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 25 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_signer.py::test_no_separator",
+    "total": 297,
+    "needed": 3,
+    "ran": 289,
+    "excess": 286,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 8 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_signer.py::test_digest_method",
+    "total": 297,
+    "needed": 3,
+    "ran": 248,
+    "excess": 245,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 49 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_timed.py::test_max_age",
+    "total": 297,
+    "needed": 4,
+    "ran": 248,
+    "excess": 244,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 49 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_itsdangerous/test_signer.py::test_abstract_algorithm",
+    "total": 297,
+    "needed": 1,
+    "ran": 248,
+    "excess": 247,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 49 of 297 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ },
+ {
+  "suite": "markupsafe",
+  "tests": 80,
+  "always_run": 1,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::ljust",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::ljust",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::__int__",
+    "total": 80,
+    "needed": 3,
+    "ran": 79,
+    "excess": 76,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::__int__",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::lstrip",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::lstrip",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::soft_str",
+    "total": 80,
+    "needed": 3,
+    "ran": 79,
+    "excess": 76,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::soft_str",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::striptags",
+    "total": 80,
+    "needed": 3,
+    "ran": 79,
+    "excess": 76,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::striptags",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::swapcase",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::swapcase",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::expandtabs",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::expandtabs",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::rjust",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::rjust",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::capitalize",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::capitalize",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/markupsafe/__init__.py::translate",
+    "total": 80,
+    "needed": 1,
+    "ran": 79,
+    "excess": 78,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/markupsafe/__init__.py::translate",
+    "total": 80,
+    "needed": 0,
+    "ran": 79,
+    "excess": 79,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_tuple_interpol",
+    "total": 80,
+    "needed": 2,
+    "ran": 79,
+    "excess": 77,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_custom_formatting",
+    "total": 80,
+    "needed": 2,
+    "ran": 50,
+    "excess": 48,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 29 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_adding",
+    "total": 80,
+    "needed": 2,
+    "ran": 50,
+    "excess": 48,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 29 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_format_map",
+    "total": 80,
+    "needed": 2,
+    "ran": 50,
+    "excess": 48,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 29 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_ext_init.py::test_ext_init",
+    "total": 80,
+    "needed": 1,
+    "ran": 51,
+    "excess": 50,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 28 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_html_interop",
+    "total": 80,
+    "needed": 2,
+    "ran": 51,
+    "excess": 49,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 28 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_escape_silent",
+    "total": 80,
+    "needed": 2,
+    "ran": 50,
+    "excess": 48,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 29 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_exception_custom_html.py::test_exception_custom_html",
+    "total": 80,
+    "needed": 2,
+    "ran": 52,
+    "excess": 50,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 27 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_type_behavior",
+    "total": 80,
+    "needed": 2,
+    "ran": 52,
+    "excess": 50,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 27 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markupsafe.py::test_complex_custom_formatting",
+    "total": 80,
+    "needed": 2,
+    "ran": 50,
+    "excess": 48,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 29 of 80 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ },
+ {
+  "suite": "click",
+  "tests": 1697,
+  "always_run": 26,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "src/click/decorators.py::pass_meta_key",
+    "total": 1697,
+    "needed": 2,
+    "ran": 1671,
+    "excess": 1669,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/decorators.py::pass_meta_key",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/types.py::_clamp",
+    "total": 1697,
+    "needed": 4,
+    "ran": 1671,
+    "excess": 1667,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/types.py::_clamp",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/exceptions.py::_format_possibilities",
+    "total": 1697,
+    "needed": 5,
+    "ran": 1671,
+    "excess": 1666,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/exceptions.py::_format_possibilities",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/_compat.py::strip_ansi",
+    "total": 1697,
+    "needed": 1100,
+    "ran": 1671,
+    "excess": 571,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/_compat.py::strip_ansi",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/core.py::__init__",
+    "total": 1697,
+    "needed": 99,
+    "ran": 1671,
+    "excess": 1572,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/core.py::__init__",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/parser.py::_fetch",
+    "total": 1697,
+    "needed": 1142,
+    "ran": 1671,
+    "excess": 529,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/parser.py::_fetch",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/formatting.py::write_paragraph",
+    "total": 1697,
+    "needed": 131,
+    "ran": 1671,
+    "excess": 1540,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/formatting.py::write_paragraph",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/decorators.py::decorator",
+    "total": 1697,
+    "needed": 2,
+    "ran": 1671,
+    "excess": 1669,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/decorators.py::decorator",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/types.py::coerce_path_result",
+    "total": 1697,
+    "needed": 13,
+    "ran": 1671,
+    "excess": 1658,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/types.py::coerce_path_result",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/click/utils.py::__enter__",
+    "total": 1697,
+    "needed": 1,
+    "ran": 1671,
+    "excess": 1670,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/click/utils.py::__enter__",
+    "total": 1697,
+    "needed": 0,
+    "ran": 1671,
+    "excess": 1671,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_defaults.py::test_multiple_flag_default",
+    "total": 1697,
+    "needed": 1,
+    "ran": 1671,
+    "excess": 1670,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_utils.py::test_iter_keepopenfile",
+    "total": 1697,
+    "needed": 1,
+    "ran": 191,
+    "excess": 190,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1480 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_options.py::test_missing_choice",
+    "total": 1697,
+    "needed": 1,
+    "ran": 792,
+    "excess": 791,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 879 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_formatting.py::test_removing_multiline_marker",
+    "total": 1697,
+    "needed": 1,
+    "ran": 679,
+    "excess": 678,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 992 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_options.py::test_flag_group_competition_four_flags",
+    "total": 1697,
+    "needed": 4,
+    "ran": 679,
+    "excess": 675,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 992 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_testing.py::test",
+    "total": 1697,
+    "needed": 1,
+    "ran": 686,
+    "excess": 685,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 985 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_types.py::test_path_resolve_symlink",
+    "total": 1697,
+    "needed": 1,
+    "ran": 83,
+    "excess": 82,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1588 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_commands.py::test",
+    "total": 1697,
+    "needed": 1,
+    "ran": 131,
+    "excess": 130,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1540 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_options.py::test_show_default_boolean_flag_name",
+    "total": 1697,
+    "needed": 2,
+    "ran": 734,
+    "excess": 732,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 937 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_chain.py::test_chaining_with_options",
+    "total": 1697,
+    "needed": 1,
+    "ran": 659,
+    "excess": 658,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1012 of 1697 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ },
+ {
+  "suite": "attrs",
+  "tests": 1391,
+  "always_run": 8,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "tests/utils.py::simple_attr",
+    "total": 1391,
+    "needed": 61,
+    "ran": 598,
+    "excess": 537,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 785 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "tests/utils.py::simple_attr",
+    "total": 1391,
+    "needed": 0,
+    "ran": 598,
+    "excess": 598,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 785 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_make.py::__setstate__",
+    "total": 1391,
+    "needed": 366,
+    "ran": 1383,
+    "excess": 1017,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_make.py::__setstate__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/validators.py::__call__",
+    "total": 1391,
+    "needed": 10,
+    "ran": 1383,
+    "excess": 1373,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/validators.py::__call__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_make.py::__getstate__",
+    "total": 1391,
+    "needed": 8,
+    "ran": 1383,
+    "excess": 1375,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_make.py::__getstate__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_compat.py::_get_annotations",
+    "total": 1391,
+    "needed": 820,
+    "ran": 1383,
+    "excess": 563,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_compat.py::_get_annotations",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_make.py::__repr__",
+    "total": 1391,
+    "needed": 1,
+    "ran": 1383,
+    "excess": 1382,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_make.py::__repr__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_next_gen.py::field",
+    "total": 1391,
+    "needed": 35,
+    "ran": 1383,
+    "excess": 1348,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_next_gen.py::field",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_make.py::__setattr__",
+    "total": 1391,
+    "needed": 27,
+    "ran": 1383,
+    "excess": 1356,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_make.py::__setattr__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/_make.py::converter",
+    "total": 1391,
+    "needed": 20,
+    "ran": 1383,
+    "excess": 1363,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/_make.py::converter",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/attr/validators.py::__call__",
+    "total": 1391,
+    "needed": 16,
+    "ran": 1383,
+    "excess": 1367,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/attr/validators.py::__call__",
+    "total": 1391,
+    "needed": 0,
+    "ran": 1383,
+    "excess": 1383,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_make.py::test_adds_all_by_default",
+    "total": 1391,
+    "needed": 4,
+    "ran": 1383,
+    "excess": 1379,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_setattr.py::test_setattr_auto_detect_frozen",
+    "total": 1391,
+    "needed": 2,
+    "ran": 318,
+    "excess": 316,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1065 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_make.py::test_fields_dict",
+    "total": 1391,
+    "needed": 1,
+    "ran": 318,
+    "excess": 317,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1065 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_validators.py::test_value_validator_can_be_none",
+    "total": 1391,
+    "needed": 1,
+    "ran": 443,
+    "excess": 442,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 940 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_functional.py::test_fields",
+    "total": 1391,
+    "needed": 2,
+    "ran": 573,
+    "excess": 571,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 810 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_slots.py::test_slots_cached_property_with_getattr_calls_getattr_for_missing_attributes",
+    "total": 1391,
+    "needed": 1,
+    "ran": 463,
+    "excess": 462,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 920 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_dunders.py::test_hash_works",
+    "total": 1391,
+    "needed": 5,
+    "ran": 152,
+    "excess": 147,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1231 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_make.py::test_converter_decorator",
+    "total": 1391,
+    "needed": 3,
+    "ran": 379,
+    "excess": 376,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1004 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_dunders.py::test_hash_default",
+    "total": 1391,
+    "needed": 1,
+    "ran": 379,
+    "excess": 378,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1004 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_converters.py::test_none_factory",
+    "total": 1391,
+    "needed": 1,
+    "ran": 137,
+    "excess": 136,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1246 of 1391 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ },
+ {
+  "suite": "packaging",
+  "tests": 61570,
+  "always_run": 1,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "src/packaging/pylock.py::__init__",
+    "total": 61570,
+    "needed": 6,
+    "ran": 83,
+    "excess": 77,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61486 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/pylock.py::__init__",
+    "total": 61570,
+    "needed": 0,
+    "ran": 83,
+    "excess": 83,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61486 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/requirements.py::_iter_parts",
+    "total": 61570,
+    "needed": 79,
+    "ran": 5724,
+    "excess": 5645,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 55845 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/requirements.py::_iter_parts",
+    "total": 61570,
+    "needed": 0,
+    "ran": 5641,
+    "excess": 5641,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 55928 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/_parser.py::_parse_requirement_marker",
+    "total": 61570,
+    "needed": 3954,
+    "ran": 7999,
+    "excess": 4045,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 53570 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/_parser.py::_parse_requirement_marker",
+    "total": 61570,
+    "needed": 0,
+    "ran": 7999,
+    "excess": 7999,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 53570 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/markers.py::default_environment",
+    "total": 61570,
+    "needed": 79,
+    "ran": 7999,
+    "excess": 7920,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 53570 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/markers.py::default_environment",
+    "total": 61570,
+    "needed": 0,
+    "ran": 7999,
+    "excess": 7999,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 53570 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/specifiers.py::is_unsatisfiable",
+    "total": 61570,
+    "needed": 206,
+    "ran": 9672,
+    "excess": 9466,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/specifiers.py::is_unsatisfiable",
+    "total": 61570,
+    "needed": 0,
+    "ran": 9672,
+    "excess": 9672,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/specifiers.py::_canonical_specs",
+    "total": 61570,
+    "needed": 5453,
+    "ran": 9672,
+    "excess": 4219,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/specifiers.py::_canonical_specs",
+    "total": 61570,
+    "needed": 0,
+    "ran": 9672,
+    "excess": 9672,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/pylock.py::is_direct",
+    "total": 61570,
+    "needed": 1,
+    "ran": 9672,
+    "excess": 9671,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/pylock.py::is_direct",
+    "total": 61570,
+    "needed": 0,
+    "ran": 83,
+    "excess": 83,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61486 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/metadata.py::_invalid_metadata",
+    "total": 61570,
+    "needed": 66,
+    "ran": 382,
+    "excess": 316,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61187 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/metadata.py::_invalid_metadata",
+    "total": 61570,
+    "needed": 0,
+    "ran": 299,
+    "excess": 299,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61270 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/specifiers.py::__contains__",
+    "total": 61570,
+    "needed": 222,
+    "ran": 9672,
+    "excess": 9450,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/specifiers.py::__contains__",
+    "total": 61570,
+    "needed": 0,
+    "ran": 9672,
+    "excess": 9672,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/packaging/pylock.py::_get_sequence_of_objects",
+    "total": 61570,
+    "needed": 45,
+    "ran": 9672,
+    "excess": 9627,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 51897 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/packaging/pylock.py::_get_sequence_of_objects",
+    "total": 61570,
+    "needed": 0,
+    "ran": 83,
+    "excess": 83,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61486 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_version.py::test_replace_returns_same_instance_when_unchanged",
+    "total": 61570,
+    "needed": 1,
+    "ran": 53271,
+    "excess": 53270,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 8298 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_pylock.py::test_pylock_inconsistent_wheel_version",
+    "total": 61570,
+    "needed": 1,
+    "ran": 53251,
+    "excess": 53250,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 8318 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_tags.py::test_cpython_first_none_any_tag",
+    "total": 61570,
+    "needed": 1,
+    "ran": 273,
+    "excess": 272,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61296 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_metadata.py::test_repr",
+    "total": 61570,
+    "needed": 1,
+    "ran": 509,
+    "excess": 508,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 61060 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_requirements.py::test_error_on_missing_op_after_name",
+    "total": 61570,
+    "needed": 1,
+    "ran": 5606,
+    "excess": 5605,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 55963 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_metadata.py::test_from_email",
+    "total": 61570,
+    "needed": 1,
+    "ran": 5606,
+    "excess": 5605,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 55963 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_markers.py::test_repr",
+    "total": 61570,
+    "needed": 2,
+    "ran": 2574,
+    "excess": 2572,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 58995 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_requirements.py::test_pickle_requirement_setstate_rejects_invalid_state",
+    "total": 61570,
+    "needed": 1,
+    "ran": 7582,
+    "excess": 7581,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 53987 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_version.py::test_invalid_versions",
+    "total": 61570,
+    "needed": 20,
+    "ran": 58495,
+    "excess": 58475,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 3074 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_metadata.py::test_raw_validate_unrecognized_field",
+    "total": 61570,
+    "needed": 1,
+    "ran": 53487,
+    "excess": 53486,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 8082 of 61570 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ },
+ {
+  "suite": "jinja2",
+  "tests": 911,
+  "always_run": 0,
+  "probes": [
+   {
+    "kind": "body",
+    "where": "src/jinja2/lexer.py::_normalize_newlines",
+    "total": 911,
+    "needed": 543,
+    "ran": 911,
+    "excess": 368,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/lexer.py::_normalize_newlines",
+    "total": 911,
+    "needed": 0,
+    "ran": 911,
+    "excess": 911,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/meta.py::enter_frame",
+    "total": 911,
+    "needed": 1,
+    "ran": 909,
+    "excess": 908,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/meta.py::enter_frame",
+    "total": 911,
+    "needed": 0,
+    "ran": 34,
+    "excess": 34,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 877 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/compiler.py::inner",
+    "total": 911,
+    "needed": 219,
+    "ran": 910,
+    "excess": 691,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/compiler.py::inner",
+    "total": 911,
+    "needed": 0,
+    "ran": 910,
+    "excess": 910,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/filters.py::do_capitalize",
+    "total": 911,
+    "needed": 1,
+    "ran": 909,
+    "excess": 908,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/filters.py::do_capitalize",
+    "total": 911,
+    "needed": 0,
+    "ran": 909,
+    "excess": 909,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/parser.py::parse_filter_expr",
+    "total": 911,
+    "needed": 764,
+    "ran": 911,
+    "excess": 147,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/parser.py::parse_filter_expr",
+    "total": 911,
+    "needed": 0,
+    "ran": 911,
+    "excess": 911,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/parser.py::parse_import_context",
+    "total": 911,
+    "needed": 28,
+    "ran": 911,
+    "excess": 883,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/parser.py::parse_import_context",
+    "total": 911,
+    "needed": 0,
+    "ran": 911,
+    "excess": 911,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/loaders.py::get_loader",
+    "total": 911,
+    "needed": 11,
+    "ran": 909,
+    "excess": 898,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/loaders.py::get_loader",
+    "total": 911,
+    "needed": 0,
+    "ran": 909,
+    "excess": 909,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/filters.py::do_select",
+    "total": 911,
+    "needed": 4,
+    "ran": 909,
+    "excess": 905,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/filters.py::do_select",
+    "total": 911,
+    "needed": 0,
+    "ran": 909,
+    "excess": 909,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/parser.py::parse_statement",
+    "total": 911,
+    "needed": 361,
+    "ran": 911,
+    "excess": 550,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/parser.py::parse_statement",
+    "total": 911,
+    "needed": 0,
+    "ran": 911,
+    "excess": 911,
+    "missed": [],
+    "notes": []
+   },
+   {
+    "kind": "body",
+    "where": "src/jinja2/idtracking.py::visit_OverlayScope",
+    "total": 911,
+    "needed": 1,
+    "ran": 910,
+    "excess": 909,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "comment",
+    "where": "src/jinja2/idtracking.py::visit_OverlayScope",
+    "total": 911,
+    "needed": 0,
+    "ran": 910,
+    "excess": 910,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 1 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_regression.py::test_variable_reuse",
+    "total": 911,
+    "needed": 1,
+    "ran": 909,
+    "excess": 908,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 2 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_ext.py::test_trimmed_policy_override",
+    "total": 911,
+    "needed": 1,
+    "ran": 105,
+    "excess": 104,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 806 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_loader.py::test_filesystem_loader_overlapping_names",
+    "total": 911,
+    "needed": 1,
+    "ran": 94,
+    "excess": 93,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 817 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_core_tags.py::test_noniter",
+    "total": 911,
+    "needed": 1,
+    "ran": 106,
+    "excess": 105,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 805 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_filters.py::test_string",
+    "total": 911,
+    "needed": 1,
+    "ran": 195,
+    "excess": 194,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 716 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_core_tags.py::test_recursive",
+    "total": 911,
+    "needed": 1,
+    "ran": 195,
+    "excess": 194,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 716 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_async_filters.py::test_groupby_case",
+    "total": 911,
+    "needed": 2,
+    "ran": 112,
+    "excess": 110,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 799 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_security.py::test_unsafe",
+    "total": 911,
+    "needed": 1,
+    "ran": 66,
+    "excess": 65,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 845 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_filters.py::test_capitalize",
+    "total": 911,
+    "needed": 1,
+    "ran": 149,
+    "excess": 148,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 762 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   },
+   {
+    "kind": "test",
+    "where": "tests/test_nativetypes.py::test_cast_int",
+    "total": 911,
+    "needed": 1,
+    "ran": 161,
+    "excess": 160,
+    "missed": [],
+    "notes": [
+     "rstest: --incremental: 750 of 911 test(s) unchanged since last green -> skipped (cached)"
+    ]
+   }
+  ]
+ }
+]
