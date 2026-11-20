@@ -424,10 +424,10 @@ def gate_incremental_closure_function_bodies(g, args, binary):
 
 
 def gate_incremental_closure_imported_before_coverage(g, args, binary):
-    """A package a conftest imports loads before the workers' coverage starts,
-    so its import-time lines are never measured, though fixture setups that
-    run its functions are. Its modules must keep the whole-file hash: a body
-    called at import time can't be told apart from one that isn't."""
+    """A package a conftest imports loads before pytest-cov's worker
+    coverage starts. The worker keeps that early data, so the package's
+    import-time lines are measured and its modules are keyed per function: an
+    import-time body edit reruns the importer, an unrun function's doesn't."""
     print("== incremental import closure: imported before coverage ==")
     sp = g.tmp / "incrpre"
     core = (
@@ -438,6 +438,9 @@ def gate_incremental_closure_imported_before_coverage(g, args, binary):
         "\n"
         "def compute(x):\n"
         "    return x + 1\n"
+        "\n"
+        "def unused():\n"
+        "    return 1\n"
     )
     g.write("incrpre/pkg/__init__.py", "from pkg.core import TABLE, compute\n")
     g.write("incrpre/pkg/core.py", core)
@@ -466,6 +469,13 @@ def gate_incremental_closure_imported_before_coverage(g, args, binary):
     r = run()
     check(
         "incremental pre-imported: unchanged suite is all cached",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    g.write("incrpre/pkg/core.py", core.replace("return 1\n", "return 100\n"))
+    r = run()
+    check(
+        "incremental pre-imported: an unrun function's edit keeps the suite cached",
         r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
         f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
     )
@@ -502,13 +512,16 @@ def gate_incremental_covered_function_bodies(g, args, binary):
         "class Box:\n"
         "    def area(self, n):\n"
         "        return n * n\n"
+        "\n"
+        "def stub():\n"
+        '    """Does nothing yet."""\n'
     )
     g.write("incrfunc/pkg/__init__.py", "")
     g.write("incrfunc/pkg/core.py", core)
     tests = {
         "test_a": "assert core.f_a(1) == 3",
         "test_b": "assert core.f_b(1) == 0",
-        "test_c": "assert core.Box().area(3) == 9",
+        "test_c": "core.stub(); assert core.Box().area(3) == 9",
         "test_k": "assert core.under_limit(5)",
     }
     for name, body in tests.items():
@@ -569,6 +582,18 @@ def gate_incremental_covered_function_bodies(g, args, binary):
         )
         g.write("incrfunc/pkg/core.py", core)
         run()  # settle back to green
+
+    # A call to a docstring-only body records only its header line, so it is
+    # keyed with the module level: an edit to it reruns the test calling it.
+    g.write("incrfunc/pkg/core.py", core + "    raise ValueError\n")
+    r = run()
+    check(
+        "incremental functions: an edit to a docstring-only body reruns its caller",
+        r.returncode == 1 and "test_c" in r.stdout and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+    )
+    g.write("incrfunc/pkg/core.py", core)
+    run()  # settle back to green
 
     # A module-level edit: every test that covered the file runs.
     g.write("incrfunc/pkg/core.py", core.replace("LIMIT = 10", "LIMIT = 1"))

@@ -128,6 +128,36 @@ def _pool_coverage_args(args: list[str]) -> list[str]:
     return ["--cov-append", *args]
 
 
+class KeepEarlyCoverage:
+    """Save what pytest-cov measured before the pool worker's own coverage.
+
+    pytest-cov's Central controller starts before conftests load; at
+    sessionstart it sees `workerinput` and starts a DistWorker controller in
+    its place, dropping the Central data unsaved. That data is every line run
+    while conftests imported the project, so without it a package a conftest
+    imports has no measured import-time lines. Saved to its own suffixed file,
+    the orchestrator's combine merges it with the rest (context-free lines).
+    """
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_sessionstart(self, session):
+        if getattr(session.config, "workerinput", None) is None:
+            return
+        plugin = session.config.pluginmanager.get_plugin("_cov")
+        controller = getattr(plugin, "cov_controller", None)
+        cov = getattr(controller, "cov", None)
+        if cov is None or getattr(plugin.options, "no_cov", False):
+            return
+        import warnings
+
+        cov.stop()
+        # Nothing measured yet is normal (no conftest imports the project);
+        # coverage's "No data was collected" must not hit filterwarnings=error.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cov.save()
+
+
 def _pytest_main(args: list[str], plugins: list) -> int:
     """`pytest.main`, but with argparse's prog set to `rstest`.
 
@@ -156,6 +186,7 @@ def run_session(args: list[str], conn) -> int:
         MaxfailExemptions(pool=True),
         PoolMarkReruns(),
         IsolatedTests(),
+        KeepEarlyCoverage(),
     ]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 
@@ -169,6 +200,7 @@ def run_lazy_session(args: list[str], conn) -> int:
         MaxfailExemptions(pool=True),
         PoolMarkReruns(),
         IsolatedTests(),
+        KeepEarlyCoverage(),
     ]
     return _contained(lambda: _pytest_main(list(args), plugins=plugins), conn)
 

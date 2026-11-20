@@ -106,7 +106,15 @@ def analyze(
                 # A body that starts on its header's line (`def f(): return 1`)
                 # can't be cut without the header: keep the whole def.
                 same_line = text[first - 1][: node.body[0].col_offset].strip() != ""
-                if same_line or name in keep or any(first <= ln <= last for ln in lines):
+                # Calling a docstring-only body records just the header line,
+                # so no test would look like it ran it: keep it whole too.
+                doc_only = len(node.body) == 1 and ast.get_docstring(node, clean=False) is not None
+                if (
+                    same_line
+                    or doc_only
+                    or name in keep
+                    or any(first <= ln <= last for ln in lines)
+                ):
                     kept.append(name)
                 else:
                     drop.append((name, first, last))

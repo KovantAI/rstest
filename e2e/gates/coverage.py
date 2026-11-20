@@ -80,6 +80,24 @@ def gate_coverage(g, args, binary):
         r.returncode == 0 and "TOTAL" not in r.stdout and "TOTAL" in r.stderr,
         r.stdout[-200:],
     )
+    # Pool workers save what pytest-cov measured before session start (the
+    # conftest imports). Here that is nothing, and coverage's "No data was
+    # collected" warning must not reach `filterwarnings = error`.
+    g.write("covwarn/mypkg/__init__.py", "def used(x):\n    return x * 2\n")
+    g.write(
+        "covwarn/test_cov.py",
+        "from mypkg import used\n\n\ndef test_used():\n    assert used(2) == 4\n",
+    )
+    g.write("covwarn/pytest.ini", "[pytest]\nfilterwarnings = error\n")
+    wdir = g.tmp / "covwarn"
+    r = g.run(
+        "test_cov.py", "-n", "2", "--cov=mypkg", cwd=wdir, env_extra={"PYTHONPATH": str(wdir)}
+    )
+    check(
+        "pool coverage with nothing measured before the session: filterwarnings=error passes",
+        r.returncode == 0 and "1 passed" in r.stdout,
+        f"rc={r.returncode} {r.stdout[-300:]}",
+    )
     # --cov only in addopts: workers measure but rstest never combines or
     # reports, and the run exits 0. Silent until rstest warned (coverage.md).
     g.write("covaddopts/mypkg/__init__.py", "def used(x):\n    return x * 2\n")

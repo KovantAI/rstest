@@ -55,6 +55,15 @@ def test_one_line_def_is_kept_whole():
     assert h(BASE) != h(BASE.replace("def one(): return 1", "def one(): return 2"))
 
 
+def test_docstring_only_body_is_kept_whole():
+    # Calling it records only its header line, never a body line, so no test
+    # would look like it ran it: an edit to it must move the module hash.
+    src = 'def stub():\n    """Doc."""\n'
+    _, kept, defs = modhash.analyze(src)
+    assert kept == ["stub"] and defs == {}
+    assert h(src) != h(src + "    raise ValueError\n")
+
+
 def test_bodies_that_ran_outside_a_call_phase_are_kept():
     # Line 8 (`y = x + 1`) ran at import or in a fixture: helper's body counts.
     digest, kept = modhash.module_hash(BASE, lines={8})

@@ -475,13 +475,15 @@ count as passed and carry `"cached": true` in
   module level: this catches import-time code (a module-level constant) that
   coverage records under no test. Module level means everything outside
   function bodies (module and class statements, decorators, `def` lines with
-  their defaults), plus the bodies of functions that ran outside a test's own
+  their defaults, and bodies that are only a docstring, since coverage can't
+  see those run), plus the bodies of functions that ran outside a test's own
   call phase: at import, or in a fixture's setup or teardown, which every
   test using that fixture shares. Editing any other function body re-runs
   only the tests whose coverage includes it. This needs coverage to have
-  seen the module imported: a module imported before coverage starts (by a
-  `conftest.py` or a plugin) or not measured at all is still compared
-  whole, so any edit to it re-runs every test that imports it.
+  seen the module imported (imports from a `conftest.py` count): a module
+  imported before coverage starts (by a plugin) or not measured at all is
+  still compared whole, so any edit to it re-runs every test that imports
+  it.
 - A config-file change (conftest, pytest config) or a change to any
   **git-tracked non-Python file** (a JSON fixture, a template, a golden file)
   disables skipping for that run. Untracked and ignored files are not watched,

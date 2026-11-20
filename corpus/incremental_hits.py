@@ -147,14 +147,22 @@ def pick_probes(root, index, rng, n):
         # Tests whose covered lines fall in this function: for a test function
         # that includes subclasses that inherit it (they run its lines).
         lines = index.get(rel, {})
-        covering = set().union(
-            *(lines.get(ln, set()) for ln in range(node.lineno, node.end_lineno + 1))
-        )
+        head = min([d.lineno for d in node.decorator_list] + [node.lineno])
+
+        def covered(first, last=node.end_lineno, lines=lines):
+            return set().union(*(lines.get(ln, set()) for ln in range(first, last + 1)))
+
+        # Probes are picked by any covered line of the def (stable sample);
+        # the tests that need to run are the ones that ran its body. A covered
+        # header alone means the module was executed (a test re-importing it),
+        # except for a docstring-only body, whose call records only the header.
+        doc_only = len(node.body) == 1 and ast.get_docstring(node, clean=False) is not None
+        covering = covered(head if doc_only else node.body[0].lineno)
         if is_test_file(p):
-            if node.name.startswith("test") and covering:
+            if node.name.startswith("test") and covered(node.lineno):
                 tests.append((p, node, covering))
             continue
-        if covering:
+        if covered(node.lineno):
             src.append((p, node, covering))
     probes = []
     for p, node, covering in rng.sample(src, min(n, len(src))):
