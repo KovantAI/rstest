@@ -253,7 +253,7 @@ Feature: Daily local developer
       Given a file "app/util.py" containing:
         """
         def two():
-            return 2  # touched
+            return 1 + 1
         """
       When I run "rstest -n 2 --cov=app --cov-context=test --cov-report= --incremental" in "tests/unit" after clearing stale .coverage files
       Then the run succeeds

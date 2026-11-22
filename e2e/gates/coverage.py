@@ -123,6 +123,54 @@ def gate_coverage(g, args, binary):
     )
 
 
+def gate_coverage_conftest_imports(g, args, binary):
+    """pytest-cov's pool workers drop what it measured while conftests loaded
+    (it restarts coverage at session start); rstest keeps it. A module only a
+    conftest imports reports its import-time lines as covered, in every mode."""
+    print("== coverage: conftest-time imports ==")
+    g.write("covconf/pkg/__init__.py", "from pkg.core import f\n")
+    g.write("covconf/pkg/core.py", "def f():\n    return 1\n")
+    g.write("covconf/tests/conftest.py", "import pkg\n")
+    g.write("covconf/tests/test_x.py", "def test_x():\n    assert True\n")
+    cdir = g.tmp / "covconf"
+
+    def run(*extra):
+        for stale in cdir.glob(".coverage*"):
+            stale.unlink()
+        return g.run(
+            "tests",
+            "--cov=pkg",
+            "--cov-report=term-missing",
+            *extra,
+            cwd=cdir,
+            env_extra={"PYTHONPATH": str(cdir)},
+        )
+
+    def core_row(out):
+        return next((ln.split() for ln in out.splitlines() if "core.py" in ln), [])
+
+    # `def f` ran at conftest import, the body never: 1 of 2 statements.
+    for label, extra in [
+        ("pool", ["-n", "2"]),
+        ("pool with --cov-append", ["-n", "2", "--cov-append"]),
+        ("pool with --collect lazy", ["-n", "2", "--collect", "lazy"]),
+        ("single worker", ["-n", "0"]),
+    ]:
+        r = run(*extra)
+        row = core_row(r.stdout)
+        check(
+            f"coverage counts conftest-time import lines ({label})",
+            r.returncode == 0 and row[1:4] == ["2", "1", "50%"],
+            f"rc={r.returncode} row={row} {r.stdout[-400:]} {r.stderr[-300:]}",
+        )
+    r = run("-n", "2", "--no-cov")
+    check(
+        "coverage --no-cov under the pool: no report, no data left",
+        r.returncode == 0 and not core_row(r.stdout) and not list(cdir.glob(".coverage*")),
+        f"rc={r.returncode} files={[p.name for p in cdir.glob('.coverage*')]} {r.stdout[-300:]}",
+    )
+
+
 def gate_coverage_contexts_line_test_index_cov_co(g, args, binary):
     print("== coverage contexts + line->test index (--cov-context) ==")
     # Per-test contexts must survive the PARALLEL merge (tests land on different
