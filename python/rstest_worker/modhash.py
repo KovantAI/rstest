@@ -144,6 +144,17 @@ def analyze(
     return digest.hexdigest(), sorted(set(kept)), defs
 
 
+def layout(src: str, defs: dict[str, tuple[int, int, str]]) -> dict[str, str]:
+    """Each body's exact text (comments and blank lines included) hashed:
+    equal means a body that moved kept every line at the same offset, so
+    coverage recorded against its old lines can be shifted onto the new."""
+    text = src.replace("\r\n", "\n").splitlines(keepends=True)
+    return {
+        name: hashlib.sha256("".join(text[first - 1 : last]).encode()).hexdigest()
+        for name, (first, last, _) in defs.items()
+    }
+
+
 def main() -> None:
     request = json.load(sys.stdin)
     root = request["root"]

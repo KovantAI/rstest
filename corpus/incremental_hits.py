@@ -13,6 +13,8 @@ runs: tests that were not green). Then, per probe, edit one function, run
   ran      tests executed this run, minus the baseline's always-run set
   excess   ran but not needed: what a finer cache key could still skip
   missed   needed but skipped: a false green, must be 0
+  next     with --follow-up: tests the next run (edit kept, nothing new)
+           executes, minus the always-run set; ideally 0
 
 Edit kinds:
 
@@ -194,7 +196,7 @@ def needed_tests(kind, covering):
     return covering
 
 
-def measure(suite, probes_per_kind, seed):
+def measure(suite, probes_per_kind, seed, follow_up=False):
     work = Path(tempfile.mkdtemp(prefix=f"inc-{suite.name}-"))
     cache, snapshot, snap = work / "cache", work / "cache.snapshot", work / "report.json"
     root = suite.cwd()
@@ -212,8 +214,12 @@ def measure(suite, probes_per_kind, seed):
     rows = []
     for kind, p, node, covering in probes:
         original = edit(p, node, kind)
+        nxt = None
         try:
             tests, notes = run_incremental(suite, cache, ["--incremental"], snap)
+            if follow_up and tests is not None:
+                # The run after, edit kept: what the first one left skippable.
+                nxt = run_incremental(suite, cache, ["--incremental"], snap)[0]
         finally:
             p.write_text(original)
             shutil.rmtree(cache)
@@ -234,10 +240,14 @@ def measure(suite, probes_per_kind, seed):
             "missed": sorted(needed - ran(tests)),
             "notes": notes,
         }
+        if nxt is not None:
+            row["next"] = len(ran(nxt) - baseline)
         rows.append(row)
         log(
             f"    {kind:7} {row['where']}: ran {row['ran']}, needed {row['needed']}, "
-            f"excess {row['excess']}" + (f", MISSED {len(row['missed'])}" if row["missed"] else "")
+            f"excess {row['excess']}"
+            + (f", next run {row['next']}" if "next" in row else "")
+            + (f", MISSED {len(row['missed'])}" if row["missed"] else "")
         )
         for n in notes:
             log(f"        {n}")
@@ -254,11 +264,13 @@ def summarize(result):
         t = result["tests"] - result["always_run"]
         ran_share = [r["ran"] / t for r in rows] if t else [0]
         ideal_share = [r["needed"] / t for r in rows] if t else [0]
+        nxt = [r["next"] / t for r in rows if "next" in r and t]
         out.append(
             f"| {result['suite']} | {kind} | {len(rows)} "
             f"| {statistics.median(ideal_share):.1%} | {statistics.median(ran_share):.1%} "
             f"| {sum(r['excess'] for r in rows) / len(rows):.0f} "
             f"| {sum(len(r['missed']) for r in rows)} |"
+            + (f" {statistics.median(nxt):.1%} |" if nxt else "")
         )
     return out
 
@@ -273,6 +285,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", help="write the per-probe rows as JSON here")
     ap.add_argument("--binary", help="rstest binary (default: target/release/rstest)")
+    ap.add_argument(
+        "--follow-up",
+        action="store_true",
+        help="after each probe, run once more with the edit kept (should rerun nothing)",
+    )
     args = ap.parse_args()
     cfg = tomllib.loads((HERE / "suites.toml").read_text())
     binary = Path(args.binary) if args.binary else REPO / "target" / "release" / "rstest"
@@ -283,16 +300,16 @@ def main():
         log(f"{name}: installing pytest-cov for the measurement")
         suite.pip("pytest-cov")
         try:
-            results.append(measure(suite, args.probes, args.seed))
+            results.append(measure(suite, args.probes, args.seed, args.follow_up))
         finally:
             added = [p for p in ("pytest-cov", "coverage") if p not in had]
             if added:
                 sh(["uv", "pip", "uninstall", "-p", str(suite.venv), *added])
     print(
         "\n| suite | edit | probes | must run (median) | ran (median) "
-        "| excess tests (mean) | missed |"
+        "| excess tests (mean) | missed |" + (" next run (median) |" if args.follow_up else "")
     )
-    print("|---|---|---:|---:|---:|---:|---:|")
+    print("|---|---|---:|---:|---:|---:|---:|" + ("---:|" if args.follow_up else ""))
     for r in results:
         print("\n".join(summarize(r)))
     print("\nmust run / ran: share of the suite (always-run tests excluded). missed must be 0.")

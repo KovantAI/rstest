@@ -696,4 +696,5 @@ def test_build_index_keys_covered_files_per_function(tmp_path, monkeypatch):
     assert module["keep"] == []
     assert sorted(module["defs"]) == ["a", "b"]
     assert module["defs"]["a"][:2] == [2, 2]
+    assert sorted(module["layout"]) == ["a", "b"]
     assert "module" not in doc["files"]["pre.py"]

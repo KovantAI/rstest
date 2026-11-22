@@ -175,3 +175,17 @@ def test_strings_docstrings_and_encoding_still_count():
     latin = "# -*- coding: latin-1 -*-\n" + BASE
     utf8 = "# -*- coding: utf-8 -*-\n" + BASE
     assert modhash.analyze(latin)[0] != modhash.analyze(utf8)[0]
+
+
+def test_layout_follows_a_moved_body_but_not_one_reshaped_inside():
+    src = "def a():\n    return 1\n\n\ndef b():\n    x = 1\n    return x\n"
+    _, _, defs = modhash.analyze(src)
+    before = modhash.layout(src, defs)
+    moved = "\n\n" + src.replace("return 1", "return 2")
+    _, _, mdefs = modhash.analyze(moved)
+    assert modhash.layout(moved, mdefs)["b"] == before["b"]
+    assert mdefs["b"][0] == defs["b"][0] + 2
+    reshaped = src.replace("    x = 1\n", "    x = 1\n    # note\n")
+    _, _, rdefs = modhash.analyze(reshaped)
+    assert rdefs["b"][2] == defs["b"][2], "comment-insensitive body hash"
+    assert modhash.layout(reshaped, rdefs)["b"] != before["b"]

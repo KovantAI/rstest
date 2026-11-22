@@ -583,6 +583,21 @@ def gate_incremental_covered_function_bodies(g, args, binary):
         g.write("incrfunc/pkg/core.py", core)
         run()  # settle back to green
 
+    # The tests skipped under a changed file keep their coverage, moved onto
+    # the new lines, so the run after the edit skips them again. test_c's call
+    # to the docstring-only stub is a module-level line, which can't be moved:
+    # it runs once more.
+    g.write("incrfunc/pkg/core.py", "\n\n" + core.replace("return x * 2", "return x * 2 + 0"))
+    run()
+    r = run()
+    check(
+        "incremental functions: the run after an edit keeps the moved tests cached",
+        r.returncode == 0 and "3 of 4 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-400:]}",
+    )
+    g.write("incrfunc/pkg/core.py", core)
+    run()  # settle back to green
+
     # A call to a docstring-only body records only its header line, so it is
     # keyed with the module level: an edit to it reruns the test calling it.
     g.write("incrfunc/pkg/core.py", core + "    raise ValueError\n")

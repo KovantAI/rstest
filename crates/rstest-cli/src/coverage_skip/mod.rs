@@ -986,14 +986,42 @@ pub fn carry_forward(old: &CoverageIndex, new: &mut CoverageIndex, cached: &Hash
 /// run from a subdirectory). covtool rewrites the index from only the tests
 /// that ran, and the index is shared by every run in the rootdir. A test is
 /// carried only when every file it covered is either unmeasured this run or
-/// measured with the content the old index recorded: under a changed file its
-/// old line map is stale, so it is dropped (and so re-runs) instead.
+/// measured with the content the old index recorded, or its lines there can be
+/// moved onto the new content: the module level unchanged and each line inside
+/// a function whose body text is identical (comments and blank lines too, so
+/// every line kept its offset), shifted as far as that function moved. Otherwise its old line
+/// map is stale, so it is dropped (and so re-runs) instead.
 pub fn carry_forward_unrun(old: &CoverageIndex, new: &mut CoverageIndex, ran: &HashSet<String>) {
     let mut stale: HashSet<&str> = HashSet::new();
+    // Changed file -> nodeid -> its lines moved onto the new content.
+    let mut moved: HashMap<&str, HashMap<&str, Vec<u32>>> = HashMap::new();
     for (file, ofile) in &old.files {
-        if new.files.get(file).is_some_and(|nf| nf.hash != ofile.hash) {
-            for ids in ofile.lines.values() {
-                stale.extend(ids.iter().map(String::as_str));
+        let Some(nfile) = new.files.get(file).filter(|nf| nf.hash != ofile.hash) else {
+            continue;
+        };
+        // A moved test counts as run on the new content, so the module level
+        // must be as it was too.
+        let shift = match (&ofile.module, &nfile.module) {
+            (Some(o), Some(n)) if o.hash == n.hash => Some((def_lookup(o), o, n)),
+            _ => None,
+        };
+        let move_line = |line: u32| {
+            let (lookup, o, n) = shift.as_ref()?;
+            let (q, first, _) = lookup(line)?;
+            let (nfirst, _, _) = n.defs.get(q)?;
+            let same = o.layout.get(q).is_some_and(|l| n.layout.get(q) == Some(l));
+            same.then(|| line - first + nfirst)
+        };
+        let per = moved.entry(file.as_str()).or_default();
+        for (line, ids) in &ofile.lines {
+            let to = move_line(*line);
+            for id in ids {
+                match to {
+                    Some(to) => per.entry(id.as_str()).or_default().push(to),
+                    None => {
+                        stale.insert(id.as_str());
+                    }
+                }
             }
         }
     }
@@ -1004,7 +1032,34 @@ pub fn carry_forward_unrun(old: &CoverageIndex, new: &mut CoverageIndex, ran: &H
         .filter(|id| !ran.contains(*id) && !stale.contains(id.as_str()))
         .cloned()
         .collect();
-    carry_forward(old, new, &keep);
+    let unchanged = CoverageIndex {
+        schema: old.schema,
+        shared_lines: HashMap::new(),
+        files: old
+            .files
+            .iter()
+            .filter(|(f, _)| !moved.contains_key(f.as_str()))
+            .map(|(f, c)| (f.clone(), c.clone()))
+            .collect(),
+    };
+    carry_forward(&unchanged, new, &keep);
+    for (file, per) in moved {
+        let nfile = new
+            .files
+            .get_mut(file)
+            .expect("moved files are in the new index");
+        for (id, lines) in per {
+            if !keep.contains(id) {
+                continue;
+            }
+            for line in lines {
+                let slot = nfile.lines.entry(line).or_default();
+                if !slot.iter().any(|x| x == id) {
+                    slot.push(id.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Write the coverage index back to the local cache (same path covtool uses),
@@ -1015,27 +1070,32 @@ pub fn write_index(index: &CoverageIndex) {
     }
 }
 
-/// For a covered file with a per-function key: nodeid -> the functions whose
-/// bodies hold lines it covered. Covered lines outside every listed body are
-/// module-level (guarded by the module-level hash). `None` without a key.
-fn covered_defs(file: &CoverageFile) -> Option<HashMap<&str, HashSet<&str>>> {
-    let key = file.module.as_ref()?;
-    let mut spans: Vec<(u32, u32, &str)> = key
+/// The function body holding `line`, as (qualified name, first body line, body
+/// hash); `None` for a module-level line.
+fn def_lookup<'a>(key: &'a ModuleKey) -> impl Fn(u32) -> Option<(&'a str, u32, &'a str)> {
+    let mut spans: Vec<(u32, u32, &str, &str)> = key
         .defs
         .iter()
-        .map(|(q, (first, last, _))| (*first, *last, q.as_str()))
+        .map(|(q, (first, last, hash))| (*first, *last, q.as_str(), hash.as_str()))
         .collect();
     spans.sort_unstable();
-    let def_at = |line: u32| {
+    move |line| {
         let i = spans.partition_point(|s| s.0 <= line);
         i.checked_sub(1)
             .map(|i| spans[i])
             .filter(|s| line <= s.1)
-            .map(|s| s.2)
-    };
+            .map(|s| (s.2, s.0, s.3))
+    }
+}
+
+/// For a covered file with a per-function key: nodeid -> the functions whose
+/// bodies hold lines it covered. Covered lines outside every listed body are
+/// module-level (guarded by the module-level hash). `None` without a key.
+fn covered_defs(file: &CoverageFile) -> Option<HashMap<&str, HashSet<&str>>> {
+    let def_at = def_lookup(file.module.as_ref()?);
     let mut out: HashMap<&str, HashSet<&str>> = HashMap::new();
     for (line, ids) in &file.lines {
-        if let Some(q) = def_at(*line) {
+        if let Some((q, _, _)) = def_at(*line) {
             for id in ids {
                 out.entry(id.as_str()).or_default().insert(q);
             }

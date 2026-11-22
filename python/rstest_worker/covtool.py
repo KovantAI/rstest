@@ -165,11 +165,12 @@ def _index_base() -> str:
 def _module_key(path: str, shared_lines: list[int]) -> dict[str, Any] | None:
     """A covered file's per-function key for `--incremental`: its module-level
     hash (bodies that ran outside a test's call phase kept, see `modhash`),
-    the kept names, and each other body's span and hash. A test that covered
+    the kept names, each other body's span and hash, and its exact-text hash
+    (`layout`, to move coverage lines after an edit). A test that covered
     lines in some bodies depends on those bodies and the module-level hash,
     so an edit to another function in the file leaves it skippable. `None`
     when the file can't be read or parsed (the whole-file hash still guards)."""
-    from rstest_worker.modhash import analyze
+    from rstest_worker.modhash import analyze, layout
 
     try:
         with open(path, encoding="utf-8") as fh:
@@ -177,7 +178,12 @@ def _module_key(path: str, shared_lines: list[int]) -> dict[str, Any] | None:
         digest, kept, defs = analyze(src, lines=set(shared_lines))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
         return None
-    return {"hash": digest, "keep": kept, "defs": {k: list(v) for k, v in defs.items()}}
+    return {
+        "hash": digest,
+        "keep": kept,
+        "defs": {k: list(v) for k, v in defs.items()},
+        "layout": layout(src, defs),
+    }
 
 
 def build_index(cov: Any) -> None:

@@ -45,6 +45,10 @@ pub struct ModuleKey {
     pub keep: Vec<String>,
     /// Qualified name -> (first body line, last line, body hash).
     pub defs: HashMap<String, (u32, u32, String)>,
+    /// Qualified name -> hash of the body's exact text: equal across an edit,
+    /// the body only moved, so its coverage lines can be shifted.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub layout: HashMap<String, String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default, PartialEq)]

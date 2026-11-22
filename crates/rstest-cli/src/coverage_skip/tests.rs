@@ -1087,6 +1087,11 @@ fn key(module: &str, a: &str, b: &str) -> ModuleKey {
             ("b".to_string(), (6, 7, b.to_string())),
         ]
         .into(),
+        layout: [
+            ("a".to_string(), format!("L{a}")),
+            ("b".to_string(), format!("L{b}")),
+        ]
+        .into(),
     }
 }
 
@@ -1134,6 +1139,7 @@ fn an_edited_test_file_reruns_only_the_tests_whose_functions_changed() {
         hash: module.to_string(),
         keep: Vec::new(),
         defs: defs(a, b),
+        layout: HashMap::new(),
     };
     idx.files.get_mut("t.py").unwrap().module = Some(key("M", "A", "B"));
     let b = base(&["t.py::test_a", "t.py::test_b"], "TF");
@@ -1148,4 +1154,101 @@ fn an_edited_test_file_reruns_only_the_tests_whose_functions_changed() {
     assert!(skip([("t.py".to_string(), key("M2", "A", "B"))].into()).is_empty());
     // No key for the file: the whole-file rule, both run.
     assert!(skip(HashMap::new()).is_empty());
+}
+
+#[test]
+fn carry_forward_unrun_moves_lines_of_unchanged_functions_in_a_changed_file() {
+    // mod.py changed: `a` grew by two lines, so `b` (same body) moved down two.
+    // test_a ran. test_b (skipped) ran only `b`: its lines move with `b`.
+    // test_c ran a changed `a` line, test_m a module-level line: both dropped.
+    let mut old = index(&[(
+        "mod.py",
+        "H",
+        &[
+            (2, &["t.py::test_a", "t.py::test_c"]),
+            (6, &["t.py::test_b"]),
+            (7, &["t.py::test_b"]),
+            (9, &["t.py::test_m"]),
+        ],
+    )]);
+    old.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    let mut new = index(&[("mod.py", "H2", &[(2, &["t.py::test_a"])])]);
+    new.files.get_mut("mod.py").unwrap().module = Some(ModuleKey {
+        hash: "M".to_string(),
+        keep: Vec::new(),
+        defs: [
+            ("a".to_string(), (2, 5, "A2".to_string())),
+            ("b".to_string(), (8, 9, "B".to_string())),
+        ]
+        .into(),
+        layout: [
+            ("a".to_string(), "LA2".to_string()),
+            ("b".to_string(), "LB".to_string()),
+        ]
+        .into(),
+    });
+    let ran: HashSet<String> = ["t.py::test_a".to_string()].into_iter().collect();
+    carry_forward_unrun(&old, &mut new, &ran);
+    let f = &new.files["mod.py"];
+    assert_eq!(f.hash, "H2");
+    assert_eq!(f.lines[&8], vec!["t.py::test_b".to_string()]);
+    assert_eq!(f.lines[&9], vec!["t.py::test_b".to_string()]);
+    assert_eq!(f.lines[&2], vec!["t.py::test_a".to_string()]);
+    assert_eq!(f.lines.len(), 3, "{:?}", f.lines);
+}
+
+#[test]
+fn carry_forward_unrun_drops_a_test_with_any_unmovable_line() {
+    // test_b also covered plain.py, changed and without per-function keys:
+    // nothing to move its line by, so it is dropped from every file.
+    let mut old = index(&[
+        ("mod.py", "H", &[(6, &["t.py::test_b"])]),
+        ("plain.py", "P", &[(1, &["t.py::test_b"])]),
+    ]);
+    old.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    let mut new = index(&[
+        ("mod.py", "H", &[(2, &["t.py::test_a"])]),
+        ("plain.py", "P2", &[(1, &["t.py::test_a"])]),
+    ]);
+    new.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    carry_forward_unrun(&old, &mut new, &["t.py::test_a".to_string()].into());
+    let carried: Vec<_> = new
+        .files
+        .values()
+        .flat_map(|f| f.lines.values().flatten())
+        .filter(|id| *id == "t.py::test_b")
+        .collect();
+    assert!(carried.is_empty(), "{:?}", new.files);
+}
+
+#[test]
+fn carry_forward_unrun_moves_nothing_when_the_module_level_changed() {
+    // A subset run left test_b unrun while mod.py's module level changed: its
+    // last green predates that change, so moving it would mark it unchanged.
+    let mut old = index(&[("mod.py", "H", &[(6, &["t.py::test_b"])])]);
+    old.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    let mut new = index(&[("mod.py", "H2", &[(2, &["t.py::test_a"])])]);
+    new.files.get_mut("mod.py").unwrap().module = Some(key("M2", "A", "B"));
+    carry_forward_unrun(&old, &mut new, &["t.py::test_a".to_string()].into());
+    assert!(
+        !new.files["mod.py"].lines.contains_key(&6),
+        "{:?}",
+        new.files
+    );
+    assert_eq!(new.files["mod.py"].lines.len(), 1);
+}
+
+#[test]
+fn carry_forward_unrun_moves_nothing_inside_a_body_whose_text_changed() {
+    // b's body hash is the same (a comment was added inside it), but its
+    // lines no longer sit at the same offsets: test_b is dropped, not moved.
+    let mut old = index(&[("mod.py", "H", &[(6, &["t.py::test_b"])])]);
+    old.files.get_mut("mod.py").unwrap().module = Some(key("M", "A", "B"));
+    let mut new = index(&[("mod.py", "H2", &[(2, &["t.py::test_a"])])]);
+    let mut nkey = key("M", "A", "B");
+    nkey.layout
+        .insert("b".to_string(), "LB-with-comment".to_string());
+    new.files.get_mut("mod.py").unwrap().module = Some(nkey);
+    carry_forward_unrun(&old, &mut new, &["t.py::test_a".to_string()].into());
+    assert_eq!(new.files["mod.py"].lines.len(), 1, "{:?}", new.files);
 }

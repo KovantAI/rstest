@@ -34,7 +34,8 @@ between 0.x releases and are listed here.
   while conftests loaded. A test file
   measured by coverage counts the same way, so editing one test re-runs that
   test, not the whole file, and an edit that only touches comments or blank
-  lines re-runs nothing. The first
+  lines re-runs nothing. A test skipped after such an edit stays skipped on
+  the next run too (its coverage moves with the functions it ran). The first
   `--incremental` run after upgrading runs everything once (the stored
   outcomes format changed). See
   [`--incremental`](docs/reference/cli.md#-incremental).
