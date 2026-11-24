@@ -296,6 +296,7 @@ type FileSpec<'a> = (&'a str, &'a [LineSpec<'a>]);
 fn cov(files: &[FileSpec]) -> CoverageIndex {
     use crate::select::CoverageFile;
     let mut idx = CoverageIndex {
+        shared_lines: Default::default(),
         schema: 1,
         files: HashMap::new(),
     };

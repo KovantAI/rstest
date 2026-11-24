@@ -321,6 +321,160 @@ def gate_incremental_dispatch_skip(g, args, binary):
     )
 
 
+def gate_incremental_closure_function_bodies(g, args, binary):
+    """The import-closure guard hashes a module at module level: a function
+    body that only runs inside a test's call phase is left out, so editing it
+    re-runs the tests that cover it, not every importer. Bodies that run at
+    import, or in a fixture's setup (shared by every test using the fixture,
+    though coverage credits only the first on each worker), still count."""
+    print("== incremental import closure: function bodies ==")
+    sp = g.tmp / "incrbody"
+    core = (
+        "def build():\n"
+        "    return {'a': 1}\n"
+        "\n"
+        "TABLE = build()\n"
+        "\n"
+        "def compute(x):\n"
+        "    return x + 1\n"
+    )
+    fix = "def via_fixture():\n    return 5\n"
+    g.write(
+        "incrbody/pkg/__init__.py",
+        "from pkg.core import TABLE, compute\nfrom pkg.fix import via_fixture\n",
+    )
+    g.write("incrbody/pkg/core.py", core)
+    g.write("incrbody/pkg/fix.py", fix)
+    g.write(
+        "incrbody/tests/test_compute.py",
+        "import pkg\ndef test_compute():\n    assert pkg.compute(1) == 2\n",
+    )
+    g.write(
+        "incrbody/tests/test_table.py",
+        "import pkg\ndef test_table():\n    assert pkg.TABLE == {'a': 1}\n",
+    )
+    # Six users of one module fixture on two workers: coverage credits its setup
+    # to at most two of them (the first on each worker).
+    users = "".join(f"def test_f{i}(five):\n    assert five == 5\n" for i in range(6))
+    g.write(
+        "incrbody/tests/test_fix.py",
+        "import pkg, pytest\n"
+        "@pytest.fixture(scope='module')\n"
+        "def five():\n"
+        "    return pkg.via_fixture()\n" + users,
+    )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("tests", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    r = run()
+    check(
+        "incremental bodies: warm run passes",
+        r.returncode == 0 and "8 passed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    r = run()
+    check(
+        "incremental bodies: unchanged suite is all cached",
+        r.returncode == 0 and "8 of 8 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # A body the module fixture calls: all six use what it returns.
+    g.write("incrbody/pkg/fix.py", fix.replace("return 5", "return 6"))
+    r = run()
+    check(
+        "incremental bodies: a body run in fixture setup reruns every test using it",
+        r.returncode == 1 and "6 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    # Revert with a different size, so a same-second rewrite can't reuse the
+    # stale .pyc; then settle (the revert is a change too).
+    g.write("incrbody/pkg/fix.py", fix.replace("return 5", "return 5  # back"))
+    r = run()
+
+    # A body only test_compute's call runs: the other seven stay cached, though
+    # every test imports pkg (whose __init__ imports core).
+    g.write("incrbody/pkg/core.py", core.replace("    return x + 1", "    y = x + 1\n    return y"))
+    r = run()
+    check(
+        "incremental bodies: a function-body edit reruns only the test covering it",
+        r.returncode == 0 and "7 of 8 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+    # A body called at import time feeds a module constant: every importer runs.
+    g.write("incrbody/pkg/core.py", core.replace("{'a': 1}", "{'a': 22}"))
+    r = run()
+    check(
+        "incremental bodies: a body run at import time reruns every importer",
+        r.returncode == 1
+        and "1 failed" in r.stdout
+        and "test_table" in r.stdout
+        and "unchanged" not in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
+def gate_incremental_closure_imported_before_coverage(g, args, binary):
+    """A package a conftest imports loads before the workers' coverage starts,
+    so its import-time lines are never measured, though fixture setups that
+    run its functions are. Its modules must keep the whole-file hash: a body
+    called at import time can't be told apart from one that isn't."""
+    print("== incremental import closure: imported before coverage ==")
+    sp = g.tmp / "incrpre"
+    core = (
+        "def build():\n"
+        "    return {'a': 1}\n"
+        "\n"
+        "TABLE = build()\n"
+        "\n"
+        "def compute(x):\n"
+        "    return x + 1\n"
+    )
+    g.write("incrpre/pkg/__init__.py", "from pkg.core import TABLE, compute\n")
+    g.write("incrpre/pkg/core.py", core)
+    g.write(
+        "incrpre/tests/conftest.py",
+        "import pkg\nimport pytest\n@pytest.fixture\ndef zero():\n    return pkg.compute(-1)\n",
+    )
+    g.write(
+        "incrpre/tests/test_uses_fixture.py",
+        "def test_zero(zero):\n    assert zero == 0\n",
+    )
+    # Reads TABLE but runs no line of core.py: only the closure guards it.
+    g.write(
+        "incrpre/tests/test_table.py",
+        "import pkg\ndef test_table():\n    assert pkg.TABLE == {'a': 1}\n",
+    )
+    env = {"PYTHONPATH": str(sp)}
+    cov = ["--cov=.", "--cov-context=test", "--cov-report="]
+
+    def run():
+        for stale in sp.glob(".coverage*"):
+            stale.unlink()
+        return g.run("tests", "-n", "2", *cov, "--incremental", cwd=sp, env_extra=env)
+
+    run()
+    r = run()
+    check(
+        "incremental pre-imported: unchanged suite is all cached",
+        r.returncode == 0 and "2 of 2 test(s) unchanged" in r.stderr,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+    g.write("incrpre/pkg/core.py", core.replace("{'a': 1}", "{'a': 22}"))
+    r = run()
+    check(
+        "incremental pre-imported: an import-time body edit reruns the importer",
+        r.returncode == 1 and "test_table" in r.stdout and "1 failed" in r.stdout,
+        f"rc={r.returncode} {r.stderr[-300:]} {r.stdout[-300:]}",
+    )
+
+
 def gate_incremental_import_time_and_data(g, args, binary):
     """Changes per-test coverage cannot see: import-time lines run under the
     empty coverage context (no test owns them), and a data file read by a test

@@ -596,7 +596,14 @@ pub(super) fn run_post_gates(
     // set, so they re-run next time. Best-effort. Any other --cov run only
     // carries the unrun tests' coverage forward.
     if incremental_active || own_prev_index.is_some() {
-        carry_forward_coverage(scope, post, &outcome.run, prev_index, fresh_index);
+        carry_forward_coverage(
+            scope,
+            &cfg.python,
+            post,
+            &outcome.run,
+            prev_index,
+            fresh_index,
+        );
     }
     if !replay {
         record_green_env(cfg, cli, post, &outcome.run, args, exitstatus, sink);
@@ -1183,6 +1190,7 @@ fn record_since_green(cli: &Cli, post: &PostRun, exitstatus: i32, sink: &mut Sin
 /// the index, and record the `--incremental` green set.
 fn carry_forward_coverage(
     scope: &std::path::Path,
+    python: &std::path::Path,
     post: &PostRun,
     run: &report::Run,
     prev_index: &select::CoverageIndex,
@@ -1217,6 +1225,7 @@ fn carry_forward_coverage(
             run.green_nodeids(),
             run.green_linenos(),
             &ran,
+            Some(python),
         );
     }
 }

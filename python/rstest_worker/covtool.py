@@ -165,7 +165,17 @@ def _index_base() -> str:
 def build_index(cov: Any) -> None:
     """Invert the combined per-test contexts into a line->test index:
     { "schema": 2, "files": { "<rel-path>": { "hash": "<sha256>",
-      "lines": { "<line>": ["<nodeid>", ...] } } } }.
+      "lines": { "<line>": ["<nodeid>", ...] } } },
+      "shared_lines": { "<rel-path>": [<line>, ...] } }.
+
+    `shared_lines` are the lines that ran outside every test's own call phase:
+    at import / collection (no context) or in some test's fixture setup or
+    teardown. A session or module fixture is set up once, under the first
+    test that needs it, yet every later test shares what it built; so the
+    `--incremental` import-closure hash keeps the function bodies holding
+    these lines (see `modhash`). Only files whose import coverage measured
+    are listed. Kept apart from `files` so a file listed only here does not
+    look covered to `--changed`.
 
     Keys are POSIX paths relative to the project root (`RSTEST_ROOTDIR`, the
     rootdir the cache belongs to; the cwd when unset), like the nodeids, so a
@@ -181,6 +191,7 @@ def build_index(cov: Any) -> None:
     # canonicalized paths; getcwd() may still carry the short form).
     base = os.path.realpath(_index_base())
     files: dict[str, dict[str, Any]] = {}
+    shared: dict[str, list[int]] = {}
     for path in data.measured_files():
         try:
             rel = os.path.relpath(os.path.realpath(path), base)
@@ -190,10 +201,21 @@ def build_index(cov: Any) -> None:
             continue
         rel = rel.replace(os.sep, "/")
         line_map: dict[str, list[str]] = {}
+        shared_here: list[int] = []
+        imported = False
         for line, ctxs in data.contexts_by_lineno(path).items():
             nodeids = sorted({_base_nodeid(c) for c in ctxs if c})
             if nodeids:
                 line_map[str(line)] = nodeids
+            if any(not c or not c.endswith("|run") for c in ctxs):
+                shared_here.append(line)
+            imported = imported or any(not c for c in ctxs)
+        # Only a file whose import coverage saw (some line ran under no test,
+        # at least its `def` lines) can be hashed at module level: one imported
+        # before coverage started (by a conftest, a plugin) may call a function
+        # at import time that nothing recorded, so it keeps the whole-file hash.
+        if imported:
+            shared[rel] = sorted(shared_here)
         if not line_map:
             continue
         # Stamp with the source hash. If the file vanished we can't vouch for
@@ -207,7 +229,7 @@ def build_index(cov: Any) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
     tmp = INDEX_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"schema": INDEX_SCHEMA, "files": files}, fh)  # schema 2: {hash, lines}
+        json.dump({"schema": INDEX_SCHEMA, "files": files, "shared_lines": shared}, fh)
     os.replace(tmp, INDEX_PATH)  # atomic swap so a reader never sees a partial file
 
 

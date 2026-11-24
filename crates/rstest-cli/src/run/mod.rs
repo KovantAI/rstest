@@ -1594,6 +1594,7 @@ mod tests {
             Default::default(),
             Default::default(),
             &Default::default(),
+            None,
         );
         let (cov, plain) = incremental_config(&scope, &scope, &sv(&[]));
         assert_eq!(plain.index_cov_args, Some(sv(&["--cov=pkg"])));

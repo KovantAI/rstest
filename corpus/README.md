@@ -63,6 +63,22 @@ Reproducibility measures:
   suite at 100% parity whose exit codes differ is `exit-diff`, not `ok`. Each
   runner's output is kept next to its snapshot (`pytest.log`, `rstest.log`).
 
+### `--incremental` hit rate (`incremental_hits.py`)
+
+How much of the suite `--incremental` re-runs after a one-function edit,
+against how much covers that function. Per probe it edits one function (a
+statement at the top of a source function, a comment there, or a statement in
+a test function), runs `--incremental`, and restores the file and the cache.
+`missed` counts tests that covered the edit but were skipped (false greens)
+and must stay 0. pytest-cov is installed into the suite venv for the run and
+removed after; the suite's own cache is not touched (`RSTEST_CACHE`).
+
+```sh
+python3 corpus/run.py --prepare-only --only click,attrs
+python3 corpus/incremental_hits.py --only click,attrs --probes 10 \
+    --out corpus/bench-results/<date>-incremental-hits.json
+```
+
 ### Speed ramp (`bench.py`)
 
 `run.py` measures a single `-n auto` wall per suite (parity is its job).
