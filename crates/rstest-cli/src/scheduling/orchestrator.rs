@@ -447,6 +447,78 @@ pub(crate) fn finalize_exit(
     exitstatus
 }
 
+/// How repeats of session-wide bookkeeping events are deduplicated.
+pub(crate) enum Dedup<'a> {
+    /// One session (`run::fold_run_event`): every event counts once.
+    Single,
+    /// Eager pool: every worker collects the whole suite, so config and
+    /// collection warnings and collect-skips repeat on each worker; count those
+    /// from gw0 only. Per-test warnings are disjoint across workers.
+    Eager { idx: usize },
+    /// Lazy pool: files are disjoint across workers, so collect and runtest
+    /// warnings are each seen once; only config-phase warnings repeat per
+    /// session (counted from gw0). A skipped directory (conftest
+    /// `importorskip`) is reported again for every file below it, on whichever
+    /// worker collects it: count each collector once, as directory collection
+    /// does.
+    Lazy {
+        idx: usize,
+        skipped: &'a mut HashSet<String>,
+    },
+}
+
+/// Fold an event that only records into the run and moves on, shared by the
+/// eager pool, the lazy pool and the single session. Callers route exactly
+/// these variants here; a new bookkeeping event is wired once, below, plus
+/// one pattern entry at each caller (which the exhaustive matches enforce).
+pub(crate) fn fold_bookkeeping(
+    event: proto::Event,
+    dedup: Dedup,
+    run: &mut Run,
+    fixtures: &mut Vec<proto::FixtureStat>,
+    warnings: &mut Vec<proto::WarningEntry>,
+) {
+    use proto::Event;
+    match event {
+        Event::DoctorFixtures { fixtures: fx } => fixtures.extend(fx),
+        Event::ScopeCosts { costs } => run.add_scope_costs(costs),
+        Event::FixtureLeaks { leaks } => run.add_fixture_leaks(leaks),
+        Event::JunitCase { nodeid, cases } => run.junit.record_case(nodeid, cases),
+        Event::JunitSuite {
+            name,
+            timestamp,
+            hostname,
+            properties,
+            extra,
+        } => run
+            .junit
+            .record_suite(name, timestamp, hostname, properties, extra),
+        // Every worker that collects the same path reports the same ids; the
+        // map dedups.
+        Event::LfRecollected { path, ids } => {
+            run.lf_recollected.insert(path, ids);
+        }
+        Event::Warnings { entries } => {
+            warnings.extend(entries.into_iter().filter(|e| match &dedup {
+                Dedup::Single => true,
+                Dedup::Eager { idx } => *idx == 0 || e.when == "runtest",
+                Dedup::Lazy { idx, .. } => *idx == 0 || e.when != "config",
+            }))
+        }
+        Event::CollectSkip { path } => {
+            let count = match dedup {
+                Dedup::Single => true,
+                Dedup::Eager { idx } => idx == 0,
+                Dedup::Lazy { skipped, .. } => skipped.insert(path),
+            };
+            if count {
+                run.collect_skips += 1;
+            }
+        }
+        other => unreachable!("not a bookkeeping event: {other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1033,59 @@ mod tests {
         );
         assert_eq!(fail_count.n, 1);
         assert!(!run.all_passed());
+    }
+
+    #[test]
+    fn fold_bookkeeping_dedups_repeats_per_mode() {
+        // Two workers each send one warning per phase and skip `pkg` twice;
+        // returns the kept warning phases and the collect-skip count.
+        fn fold(mode: &str) -> (String, u64) {
+            let (mut run, mut fixtures, mut warnings) = (Run::default(), Vec::new(), Vec::new());
+            let mut skipped = HashSet::new();
+            for idx in 0..2 {
+                let entries = ["config", "collect", "runtest"].map(|when| proto::WarningEntry {
+                    when: when.into(),
+                    category: "UserWarning".into(),
+                    message: String::new(),
+                    filename: "t.py".into(),
+                    lineno: 1,
+                    count: 1,
+                    location: String::new(),
+                    text: String::new(),
+                });
+                let events = [
+                    proto::Event::Warnings {
+                        entries: entries.into(),
+                    },
+                    proto::Event::CollectSkip { path: "pkg".into() },
+                    proto::Event::CollectSkip { path: "pkg".into() },
+                ];
+                for event in events {
+                    let dedup = match mode {
+                        "single" => Dedup::Single,
+                        "eager" => Dedup::Eager { idx },
+                        _ => Dedup::Lazy {
+                            idx,
+                            skipped: &mut skipped,
+                        },
+                    };
+                    fold_bookkeeping(event, dedup, &mut run, &mut fixtures, &mut warnings);
+                }
+            }
+            let whens: Vec<String> = warnings.into_iter().map(|w| w.when).collect();
+            (whens.join(","), run.collect_skips)
+        }
+        assert_eq!(
+            fold("single"),
+            ("config,collect,runtest,config,collect,runtest".into(), 4)
+        );
+        // Every eager worker collects everything: config/collect warnings and
+        // collect-skips count from gw0 only.
+        assert_eq!(fold("eager"), ("config,collect,runtest,runtest".into(), 2));
+        // Lazy files are disjoint: only config repeats; skips dedup by path.
+        assert_eq!(
+            fold("lazy"),
+            ("config,collect,runtest,collect,runtest".into(), 1)
+        );
     }
 }
