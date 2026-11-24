@@ -241,3 +241,48 @@ mod tests {
         let _ = std::fs::remove_file(script);
     }
 }
+
+/// `--dist each`: seed every verified-collected worker with the FULL suite (or
+/// a crash replacement's remainder, from `remnant`) and release it at once.
+/// No shared queue and no reruns, so each drains, then gets EndSession on its
+/// own. Seeds only once `ids_ready` (the designate's id list has arrived, or
+/// the designate died without one).
+pub(super) fn seed_each(
+    states: &mut [WorkerState],
+    remnant: &mut [Option<Vec<u64>>],
+    total_items: usize,
+    ids_ready: bool,
+    stopping: bool,
+) {
+    if ids_ready {
+        for (i, s) in states
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, s)| s.collected && !s.seeded && !s.dead)
+        {
+            s.seeded = true;
+            if stopping {
+                let _ = s.worker.send(&proto::Command::EndSession);
+                s.ended = true;
+                continue;
+            }
+            let indices: Vec<u64> = match remnant[i].take() {
+                Some(rem) => rem,
+                None => (0..total_items as u64).collect(),
+            };
+            // Fed in chunks, released once all are sent. A dying
+            // worker's crash event re-seeds the remnant.
+            seed_list(s, indices);
+        }
+    }
+    if stopping {
+        states.iter_mut().for_each(|s| feed(s, true));
+    }
+    for s in states
+        .iter_mut()
+        .filter(|s| s.seeded && !s.dead && !s.ended && s.outstanding.is_empty())
+    {
+        let _ = s.worker.send(&proto::Command::EndSession);
+        s.ended = true;
+    }
+}

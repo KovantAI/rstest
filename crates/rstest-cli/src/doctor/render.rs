@@ -105,9 +105,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                     t.wait, t.duration, t.nodeid
                 );
             }
-            if w.tests.len() > 8 {
-                let _ = writeln!(md, "\n... and {} more", w.tests.len() - 8);
-            }
+            md_more(&mut md, 8, w.tests.len());
             md.push('\n');
         }
     }
@@ -150,6 +148,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                     w.worker, w.busy_seconds, w.tests
                 );
             }
+            md_more(&mut md, 8, pe.workers_busy.len());
             md.push('\n');
         }
     }
@@ -225,6 +224,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                 t.duration, t.covered_lines, t.also_covered_by, t.nodeid
             );
         }
+        md_more(&mut md, cw.tests.len().min(8), cw.redundant_tests);
         md.push('\n');
     }
     if let Some(g) = &r.fixture_grouping {
@@ -270,6 +270,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                     o.nodeid
                 );
             }
+            md_more(&mut md, t.overrides.len(), t.override_count);
             md.push('\n');
         }
     }
@@ -288,6 +289,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
                 t.older_median, t.middle_median, t.newer_median, t.runs, t.nodeid
             );
         }
+        md_more(&mut md, d.tests.len(), d.drifting_tests);
         md.push('\n');
     }
     if let Some(n) = &r.network {
@@ -302,6 +304,7 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         for t in &n.tests {
             let _ = writeln!(md, "| `{}` | {} |", t.nodeid, t.destinations.join(", "));
         }
+        md_more(&mut md, n.tests.len(), n.tests_with_network);
         md.push('\n');
     }
     if !r.leaks.is_empty() {
@@ -310,8 +313,17 @@ pub fn render_markdown(r: &DoctorReport) -> String {
         for l in r.leaks.iter().take(10) {
             let _ = writeln!(md, "| {} | `{}` |", leak_delta(l), l.label());
         }
+        md_more(&mut md, 10, r.leaks.len());
     }
     md
+}
+
+/// After a markdown table cut at `shown` rows: count the `total - shown` left
+/// out, as the terminal report does.
+fn md_more(md: &mut String, shown: usize, total: usize) {
+    if total > shown {
+        md.push_str(&format!("\n... and {} more\n", total - shown));
+    }
 }
 
 pub fn write_markdown(path: &std::path::Path, report: &DoctorReport) -> anyhow::Result<()> {
@@ -736,6 +748,43 @@ mod tests {
         assert!(out.contains("(wall 9.0s, 1 worker)"), "{out}");
         assert!(out.contains("FIXTURE HOTSPOTS (setup time):"), "{out}");
         assert!(!out.contains("across all workers"));
+    }
+
+    #[test]
+    fn markdown_counts_what_it_leaves_out_like_the_terminal() {
+        // Every list longer than what is shown: markdown counts the rest, as
+        // the terminal does, so a job summary never hides that it was cut.
+        // Distinct overflow per section, so each count is checked on its own.
+        let mut r = report(12);
+        r.parallel_efficiency.as_mut().unwrap().workers_busy =
+            (0..11) // 8 shown
+                .map(|i| super::super::WorkerLoad {
+                    worker: format!("gw{i}"),
+                    busy_seconds: 1.0,
+                    tests: 1,
+                })
+                .collect();
+        r.coverage_waste.as_mut().unwrap().redundant_tests = 6; // 1 listed
+        r.timeouts.as_mut().unwrap().override_count = 8; // 1 listed
+        r.drift.as_mut().unwrap().drifting_tests = 10; // 1 listed
+        r.network.as_mut().unwrap().tests_with_network = 12; // 1 listed
+        r.leaks = (0..23) // 10 shown
+            .map(|i| super::super::Leak {
+                nodeid: format!("t.py::leak{i}"),
+                scope: None,
+                threads: 1,
+                fds: 0,
+            })
+            .collect();
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        let md = render_markdown(&r);
+        for more in [3, 5, 7, 9, 11, 13] {
+            let line = format!("... and {more} more");
+            assert!(out.contains(&line), "terminal lacks {line}:\n{out}");
+            assert!(md.contains(&line), "markdown lacks {line}:\n{md}");
+        }
     }
 
     #[test]
