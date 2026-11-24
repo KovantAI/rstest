@@ -24,7 +24,6 @@ mod dispatch;
 pub use dispatch::FixtureGroup;
 mod io;
 mod replay;
-mod reruns;
 mod state;
 
 pub(crate) use dispatch::chunk_size;
@@ -41,11 +40,12 @@ use crate::reporting::sink::Sink;
 use crate::scheduling::orchestrator::{self, Dedup};
 use crate::scheduling::proto::{self, Event};
 
+use crate::scheduling::orchestrator::PoolCtl;
+use crate::scheduling::reruns::Reruns;
 use dispatch::{build_dispatch, Dispatch};
 use io::{dispatch_to, feed, release_lookahead, seed_each, spawn_into, start_into};
 use replay::{seed_replay, ReplayState};
-use reruns::Reruns;
-use state::{PoolCtl, WorkerState};
+use state::WorkerState;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Dist {
@@ -543,7 +543,7 @@ pub fn run_pool(
                 // a failed attempt may be discarded and retried, and only
                 // the FINAL attempt reaches the user/output/exit code.
                 if let Some(i) = states[idx].running {
-                    if retry.budget(i) > 0 {
+                    if retry.budget(&i) > 0 {
                         states[idx].attempt_failed |= r.outcome == "failed";
                         states[idx].attempt.push(r);
                         continue;
@@ -1218,7 +1218,7 @@ pub fn run_pool(
 fn retry_crashed(
     crashed: Option<u64>,
     restartable: bool,
-    retry: &mut Reruns,
+    retry: &mut Reruns<u64>,
     ids_store: &Option<Vec<String>>,
     dispatch: &mut Option<Dispatch>,
 ) -> Option<u64> {
@@ -1227,8 +1227,8 @@ fn retry_crashed(
         // Same known-flaky gate as the ItemDone path: a crash of a
         // non-known-flaky, unmarked test is not retried when
         // --reruns-only-known-flaky is on.
-        let known_ok = retry.known_flaky_ok(ids_store, i);
-        let budget = retry.budget(i);
+        let known_ok = retry.known_flaky_ok(&i, nodeid_at(ids_store, i));
+        let budget = retry.budget(&i);
         let used = retry.used.entry(i).or_insert(0);
         if *used < budget && known_ok {
             *used += 1;
@@ -1279,7 +1279,7 @@ fn on_item_done(
     states: &mut [WorkerState],
     dispatch: &mut Option<Dispatch>,
     ctl: &mut PoolCtl,
-    retry: &mut Reruns,
+    retry: &mut Reruns<u64>,
     ids_store: &Option<Vec<String>>,
     run: &mut Run,
     prog: &mut Progress,
@@ -1296,7 +1296,7 @@ fn on_item_done(
     }
     // --dist each / replay: top up from the unsent backlog.
     feed(s, ctl.stopping);
-    let item_budget = retry.budget(index);
+    let item_budget = retry.budget(&index);
     if item_budget > 0 {
         // --only-rerun: failures must match a pattern to retry.
         let rerun_allowed = orchestrator::rerun_allowed(retry.only_rerun, &s.attempt);
@@ -1308,7 +1308,7 @@ fn on_item_done(
         // carries a ` [gwN]` suffix (added on receipt) and would
         // never match the un-suffixed history set. Same lookup the
         // crash path uses, keeping the two gates consistent.
-        let flaky_ok = retry.known_flaky_ok(ids_store, index);
+        let flaky_ok = retry.known_flaky_ok(&index, nodeid_at(ids_store, index));
         let used = retry.used.entry(index).or_insert(0);
         if s.attempt_failed && *used < item_budget && rerun_allowed && flaky_ok {
             // Failed attempt with budget left: discard its
