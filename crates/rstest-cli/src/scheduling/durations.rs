@@ -692,7 +692,7 @@ pub fn passing_calls(h: &History, nodeid: &str) -> Option<Vec<f64>> {
     let calls: Vec<f64> = h
         .series(nodeid)
         .iter()
-        .filter(|(_, e)| matches!(e.outcome_name(), "passed" | "flaky"))
+        .filter(|(_, e)| crate::reporting::history::is_pass(e.outcome_name()))
         .filter_map(|(_, e)| e.call.map(f64::from))
         .collect();
     (calls.len() >= HISTORY_MIN_RUNS).then_some(calls)

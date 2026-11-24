@@ -12,6 +12,7 @@ pub(crate) mod check;
 mod classify;
 mod try_cmd;
 pub(crate) mod xdist_removal;
+mod xdist_scan;
 
 pub use audit::{not_run_doc as audit_not_run_doc, run_audit};
 pub use bisect::{run_bisect, write_error_json as write_bisect_error_json};

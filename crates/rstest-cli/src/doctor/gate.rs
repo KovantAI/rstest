@@ -211,7 +211,7 @@ pub fn evaluate(report: &DoctorReport, conditions: &[GateCondition]) -> GateOutc
 
 #[cfg(test)]
 mod tests {
-    use super::super::testutil::report;
+    use super::super::tests::testutil::report;
     use super::*;
 
     #[test]
