@@ -137,6 +137,22 @@ pub(crate) struct ExplainReport {
     coverage: Option<Coverage>,
     /// Recent runs, if the per-test history has any.
     history: Option<HistorySummary>,
+    /// Waits left running across tests (see the doctor's absorbed waits):
+    /// `null` unless this test leaves one or carried one.
+    waits: Option<Waits>,
+}
+
+/// This test's side of an absorbed wait, from the run history and the replay
+/// journals of the same runs.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+struct Waits {
+    /// Set when this test leaves work running that the next test on its
+    /// worker waits out.
+    leaves: Option<crate::reporting::absorbed::AbsorbedWait>,
+    /// Waits this test carried: runs where it ran right after a test that
+    /// leaves one and was slower by it.
+    absorbs: Vec<crate::reporting::absorbed::Absorbed>,
 }
 
 fn is_neutral(outcome: &str) -> bool {
@@ -311,7 +327,8 @@ fn gather(nodeid: &str) -> ExplainReport {
     // 1-based like every other human-facing surface (e.g. CI annotations).
     let source_line = lines.get(nodeid).map(|l| l + 1);
     let coverage = load_coverage_index().and_then(|idx| footprint(&idx, nodeid));
-    let mut history = summarize(&crate::reporting::history::load().series(nodeid));
+    let recorded = crate::reporting::history::load();
+    let mut history = summarize(&recorded.series(nodeid));
     if let Some(h) = &mut history {
         if let (Some(last), Some(first)) = (&h.last_pass_commit, &h.first_fail_commit) {
             h.suspect_commits = suspects(last, first, crate::select::git_stdout);
@@ -322,6 +339,15 @@ fn gather(nodeid: &str) -> ExplainReport {
             .unwrap_or(crate::cli::AUTO_QUARANTINE);
         h.auto_quarantined_next_run = quarantines_next_run(h);
     }
+
+    let waits = {
+        let orders = crate::replay::recent_orders();
+        let culprits = crate::reporting::absorbed::absorbed_waits(&recorded, &orders);
+        let leaves = culprits.iter().find(|c| c.culprit == nodeid).cloned();
+        let absorbs =
+            crate::reporting::absorbed::absorbed_by(&recorded, &culprits, &orders, nodeid);
+        (leaves.is_some() || !absorbs.is_empty()).then_some(Waits { leaves, absorbs })
+    };
 
     let found = duration_seconds.is_some()
         || flakes.is_some()
@@ -345,6 +371,7 @@ fn gather(nodeid: &str) -> ExplainReport {
         flakes,
         coverage,
         history,
+        waits,
     }
 }
 
@@ -554,6 +581,29 @@ fn render(sink: &mut Sink, r: &ExplainReport) {
         None => sink.out_line(&format!("  history    {}", pal.dim("no recorded runs"))),
     }
 
+    // Waits left running across tests.
+    if let Some(w) = &r.waits {
+        let mut label = "  waits      ";
+        if let Some(l) = &w.leaves {
+            sink.out_line(&format!(
+                "{label}{} ~{:.2}s for the next test on its worker ({} of {} runs); absorbed by {}",
+                pal.yellow("leaves"),
+                l.lump_seconds,
+                l.runs,
+                l.of_runs,
+                l.absorbed_by.join(", ")
+            ));
+            label = "             ";
+        }
+        for a in &w.absorbs {
+            sink.out_line(&format!(
+                "{label}absorbed ~{:.2}s left by {} ({} run(s)), not its own time",
+                a.lump_seconds, a.culprit, a.runs
+            ));
+            label = "             ";
+        }
+    }
+
     // Coverage footprint.
     match &r.coverage {
         Some(c) => {
@@ -701,6 +751,47 @@ mod tests {
         assert!(footprint(&idx, "t/x.py::test_a").is_none());
     }
 
+    #[test]
+    fn waits_render_both_sides() {
+        use crate::reporting::absorbed::{Absorbed, AbsorbedWait};
+        let mut r = report("t.py::timeout");
+        r.waits = Some(Waits {
+            leaves: Some(AbsorbedWait {
+                culprit: "t.py::timeout".into(),
+                lump_seconds: 9.98,
+                runs: 3,
+                of_runs: 3,
+                absorbed_by: vec!["t.py::a".into(), "t.py::b".into()],
+            }),
+            absorbs: vec![Absorbed {
+                culprit: "t.py::setup_server".into(),
+                lump_seconds: 1.5,
+                runs: 2,
+            }],
+        });
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &r);
+        let out = cap.out();
+        assert!(
+            out.contains(
+                "  waits      leaves ~9.98s for the next test on its worker (3 of 3 runs); \
+                 absorbed by t.py::a, t.py::b\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "             absorbed ~1.50s left by t.py::setup_server (2 run(s)), \
+                 not its own time\n"
+            ),
+            "{out}"
+        );
+        // Nothing to say: no line.
+        let (mut sink, cap) = Sink::captured();
+        render(&mut sink, &report("t.py::x"));
+        assert!(!cap.out().contains("waits"), "{}", cap.out());
+    }
+
     fn report(nodeid: &str) -> ExplainReport {
         ExplainReport {
             meta: Meta {
@@ -717,6 +808,7 @@ mod tests {
             flakes: None,
             coverage: None,
             history: None,
+            waits: None,
         }
     }
 
@@ -757,6 +849,7 @@ mod tests {
                 auto_quarantine_at: 3,
                 auto_quarantined_next_run: false,
             }),
+            waits: None,
             ..report("tests/test_x.py::TestC::test_m[a::b]")
         }
     }

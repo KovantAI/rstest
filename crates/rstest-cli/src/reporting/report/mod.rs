@@ -101,6 +101,12 @@ pub struct TestEntry {
     /// (the gate keeps firing until the test is back under the threshold).
     #[serde(skip)]
     pub duration_regressed: bool,
+    /// Set when the test ran right after a known absorbed-wait culprit on its
+    /// worker and its call carried that wait (see
+    /// [`crate::reporting::absorbed`]): the culprit, and the test's fastest
+    /// recorded passing call, which is learned instead of this run's time.
+    #[serde(skip)]
+    pub absorbed: Option<(String, f64)>,
     /// Source line of the test (0-based, from pytest's report.location),
     /// for editor mapping. Absent when pytest reports no location.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -802,12 +808,29 @@ impl Run {
     /// not the test's cost) and tests `--durations-regress` flagged (adopting
     /// the regressed time would silence the gate on the next run). Their
     /// previous cached timing stays.
+    /// A test that absorbed a wait left by the test before it teaches its
+    /// fastest recorded time instead (the wait was not its own).
     pub fn learned_durations(&self) -> impl Iterator<Item = (&String, f64)> {
-        self.durations().filter(|(id, _)| {
-            self.tests
-                .get(*id)
-                .is_some_and(|e| !e.any_phase_failed() && !e.duration_regressed)
+        self.durations().filter_map(|(id, d)| {
+            let e = self.tests.get(id)?;
+            (!e.any_phase_failed() && !e.duration_regressed)
+                .then(|| (id, e.absorbed.as_ref().map_or(d, |(_, fast)| *fast)))
         })
+    }
+
+    /// Flag a test that carried a wait `culprit` left behind; `fast` is the
+    /// time to learn for it (see [`TestEntry::absorbed`]).
+    pub fn mark_absorbed(&mut self, nodeid: &str, culprit: &str, fast: f64) {
+        if let Some(e) = self.tests.get_mut(nodeid) {
+            e.absorbed = Some((culprit.to_string(), fast));
+        }
+    }
+
+    /// Tests that carried a wait the test before them left: (test, culprit).
+    pub fn absorbed(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.tests
+            .iter()
+            .filter_map(|(id, e)| e.absorbed.as_ref().map(|(c, _)| (id, c)))
     }
 
     /// Flag a test `--durations-regress` reported (see

@@ -5,6 +5,7 @@
 //! (`flakes`), CI-platform annotations (`ci`: GitHub/Azure/Buildkite), and the
 //! self-contained HTML report (`html`).
 
+pub mod absorbed;
 pub mod ci;
 pub mod color;
 pub mod flakes;

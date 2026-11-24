@@ -104,6 +104,11 @@ pub struct DoctorReport {
     /// Tests whose typical call time crept up across their recorded runs, in
     /// steps too small for `--durations-regress`. `null` unless one did.
     drift: Option<Drift>,
+    /// Tests that leave a wait behind for whichever test runs next on their
+    /// worker (the follower's call time carries the lump), from the run
+    /// history paired with the replay journals. Empty unless one recurs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    absorbed_waits: Vec<crate::reporting::absorbed::AbsorbedWait>,
     /// Tests that opened outbound network connections (outside loopback and
     /// `[tool.rstest] network-allow`). `null` when none did.
     network: Option<NetworkAccess>,
@@ -443,6 +448,21 @@ impl DoctorReport {
         self
     }
 
+    /// Add the `culprits` in this run: tests whose follower absorbs a wait they
+    /// leave ([`crate::reporting::absorbed`]).
+    pub fn with_absorbed(
+        mut self,
+        run: &Run,
+        culprits: &[crate::reporting::absorbed::AbsorbedWait],
+    ) -> Self {
+        self.absorbed_waits = culprits
+            .iter()
+            .filter(|w| run.tests().contains_key(&w.culprit))
+            .cloned()
+            .collect();
+        self
+    }
+
     /// Add what the `--fork-pool=app` template imported.
     pub fn with_warm(mut self, warm: Option<crate::scheduling::warm::Stats>) -> Self {
         self.warm = warm;
@@ -674,6 +694,7 @@ pub fn analyze(
         coverage_waste,
         timeouts: None,
         drift: None,
+        absorbed_waits: Vec::new(),
         network: network_access(run),
         leaks,
     }

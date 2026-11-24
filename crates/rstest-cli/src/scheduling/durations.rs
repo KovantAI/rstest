@@ -729,8 +729,11 @@ pub fn regressions(
     history: &History,
     ratio: f64,
 ) -> Vec<Regression> {
+    let absorbed: std::collections::HashSet<&String> = run.absorbed().map(|(id, _)| id).collect();
     let mut rows: Vec<Regression> = run
         .durations()
+        // A wait the test before it left behind is not this test's slowdown.
+        .filter(|(id, _)| !absorbed.contains(id))
         .filter_map(|(id, new)| {
             let last = baseline.get(id).copied();
             let (old, median_runs, ceiling) = match history_baseline(history, id) {
@@ -1350,6 +1353,21 @@ mod tests {
         // ...but only the passing, non-regressed one is learned.
         let learned: Vec<(&String, f64)> = run.learned_durations().collect();
         assert_eq!(learned, vec![(&"t/a.py::ok".to_string(), 0.3)]);
+    }
+
+    #[test]
+    fn an_absorbed_wait_is_neither_learned_nor_judged() {
+        let mut run = Run::default();
+        run.record(None, call_report("t/a.py::next", "passed", 10.0));
+        let base = HashMap::from([("t/a.py::next".to_string(), 0.5)]);
+        // A 20x slowdown, but it was a wait `timeout` left behind.
+        assert_eq!(regressions(&run, &base, &History::default(), 2.0).len(), 1);
+        run.mark_absorbed("t/a.py::next", "t/a.py::timeout", 0.5);
+        assert_eq!(regressions(&run, &base, &History::default(), 2.0), []);
+        let learned: Vec<(&String, f64)> = run.learned_durations().collect();
+        assert_eq!(learned, vec![(&"t/a.py::next".to_string(), 0.5)]);
+        // The report keeps what happened.
+        assert_eq!(run.durations().next().map(|(_, d)| d), Some(10.0));
     }
 
     #[test]
